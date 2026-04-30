@@ -671,12 +671,32 @@ function assertUniqueToolNames(tools: ToolDefinition[]): ToolDefinition[] {
 	return tools;
 }
 
+// Skill-side hooks: handlers a skill's tools.ts can export to subscribe to
+// voice-session events. Collected by loadSkillManifestTools() alongside tools.
+// Each handler is invoked from voice-agent.ts when the corresponding bodhi
+// event fires. Exceptions in any handler are caught and logged — one bad
+// skill must not break the voice session.
+//
+// onInterimTranscript(partial: string): void
+//   Fires for each interim STT result during the user's turn. Use for
+//   keyword-trigger features (e.g., deictic capture: detect "this/that" in
+//   the partial and snapshot UI state at that moment).
+//
+// onTurnComplete(transcript: { role: 'user' | 'assistant', text: string }[]): void
+//   Fires after a turn ends. Use for context injection or per-turn cleanup.
+type InterimTranscriptHandler = (partial: string) => void | Promise<void>;
+type TurnCompleteHandler = (transcript: Array<{ role: 'user' | 'assistant'; text: string }>) => void | Promise<void>;
+const _interimTranscriptHandlers: Array<{ skill: string; fn: InterimTranscriptHandler }> = [];
+const _turnCompleteHandlers: Array<{ skill: string; fn: TurnCompleteHandler }> = [];
+
 // Load tools from any skill that has a `manifest.json` with "enabled": true.
 // Manifest shape:
 //   { "name": "skill-name", "enabled": true, "access_tier": "owner",
 //     "tools": "./tools.ts", "config": { "ENV_VAR": "value" } }
 // - "enabled": false (or missing) → skill skipped
 // - "tools" path → dynamic-imported, expects `export const tools: ToolDefinition[]`
+// - "tools" module may also export `onInterimTranscript` / `onTurnComplete`
+//   handlers; collected into _interimTranscriptHandlers / _turnCompleteHandlers.
 // - "config" entries → surfaced to process.env (only set if not already defined)
 // Originally added 2026-04-20, accidentally stripped by PR #505 (dup-name guard
 // commit). Restored 2026-04-25 after the iclr-highlight skill went silent on
@@ -728,6 +748,15 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 					out.push(...mod.tools);
 					console.log(`[skill-loader] loaded ${mod.tools.length} tool(s) from ${manifest.name || dirName} (${skillsDir})`);
 				}
+				const skillName = manifest.name || dirName;
+				if (typeof mod.onInterimTranscript === 'function') {
+					_interimTranscriptHandlers.push({ skill: skillName, fn: mod.onInterimTranscript });
+					console.log(`[skill-loader] registered onInterimTranscript handler from ${skillName}`);
+				}
+				if (typeof mod.onTurnComplete === 'function') {
+					_turnCompleteHandlers.push({ skill: skillName, fn: mod.onTurnComplete });
+					console.log(`[skill-loader] registered onTurnComplete handler from ${skillName}`);
+				}
 			} catch (err) {
 				console.warn(`[skill-loader] failed to import ${dirName}/${manifest.tools} from ${skillsDir}:`, err instanceof Error ? err.message : err);
 			}
@@ -736,6 +765,33 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 	return out;
 }
 const personalTools = await loadSkillManifestTools();
+
+/**
+ * Dispatch an interim-transcript event to all registered skill handlers.
+ * Each handler runs independently; exceptions are caught + logged so one
+ * bad skill cannot break the voice session.
+ */
+export async function dispatchInterimTranscript(partial: string): Promise<void> {
+	for (const { skill, fn } of _interimTranscriptHandlers) {
+		try { await fn(partial); }
+		catch (err) {
+			console.warn(`[skill-hook] ${skill}.onInterimTranscript threw:`, err instanceof Error ? err.message : err);
+		}
+	}
+}
+
+/**
+ * Dispatch a turn-complete event to all registered skill handlers.
+ * Use for per-turn buffer flushing, context injection, etc.
+ */
+export async function dispatchTurnComplete(transcript: Array<{ role: 'user' | 'assistant'; text: string }>): Promise<void> {
+	for (const { skill, fn } of _turnCompleteHandlers) {
+		try { await fn(transcript); }
+		catch (err) {
+			console.warn(`[skill-hook] ${skill}.onTurnComplete threw:`, err instanceof Error ? err.message : err);
+		}
+	}
+}
 
 export const inlineTools = assertUniqueToolNames([
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
