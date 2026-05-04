@@ -83,6 +83,13 @@ def now_iso() -> str:
 
 
 def emit(source: str, kind: str, data: dict) -> None:
+    """Atomic append to the JSONL via os.write + O_APPEND.
+
+    Both daemons (learn-collector + learn-log-tail) share this file. A
+    single os.write call is atomic up to PIPE_BUF (512 on macOS, 4096 on
+    Linux), so concurrent appends don't interleave for events under that
+    size. Per cold review on PR #590.
+    """
     STATE_DIR.mkdir(exist_ok=True)
     event = {
         "ts": now_iso(),
@@ -91,8 +98,12 @@ def emit(source: str, kind: str, data: dict) -> None:
         "kind": kind,
         "data": data,
     }
-    with JSONL_PATH.open("a") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+    fd = os.open(str(JSONL_PATH), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
 
 
 def load_cursor() -> dict:
