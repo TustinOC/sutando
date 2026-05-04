@@ -59,10 +59,14 @@ EXCERPT_MAX = 250
 # Default filter set. Each entry: (log_filename, kind_label, regex).
 # A line emits an event tagged with the FIRST matching kind. Lines that
 # match no filter are silently dropped (not the same as appended).
+#
+# `replied` uses \b instead of ^\s* so a future log-format change that
+# adds timestamp/level prefixes (e.g. `15:30:00Z [INFO] Replied: ...`)
+# still matches without a regex update. Per cold review on PR #590.
 DEFAULT_FILTERS = [
     # discord-bridge: routing + outgoing reply confirmations
     ("discord-bridge.log", "skip",    r"\[skip\]"),
-    ("discord-bridge.log", "replied", r"^\s*Replied:"),
+    ("discord-bridge.log", "replied", r"\bReplied:"),
     ("discord-bridge.log", "error",   r"\b(ERROR|Exception|Traceback|TypeError)\b"),
     # voice-agent: transport health + tool errors
     ("voice-agent.log",    "transport", r"transport (1006|1011|1007|connected|closed)"),
@@ -73,7 +77,7 @@ DEFAULT_FILTERS = [
     ("conversation-server.log", "error",      r"\b(ERROR|Exception|Traceback)\b"),
     # telegram-bridge: same shape as discord
     ("telegram-bridge.log", "skip",    r"\[skip\]"),
-    ("telegram-bridge.log", "replied", r"^\s*Replied:"),
+    ("telegram-bridge.log", "replied", r"\bReplied:"),
     ("telegram-bridge.log", "error",   r"\b(ERROR|Exception|Traceback)\b"),
 ]
 
@@ -107,6 +111,17 @@ def now_iso() -> str:
 
 
 def emit(source: str, kind: str, data: dict) -> None:
+    """Atomic append to the JSONL via os.write + O_APPEND.
+
+    Both daemons (learn-collector + learn-log-tail) share this file. A
+    single os.write call is atomic up to PIPE_BUF (512 on macOS, 4096 on
+    Linux), so concurrent appends don't interleave for events under that
+    size. Most events stay well under 512 bytes; a worst-case log-line
+    excerpt with multi-byte chars + json overhead can push past, in which
+    case interleaving is theoretically possible. Acceptable risk for
+    Phase 2; per-daemon JSONL is the upgrade path if interleaving shows
+    up in practice. Per cold review on PR #590.
+    """
     STATE_DIR.mkdir(exist_ok=True)
     event = {
         "ts": now_iso(),
@@ -115,8 +130,12 @@ def emit(source: str, kind: str, data: dict) -> None:
         "kind": kind,
         "data": data,
     }
-    with JSONL_PATH.open("a") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+    fd = os.open(str(JSONL_PATH), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
 
 
 def load_cursor() -> dict:
@@ -189,8 +208,16 @@ def tail_log(log_path: Path, kind_filters: list, cursor: dict) -> int:
     with log_path.open("rb") as f:
         f.seek(last_offset)
         chunk = f.read()
-        new_offset = last_offset + len(chunk)
-    text = chunk.decode("utf-8", errors="replace")
+    # Only consume up to the LAST newline. A trailing partial line (writer
+    # mid-flush) gets left for the next iteration so we don't emit a
+    # truncated excerpt and skip the rest. Per cold review on PR #590.
+    last_nl = chunk.rfind(b"\n")
+    if last_nl == -1:
+        # Chunk has no complete line yet; wait for next poll.
+        return 0
+    consumable = chunk[: last_nl + 1]
+    new_offset = last_offset + len(consumable)
+    text = consumable.decode("utf-8", errors="replace")
     pos = last_offset
     for line in text.splitlines(keepends=True):
         line_offset = pos
