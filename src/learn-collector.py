@@ -5,14 +5,31 @@ Layer 1 of the loop-redesign learning system (per
 notes/loop-redesign-goal-iteration-2026-05-03.md).
 
 Watches:
-- tasks/        for new task files                  -> kind="incoming"
-- results/      for new result files                -> kind="produced"
-- tasks/archive/ for task->archive transitions      -> kind="archived"
+- tasks/                          new task files                   -> kind="incoming"
+- tasks/archive/                  task -> archive transitions      -> kind="archived"
+- results/archive/<YYYY-MM>/      new result files (durable home)  -> kind="produced"
 
-One file per instance, append-only. Sync-safe under rsync-mtime-wins
-because each instance writes only to its own learning-<instance>.jsonl.
+Schema (pointer-based — derivable fields read from the file when needed):
+  {"ts","instance","source","kind","data":{"task_id","path"}}
 
-Run: python3 src/learn-collector.py
+`results/` itself is intentionally NOT watched — the discord-bridge moves
+files to `results/archive/<YYYY-MM>/` faster than a 5s poll catches, so
+the durable archive is the reliable signal.
+
+Other event kinds emitted by the collector itself:
+  source="collector", kind in {"started","heartbeat","stopped","loop_error"}
+
+State files (gitignored, sync via memory-sync):
+  state/learning-<instance>.jsonl  — append-only event log
+  state/learning-<instance>.cursor — per-directory mtime cursor for restart safety
+
+Env vars:
+  SUTANDO_ROOT                       override repo root (else __file__/..)
+  LEARN_COLLECTOR_INTERVAL_S         poll cadence (default 5)
+  LEARN_COLLECTOR_HEARTBEAT_S        heartbeat cadence (default 60)
+
+Run:
+  python3 src/learn-collector.py
 """
 
 import json
@@ -23,13 +40,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT_ENV = os.environ.get("SUTANDO_ROOT")
+ROOT = Path(ROOT_ENV).resolve() if ROOT_ENV else Path(__file__).resolve().parents[1]
+
 STATE_DIR = ROOT / "state"
 TASKS_DIR = ROOT / "tasks"
-RESULTS_DIR = ROOT / "results"
 ARCHIVE_DIR = TASKS_DIR / "archive"
+RESULTS_ARCHIVE_DIR = ROOT / "results" / "archive"
 
 POLL_INTERVAL_S = int(os.environ.get("LEARN_COLLECTOR_INTERVAL_S", "5"))
+HEARTBEAT_S = int(os.environ.get("LEARN_COLLECTOR_HEARTBEAT_S", "60"))
 
 
 def resolve_instance() -> str:
@@ -52,6 +72,7 @@ def resolve_instance() -> str:
 
 INSTANCE = resolve_instance()
 JSONL_PATH = STATE_DIR / f"learning-{INSTANCE}.jsonl"
+CURSOR_PATH = STATE_DIR / f"learning-{INSTANCE}.cursor"
 
 
 def now_iso() -> str:
@@ -71,72 +92,88 @@ def emit(source: str, kind: str, data: dict) -> None:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
-def parse_task_meta(path: Path) -> dict:
-    meta: dict = {"task_id": path.stem}
+def load_cursor() -> dict:
+    if not CURSOR_PATH.exists():
+        return {}
     try:
-        text = path.read_text(errors="replace")
-        meta["size_bytes"] = len(text)
-        for line in text.splitlines()[:12]:
-            if line.startswith("source:"):
-                meta["channel_source"] = line.split(":", 1)[1].strip()
-            elif line.startswith("user_id:"):
-                meta["user_id"] = line.split(":", 1)[1].strip()
-            elif line.startswith("channel_id:"):
-                meta["channel_id"] = line.split(":", 1)[1].strip()
-            elif line.startswith("access_tier:"):
-                meta["access_tier"] = line.split(":", 1)[1].strip()
-    except Exception as e:
-        meta["parse_error"] = str(e)
-    return meta
+        return json.loads(CURSOR_PATH.read_text())
+    except Exception:
+        return {}
 
 
-def bootstrap_seen(directory: Path, glob: str) -> set:
+def save_cursor(cursor: dict) -> None:
+    STATE_DIR.mkdir(exist_ok=True)
+    tmp = CURSOR_PATH.with_suffix(".cursor.tmp")
+    tmp.write_text(json.dumps(cursor))
+    tmp.replace(CURSOR_PATH)
+
+
+def rel_path(p: Path) -> str:
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def scan_dir(directory: Path, cursor_key: str, cursor: dict, source: str, kind: str, recursive: bool) -> int:
+    """Emit events for files in `directory` whose mtime exceeds the cursor.
+
+    Updates `cursor[cursor_key]` to the max mtime seen. Returns count emitted.
+    """
     if not directory.exists():
-        return set()
-    return {p.name for p in directory.glob(glob)}
+        return 0
+    last_mtime = cursor.get(cursor_key, 0.0)
+    new_max = last_mtime
+    iterator = directory.rglob("task-*.txt") if recursive else directory.glob("task-*.txt")
+    count = 0
+    for p in iterator:
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if mtime <= last_mtime:
+            continue
+        emit(source, kind, {"task_id": p.stem, "path": rel_path(p)})
+        count += 1
+        if mtime > new_max:
+            new_max = mtime
+    if new_max > last_mtime:
+        cursor[cursor_key] = new_max
+    return count
 
 
 def main() -> int:
-    seen_tasks = bootstrap_seen(TASKS_DIR, "task-*.txt")
-    seen_results = bootstrap_seen(RESULTS_DIR, "task-*.txt")
-    seen_archived = bootstrap_seen(ARCHIVE_DIR, "task-*.txt")
+    cursor = load_cursor()
+    is_first_run = not cursor
+    if is_first_run:
+        bootstrap_now = time.time()
+        cursor = {
+            "tasks": bootstrap_now,
+            "tasks_archive": bootstrap_now,
+            "results_archive": bootstrap_now,
+        }
+        save_cursor(cursor)
     emit(
         "collector",
         "started",
         {
             "interval_s": POLL_INTERVAL_S,
-            "jsonl": str(JSONL_PATH),
-            "bootstrap_counts": {
-                "tasks": len(seen_tasks),
-                "results": len(seen_results),
-                "archived": len(seen_archived),
-            },
+            "heartbeat_s": HEARTBEAT_S,
+            "jsonl": rel_path(JSONL_PATH),
+            "cursor_loaded": not is_first_run,
         },
     )
+    last_heartbeat = time.time()
     while True:
         try:
-            for p in TASKS_DIR.glob("task-*.txt"):
-                if p.name in seen_tasks:
-                    continue
-                seen_tasks.add(p.name)
-                emit("tasks", "incoming", parse_task_meta(p))
-
-            for p in RESULTS_DIR.glob("task-*.txt"):
-                if p.name in seen_results:
-                    continue
-                seen_results.add(p.name)
-                try:
-                    size = p.stat().st_size
-                except OSError:
-                    size = -1
-                emit("results", "produced", {"task_id": p.stem, "size_bytes": size})
-
-            if ARCHIVE_DIR.exists():
-                for p in ARCHIVE_DIR.glob("task-*.txt"):
-                    if p.name in seen_archived:
-                        continue
-                    seen_archived.add(p.name)
-                    emit("tasks", "archived", {"task_id": p.stem})
+            scan_dir(TASKS_DIR, "tasks", cursor, "tasks", "incoming", recursive=False)
+            scan_dir(ARCHIVE_DIR, "tasks_archive", cursor, "tasks", "archived", recursive=False)
+            scan_dir(RESULTS_ARCHIVE_DIR, "results_archive", cursor, "results", "produced", recursive=True)
+            save_cursor(cursor)
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_S:
+                emit("collector", "heartbeat", {})
+                last_heartbeat = now
         except Exception as e:
             emit("collector", "loop_error", {"error": repr(e)})
         time.sleep(POLL_INTERVAL_S)
