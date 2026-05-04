@@ -20,8 +20,10 @@ Other event kinds emitted by the collector itself:
   source="collector", kind in {"started","heartbeat","stopped","loop_error"}
 
 State files (gitignored, sync via memory-sync):
-  state/learning-<instance>.jsonl  — append-only event log
-  state/learning-<instance>.cursor — per-directory mtime cursor for restart safety
+  state/learning-<instance>.jsonl     — append-only event log
+  state/learning-<instance>.cursor    — per-directory ctime/mtime cursor for restart
+  state/learning-<instance>.heartbeat — single ISO timestamp of last poll (separate
+                                        from the jsonl so the event log isn't drowned)
 
 Env vars:
   SUTANDO_ROOT                       override repo root (else __file__/..)
@@ -73,6 +75,7 @@ def resolve_instance() -> str:
 INSTANCE = resolve_instance()
 JSONL_PATH = STATE_DIR / f"learning-{INSTANCE}.jsonl"
 CURSOR_PATH = STATE_DIR / f"learning-{INSTANCE}.cursor"
+HEARTBEAT_PATH = STATE_DIR / f"learning-{INSTANCE}.heartbeat"
 
 
 def now_iso() -> str:
@@ -116,30 +119,40 @@ def rel_path(p: Path) -> str:
 
 
 def scan_dir(directory: Path, cursor_key: str, cursor: dict, source: str, kind: str, recursive: bool) -> int:
-    """Emit events for files in `directory` whose mtime exceeds the cursor.
+    """Emit events for files whose freshness time exceeds the cursor.
 
-    Updates `cursor[cursor_key]` to the max mtime seen. Returns count emitted.
+    "Freshness" is `max(st_mtime, st_ctime)`. ctime updates on rename, which
+    catches files moved into archive/ via `mv` (mtime alone misses these
+    because mv preserves mtime).
+
+    Updates `cursor[cursor_key]` to the max freshness seen. Returns count emitted.
     """
     if not directory.exists():
         return 0
-    last_mtime = cursor.get(cursor_key, 0.0)
-    new_max = last_mtime
+    last_seen = cursor.get(cursor_key, 0.0)
+    new_max = last_seen
     iterator = directory.rglob("task-*.txt") if recursive else directory.glob("task-*.txt")
     count = 0
     for p in iterator:
         try:
-            mtime = p.stat().st_mtime
+            st = p.stat()
+            freshness = max(st.st_mtime, st.st_ctime)
         except OSError:
             continue
-        if mtime <= last_mtime:
+        if freshness <= last_seen:
             continue
         emit(source, kind, {"task_id": p.stem, "path": rel_path(p)})
         count += 1
-        if mtime > new_max:
-            new_max = mtime
-    if new_max > last_mtime:
+        if freshness > new_max:
+            new_max = freshness
+    if new_max > last_seen:
         cursor[cursor_key] = new_max
     return count
+
+
+def write_heartbeat() -> None:
+    STATE_DIR.mkdir(exist_ok=True)
+    HEARTBEAT_PATH.write_text(now_iso() + "\n")
 
 
 def main() -> int:
@@ -172,7 +185,9 @@ def main() -> int:
             save_cursor(cursor)
             now = time.time()
             if now - last_heartbeat >= HEARTBEAT_S:
-                emit("collector", "heartbeat", {})
+                # Heartbeat goes to its own single-line file so the event log
+                # stays uncluttered. Liveness probes stat the heartbeat file.
+                write_heartbeat()
                 last_heartbeat = now
         except Exception as e:
             emit("collector", "loop_error", {"error": repr(e)})
