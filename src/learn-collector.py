@@ -180,7 +180,10 @@ def main() -> int:
     while True:
         try:
             scan_dir(TASKS_DIR, "tasks", cursor, "tasks", "incoming", recursive=False)
-            scan_dir(ARCHIVE_DIR, "tasks_archive", cursor, "tasks", "archived", recursive=False)
+            # recursive=True: the bridge archives to tasks/archive/<YYYY-MM>/
+            # (same pattern as results/archive/). Top-level-only would miss
+            # every bridge-driven archive move.
+            scan_dir(ARCHIVE_DIR, "tasks_archive", cursor, "tasks", "archived", recursive=True)
             scan_dir(RESULTS_ARCHIVE_DIR, "results_archive", cursor, "results", "produced", recursive=True)
             save_cursor(cursor)
             now = time.time()
