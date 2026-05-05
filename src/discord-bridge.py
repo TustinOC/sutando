@@ -875,10 +875,37 @@ def save_pending_replies():
         pass
 
 def load_pending_replies_from_disk():
-    """Load pending_replies from disk on startup (channel IDs only — resolved lazily)."""
+    """Load pending_replies from disk on startup (channel IDs only — resolved lazily).
+
+    Ages out entries older than 7 days. Without this cap, entries leak
+    forever for tasks the agent never wrote a result file for (silent
+    dedup / crash / ignored as noise). Caught 2026-05-05 with 375 entries
+    accumulated since 2026-04-12 (124 of them >7d old).
+    """
     try:
-        if PENDING_REPLIES_FILE.exists():
-            return json.loads(PENDING_REPLIES_FILE.read_text())
+        if not PENDING_REPLIES_FILE.exists():
+            return {}
+        data = json.loads(PENDING_REPLIES_FILE.read_text())
+        now_ms = int(time.time() * 1000)
+        max_age_ms = 7 * 86400 * 1000
+        aged_out = []
+        for task_id in list(data.keys()):
+            try:
+                # task_id format: "task-<epoch_ms>"
+                ts_ms = int(task_id.split("-")[1])
+                if now_ms - ts_ms > max_age_ms:
+                    aged_out.append(task_id)
+                    del data[task_id]
+            except (ValueError, IndexError):
+                # Malformed task_id — leave it; cap protects the simple case
+                pass
+        if aged_out:
+            print(f"  [recovery] aged out {len(aged_out)} pending_replies > 7d", flush=True)
+            try:
+                PENDING_REPLIES_FILE.write_text(json.dumps(data))
+            except Exception:
+                pass
+        return data
     except Exception:
         pass
     return {}
