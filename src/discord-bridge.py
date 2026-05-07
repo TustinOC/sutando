@@ -386,6 +386,11 @@ pending_replies = {}
 
 intents = discord.Intents.default()
 intents.message_content = True
+# Server Members Intent — required for on_member_join to fire. Privileged
+# intent: must ALSO be toggled in the Discord Developer Portal (Bot tab →
+# Privileged Gateway Intents → "Server Members Intent"). Without the portal
+# toggle, the gateway connection fails at startup with intents-mismatch.
+intents.members = True
 client = discord.Client(intents=intents)
 
 
@@ -397,6 +402,123 @@ async def on_ready():
     client.loop.create_task(poll_approved())
     client.loop.create_task(poll_proactive())
     client.loop.create_task(poll_dm_fallback())
+
+
+# ---------------------------------------------------------------------------
+# Auto-welcome on member join — see access.json `welcome_channel` field
+# ---------------------------------------------------------------------------
+# A new-user welcome posts the contents of WELCOME_TEMPLATE_PATH (or a
+# guild-specific override read from access.json) into the configured
+# welcome channel for that guild. Joins from bot accounts and very-new
+# accounts (likely throwaways used in raids) are skipped. A short rate-
+# limit window suppresses welcomes when joins burst (raid-protection).
+
+WELCOME_TEMPLATE_PATH = REPO / "notes" / "ag2-welcome-template.md"
+# Account-age floor — accounts younger than this when they join are
+# skipped. 12 hours is a decent compromise: catches throwaway raid
+# accounts (typically minutes-old) while letting legitimate new Discord
+# users through (most are days/weeks old).
+WELCOME_MIN_ACCOUNT_AGE_S = 12 * 3600
+# Raid window — if more than WELCOME_BURST_LIMIT joins land within
+# WELCOME_BURST_WINDOW_S, suppress welcomes for the rest of the window.
+WELCOME_BURST_WINDOW_S = 60
+WELCOME_BURST_LIMIT = 5
+_recent_joins_ts = []  # type: list[float]; comment-form annotation keeps Py3.9 loaders happy
+
+
+def _load_welcome_channel(guild_id):  # -> Optional[int]; bare annotation kept Py3.9-compatible (loaders use sys default)
+    """Return the welcome channel id for `guild_id` from access.json, or None
+    if no welcome destination is configured for this guild. The lookup is
+    intentionally per-guild — Mini's bot may be in multiple servers, and
+    welcome destinations differ. Schema: groups[<channel_id>].welcome_channel
+    keyed under any channel of that guild OR a top-level guilds map."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        return None
+    # Preferred form: top-level guilds map keyed by guild id.
+    guilds = data.get("guilds", {})
+    g = guilds.get(str(guild_id))
+    if isinstance(g, dict):
+        ch = g.get("welcome_channel")
+        if isinstance(ch, (int, str)):
+            try:
+                return int(ch)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _read_welcome_template() -> str:
+    """Read the canonical welcome template. Returns empty string on missing
+    file (callers should treat empty as "skip the welcome")."""
+    try:
+        return WELCOME_TEMPLATE_PATH.read_text()
+    except Exception:
+        return ""
+
+
+def _should_welcome_member(member, now_s, joins_ts):  # -> Tuple[bool, str]; Py3.9-compat (no PEP 585/604 generics)
+    """Decide whether to welcome `member`. Returns (do_welcome, reason).
+    Pure logic for testability — callers pass in `now_s` and the joins-ts
+    list explicitly so the rate-limit decision is deterministic."""
+    # Bot accounts never get welcomed
+    if getattr(member, "bot", False):
+        return False, "bot_account"
+    # Very-new accounts (raid-throwaway pattern)
+    created_at = getattr(member, "created_at", None)
+    if created_at is not None:
+        age_s = now_s - created_at.timestamp()
+        if age_s < WELCOME_MIN_ACCOUNT_AGE_S:
+            return False, f"account_age_{int(age_s)}s_under_floor"
+    # Raid-burst guard: count joins in the rolling window
+    cutoff = now_s - WELCOME_BURST_WINDOW_S
+    burst_count = sum(1 for t in joins_ts if t >= cutoff)
+    if burst_count >= WELCOME_BURST_LIMIT:
+        return False, f"raid_burst_{burst_count}_in_{WELCOME_BURST_WINDOW_S}s"
+    return True, "ok"
+
+
+@client.event
+async def on_member_join(member):
+    """Post the canonical welcome template into the guild's configured
+    welcome_channel when a new member joins. No-op for guilds with no
+    welcome_channel set (default behavior preserved). Spam guards: bot
+    filter / account-age floor / raid-burst rate-limit."""
+    guild = getattr(member, "guild", None)
+    if guild is None:
+        return
+    channel_id = _load_welcome_channel(guild.id)
+    if channel_id is None:
+        return  # this guild has no welcome destination configured
+
+    now_s = time.time()
+    do_welcome, reason = _should_welcome_member(member, now_s, _recent_joins_ts)
+    _recent_joins_ts.append(now_s)
+    # Trim history outside the burst window so the list doesn't grow.
+    cutoff = now_s - WELCOME_BURST_WINDOW_S
+    _recent_joins_ts[:] = [t for t in _recent_joins_ts if t >= cutoff]
+    if not do_welcome:
+        print(f"  [welcome] skipping {member} (reason={reason})", flush=True)
+        return
+
+    template = _read_welcome_template()
+    if not template:
+        print(f"  [welcome] template empty/missing at {WELCOME_TEMPLATE_PATH}; skipping {member}", flush=True)
+        return
+
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        print(f"  [welcome] channel {channel_id} not in cache for guild {guild.id}; skipping {member}", flush=True)
+        return
+
+    body = f"<@{member.id}> {template}"
+    try:
+        for chunk in _chunk_for_discord(body):
+            await channel.send(chunk)
+        print(f"  [welcome] sent to {member} in #{getattr(channel,'name','?')}", flush=True)
+    except Exception as e:
+        print(f"  [welcome] post failed for {member}: {e}", flush=True)
 
 
 def _message_mentions_bot(message):
