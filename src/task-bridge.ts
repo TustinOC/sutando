@@ -82,13 +82,28 @@ const _pendingTasks = new Map<string, PendingTask>();
  * to decide whether to forward an unsent result to Discord DM when voice is
  * offline. Returns false on missing file or parse error — bias toward not
  * forwarding to keep Susan-rejected always-DM behavior off by default for
- * non-voice tasks. */
-function _isVoiceTask(taskId: string): boolean {
+ * non-voice tasks.
+ *
+ * Archive lookup must mirror `archiveFile()` above, which writes to
+ * `archive/<YYYY-MM>/`. The legacy flat `archive/<taskId>.txt` candidate
+ * is kept for tasks archived before the YYYY-MM split landed. The
+ * derived YYYY-MM is computed from the taskId's epoch-ms suffix
+ * (`task-<ms>` per `_pendingTasks` map keys) so we look in the right
+ * month directory without scanning. */
+export function _isVoiceTask(taskId: string): boolean {
 	const candidates = [
 		join(TASK_DIR, `${taskId}.txt`),
 		join(TASK_DIR, 'processed', `${taskId}.txt`),
-		join(TASK_DIR, 'archive', `${taskId}.txt`),
+		join(TASK_DIR, 'archive', `${taskId}.txt`), // legacy flat (pre-YYYY-MM split)
 	];
+	const m = taskId.match(/^task-(\d{12,})/); // 12+ digit epoch ms
+	if (m) {
+		const ts = Number(m[1]);
+		if (Number.isFinite(ts)) {
+			const ym = new Date(ts).toISOString().slice(0, 7);
+			candidates.push(join(TASK_DIR, 'archive', ym, `${taskId}.txt`));
+		}
+	}
 	for (const p of candidates) {
 		if (!existsSync(p)) continue;
 		try {
