@@ -999,7 +999,14 @@ new MutationObserver(() => {
     .map(([id]) => id);
   if (Number.isInteger(idx) && idx >= 1 && idx <= ids.length) {
     const targetId = ids[idx - 1];
-    if (verb === 'expand') { expandedTasks.add(targetId); userExpanded.add(targetId); userCollapsed = false; }
+    if (verb === 'expand') {
+      // Exclusive expand: clear other expansions so only the target shows.
+      // Without this, the per-task expand is a visible no-op because
+      // working/done tasks are already in expandedTasks via auto-expand
+      // (see updateTask + the API poll auto-expand block).
+      expandedTasks.clear(); userExpanded.clear();
+      expandedTasks.add(targetId); userExpanded.add(targetId); userCollapsed = false;
+    }
     else if (verb === 'collapse') { expandedTasks.delete(targetId); userExpanded.delete(targetId); }
     renderTasks();
   } else {
