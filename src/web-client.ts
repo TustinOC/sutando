@@ -11,6 +11,9 @@
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { readTmuxStatus } from './tmux-status.js';
+import { loadSkillMounts, matchMount, proxyToSkill } from './skill-mounts.js';
+
+const skillMounts = loadSkillMounts();
 
 const HTTP_PORT = Number(process.env.CLIENT_PORT) || 8080;
 const HTTP_HOST = process.env.CLIENT_HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces for EC2
@@ -2747,6 +2750,12 @@ setInterval(() => {
 const server = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
+	const mount = matchMount(skillMounts, url.pathname);
+	if (mount) {
+		proxyToSkill(mount, req, res);
+		return;
+	}
+
 	if (url.pathname === '/sse') {
 		res.writeHead(200, {
 			'Content-Type': 'text/event-stream',
@@ -2962,5 +2971,11 @@ server.listen(HTTP_PORT, HTTP_HOST, () => {
 	console.log(`  Open in browser:  ${serverUrl}`);
 	console.log(`  WebSocket URL:    Auto-detected from browser hostname`);
 	console.log(`  WebSocket port:  ${WS_PORT}`);
+	if (skillMounts.length > 0) {
+		console.log(`  Skill mounts:`);
+		for (const m of skillMounts) {
+			console.log(`    ${m.mount.padEnd(20)} → 127.0.0.1:${m.port} [${m.skill}, ${m.methods.join('/')}]`);
+		}
+	}
 	console.log(`\n  Press Ctrl+C to stop.\n`);
 });

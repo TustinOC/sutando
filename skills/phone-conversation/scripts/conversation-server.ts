@@ -130,8 +130,8 @@ if (!GEMINI_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHON
 	console.error('Error: GEMINI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER required');
 	process.exit(1);
 }
-if (!NGROK_AUTHTOKEN) {
-	console.error('Error: NGROK_AUTHTOKEN required for auto-tunnel');
+if (!NGROK_AUTHTOKEN && !process.env.TWILIO_WEBHOOK_URL) {
+	console.error('Error: either NGROK_AUTHTOKEN (auto-tunnel) or TWILIO_WEBHOOK_URL (external tunnel, e.g. Cloudflare/Tailscale) required');
 	process.exit(1);
 }
 

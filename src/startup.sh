@@ -175,6 +175,21 @@ else
   echo "  ✓ screen capture (already running)"
 fi
 
+# 5a. Slides skill server (port 7877) — proxied via web-client skill-mount
+# at /slides. Only launches if the skill is installed AND enabled in its
+# manifest. Skip-gate: SKIP_SLIDES=1 in env.
+if [ "${SKIP_SLIDES:-0}" != "1" ] && [ -f "skills/slides/scripts/server.py" ] && \
+   grep -q '"enabled"\s*:\s*true' skills/slides/manifest.json 2>/dev/null; then
+  if ! lsof -i :7877 > /dev/null 2>&1; then
+    echo "  Starting slides (port 7877)..."
+    mkdir -p logs
+    python3 skills/slides/scripts/server.py > logs/slides.log 2>&1 &
+    echo "  ✓ slides"
+  else
+    echo "  ✓ slides (already running)"
+  fi
+fi
+
 # 5b. Sutando context drop app (global hotkey ⌃C)
 SUT_SRC="$REPO/src/Sutando/main.swift"
 SUT_BIN="$REPO/src/Sutando/Sutando"

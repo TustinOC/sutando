@@ -228,6 +228,106 @@ writeVoiceModeSentinel();
 // Tools
 // =============================================================================
 
+// =============================================================================
+// Vision streaming — periodic screen / webcam frames into Gemini Live
+// =============================================================================
+// Pipes a single image at a fixed cadence to the realtime transport via
+// `transport.sendFile(b64, mimeType)`. Gemini Live's realtime_input has a
+// `video` slot for image frames (single-frame video) — bodhi's sendFile
+// handles the image/* → video routing (see bodhi #3 in verify-gemini-31.sh).
+//
+// Token cost: ~258 tokens per image at 2s cadence ≈ 470k tokens/hour while
+// streaming. Default off; user must invoke start_vision explicitly. The
+// existing screen-capture-server flash already paints the menu-bar/web UI
+// "seeing" state, so the user always knows when frames are flowing.
+
+let visionInterval: ReturnType<typeof setInterval> | null = null;
+let visionSource: 'screen' | 'camera' | null = null;
+
+function stopVisionStream(reason?: string): void {
+	if (visionInterval !== null) {
+		clearInterval(visionInterval);
+		visionInterval = null;
+		const src = visionSource;
+		visionSource = null;
+		console.log(`${ts()} [Vision] stopped (${src})${reason ? ` — ${reason}` : ''}`);
+	}
+}
+
+const startVisionTool: ToolDefinition = {
+	name: 'start_vision',
+	description:
+		'Stream periodic frames from the user\'s screen or webcam into your context so you can see what they\'re looking at in real time. ' +
+		'Call when the user says "watch my screen", "look at my screen", "see what I\'m doing", "watch through the camera", "look at me", "see what I see". ' +
+		'Only one stream is active at a time — calling again with a different source switches. ' +
+		'Costs ~470k tokens/hour at the default 2s cadence — keep streams short and call stop_vision as soon as the user is done.',
+	parameters: z.object({
+		source: z.enum(['screen', 'camera']).describe('"screen" = desktop screenshot, "camera" = webcam frame'),
+		interval_s: z.number().optional().describe('Seconds between frames. Default 2. Minimum 1.'),
+	}),
+	execution: 'inline',
+	async execute(args) {
+		const { source, interval_s } = args as { source: 'screen' | 'camera'; interval_s?: number };
+		const intervalMs = Math.max(1000, Math.round((interval_s ?? 2) * 1000));
+		// Replace any active stream — single-stream invariant.
+		stopVisionStream('replaced by new start_vision');
+		const endpoint = source === 'camera' ? 'http://localhost:7845/camera' : 'http://localhost:7845/capture';
+		const mimeType = source === 'camera' ? 'image/jpeg' : 'image/png';
+		// Probe once before installing the interval — gives the model a real
+		// error string if imagesnap is missing or the screen-capture server
+		// is down, instead of silently looping fetch failures.
+		try {
+			const probe = await fetch(endpoint);
+			const data = (await probe.json()) as { status: string; path?: string; error?: string };
+			if (data.status !== 'ok' || !data.path) {
+				return { status: 'failed', source, error: data.error || `${endpoint} returned ${probe.status}` };
+			}
+		} catch (e) {
+			return { status: 'failed', source, error: `Cannot reach ${endpoint}: ${(e as Error).message}. Is screen-capture-server running?` };
+		}
+		visionSource = source;
+		const tick = async () => {
+			try {
+				const session = sessionRef;
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const transport: any = session ? (session as any).transport : null;
+				if (!session || !transport || typeof transport.sendFile !== 'function' || !transport.isConnected) return;
+				const res = await fetch(endpoint);
+				const data = (await res.json()) as { status: string; path?: string; error?: string };
+				if (data.status !== 'ok' || !data.path || !existsSync(data.path)) return;
+				const b64 = readFileSync(data.path).toString('base64');
+				transport.sendFile(b64, mimeType);
+				// Best-effort cleanup — captured files accumulate fast at 2s
+				// cadence. Ignore unlink errors (file might already be gone).
+				try { unlinkSync(data.path); } catch { /* ignore */ }
+			} catch (err) {
+				console.error(`${ts()} [Vision] tick error: ${(err as Error)?.message ?? err}`);
+			}
+		};
+		// Fire one frame immediately so the model has context within the same
+		// turn, then enter the steady-state interval.
+		void tick();
+		visionInterval = setInterval(tick, intervalMs);
+		console.log(`${ts()} [Vision] started ${source} stream @ ${intervalMs}ms`);
+		return { status: 'streaming', source, interval_ms: intervalMs, note: `Now streaming ${source} frames every ${intervalMs / 1000}s. Call stop_vision when done.` };
+	},
+};
+
+const stopVisionTool: ToolDefinition = {
+	name: 'stop_vision',
+	description:
+		'Stop the active screen/camera stream started by start_vision. ' +
+		'Call when the user says "stop watching", "stop looking", "you can stop", "that\'s enough", or otherwise signals they\'re done with live vision.',
+	parameters: z.object({}),
+	execution: 'inline',
+	async execute() {
+		if (visionInterval === null) return { status: 'no_active_stream' };
+		const src = visionSource;
+		stopVisionStream('user requested stop');
+		return { status: 'stopped', source: src };
+	},
+};
+
 const switchModeTool: ToolDefinition = {
 	name: 'switch_mode',
 	description:
@@ -609,6 +709,7 @@ const mainAgent: MainAgent = {
 			: '- MEETING MODE: Call switch_mode("meeting") when user says "take notes", "be silent", "passive mode", or when you join a meeting. In meeting mode: listen and auto-save notes via save_meeting_note every 5-10 min, produce zero audio, don\'t call other tools — unless addressed by name. Call switch_mode("active") to resume.'
 		)(),
 		'- PRESENTER MODE: Call presenter_mode("on") when user says "presenter mode on", "going live", "starting the talk", "the talk starts", or "I am on stage". Call presenter_mode("off") when user says "presenter mode off", "talk is done", "stop presenting", or "done presenting". Do NOT route these phrases to work — they are direct tool triggers. presenter_mode("on") returns a "say" field; speak it verbatim as your FIRST utterance.',
+		'- VISION STREAMING: For continuous live vision ("watch my screen", "watch through the camera", "see what I\'m doing", "look at me"), call start_vision({source}) — frames flow into your context every 2s until stop_vision is called. For a SINGLE one-off look ("what\'s on my screen right now", "take a screenshot", "look at this"), use describe_screen or capture_screen instead — those are one-shot and don\'t leave a stream running. Always call stop_vision when the user signals they\'re done ("stop watching", "that\'s enough", "you can stop") — leaving a stream open burns tokens.',
 		'- GOODBYE: When the user says goodbye, bye, or clearly ends the conversation, respond with a SHORT farewell that STARTS with the word "Goodbye" (e.g. "Goodbye! Talk to you later."). Keep it under one sentence. The session will close automatically. Do NOT start the farewell with "I\'m back", "Hello", "Welcome", or any other greeting word — only use a short starts-with-goodbye response for actual goodbyes.',
 		'- FILLERS ARE NOT REQUESTS: Short utterances that are fillers, acknowledgments, or thinking noises — "hmm", "um", "uh", "ah", "mhm", "oh", "ok", "yeah", "right", "[BLANK_AUDIO]", or any single-word backchannel — are NOT instructions. Do NOT call work, do NOT say "queued up" or "working on it", do NOT narrate. Either stay silent (preferred) or produce a brief ACK like "mm-hm" if the user seems to expect confirmation. Only act when the user issues a clear directive or question.',
 		'- NEVER pretend you called a tool. NEVER say "done" without actually calling work.',
@@ -657,7 +758,7 @@ const mainAgent: MainAgent = {
 	// enable it once we find a reliable gate signal (probably after
 	// bodhi exposes a proper "user has actually spoken" signal under
 	// native audio).
-	tools: [workTool, getTaskStatus, switchModeTool, saveMeetingNoteTool, ...inlineTools],
+	tools: [workTool, getTaskStatus, switchModeTool, saveMeetingNoteTool, startVisionTool, stopVisionTool, ...inlineTools],
 	googleSearch: VOICE_GOOGLE_SEARCH,
 	onEnter: async () => console.log(`${ts()} [Agent] Sutando ready`),
 	// Voice-driven close — strict version. User wants to be able to
@@ -1101,6 +1202,7 @@ async function main() {
 
 	const shutdown = async () => {
 		console.log(`\n${ts()} Shutting down...`);
+		stopVisionStream('shutdown');
 		writeVoiceMetrics();
 		await session.close('user_hangup');
 		process.exit(0);

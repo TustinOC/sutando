@@ -18,6 +18,7 @@ from datetime import datetime
 
 PORT = 7845
 DIR = "/tmp/sutando-screenshots"
+CAM_DIR = "/tmp/sutando-camera"
 # Web-client endpoint for agent-state reporting. When a /capture happens we
 # flash state=seeing on the menu-bar avatar for ~1.5s — makes screen-capture
 # visible to the user without them needing to watch the web UI.
@@ -138,6 +139,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "error", "error": str(e)}).encode())
+        elif self.path.startswith("/camera"):
+            # Single-frame webcam capture via `imagesnap`. Mirrors /capture's
+            # contract: same JSON shape, same agent-state=seeing flash, same
+            # debounced notification. JPEG (smaller payload than PNG; webcam
+            # frames don't benefit from PNG's lossless compression).
+            _signal_seeing()
+            _notify_capture()
+            os.makedirs(CAM_DIR, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            path = f"{CAM_DIR}/cam-{ts}.jpg"
+            try:
+                # -w 0.5: warm-up time before snapping. macOS webcams need
+                # ~300-500ms for auto-exposure to settle; without warm-up the
+                # first frame is dark green.
+                result = subprocess.run(
+                    ["imagesnap", "-w", "0.5", path],
+                    timeout=8,
+                    capture_output=True,
+                )
+                if result.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+                    err = result.stderr.decode("utf-8", "replace").strip() if result.stderr else "imagesnap failed"
+                    if "command not found" in err.lower() or result.returncode == 127:
+                        err = "imagesnap not installed — run: brew install imagesnap"
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "error", "error": err}).encode())
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "path": path}).encode())
+            except FileNotFoundError:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "error",
+                    "error": "imagesnap not installed — run: brew install imagesnap",
+                }).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "error": str(e)}).encode())
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()
@@ -149,6 +195,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 if __name__ == "__main__":
     server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Screen capture server → http://localhost:{PORT}/capture")
+    print(f"Webcam capture       → http://localhost:{PORT}/camera (needs `brew install imagesnap`)")
     print("Keep this terminal open — it has Screen Recording permission.")
     try:
         server.serve_forever()
