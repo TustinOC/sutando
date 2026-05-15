@@ -26,7 +26,9 @@ Per-machine mutable runtime state. Holds:
 - `logs/` — runtime logs
 - `notes/` — second brain (fallback location; private dir takes precedence — see below)
 
-When `$SUTANDO_WORKSPACE` is unset, these folders default to the repo root (legacy behavior; preserves single-machine installs out of the box). Set `$SUTANDO_WORKSPACE` in `.env` to move them outside the repo — recommended for any setup that wants a clean code/data boundary.
+When `$SUTANDO_WORKSPACE` is unset, these folders currently default to the repo root (legacy behavior; preserves single-machine installs out of the box). Set `$SUTANDO_WORKSPACE` in `.env` to move them outside the repo — recommended for any setup that wants a clean code/data boundary.
+
+The default will change to a platform-appropriate location (`~/Library/Application Support/sutando/` on macOS, `${XDG_DATA_HOME:-~/.local/share}/sutando/` on Linux) once the migration in the rollout plan below completes.
 
 ### Private
 
@@ -56,9 +58,18 @@ All helpers fall back to the repo root when their respective env var is unset, s
 - **Workspace vs private**: two different sync strategies. The task queue should NOT sync across machines (yesterday's voice tasks shouldn't replay on a different Mac); your notes SHOULD.
 - **Per-machine vs shared private**: machine identity (avatar, stand identity) should differ per host; long-form notes shouldn't.
 
-## Migration
+## Rollout plan
 
-To move an existing install's runtime data out of the repo:
+The refactor lands in stages so existing installs keep working at every commit:
+
+1. **Step 1 — helpers (done).** Add `WORKSPACE_DIR` / `workspace_path()` / `workspacePath()` / `src/workspace.sh`. No call sites changed; default falls back to repo root.
+2. **Step 2 — migrate callers.** Replace hardcoded `tasks/`, `results/`, `state/`, `logs/` paths across src/, skills/, and scripts/ with calls into the helpers. Default still = repo root, so behavior is unchanged.
+3. **Step 3 — flip the default.** Change the fallback in all three helpers from "repo root" to platform-appropriate (`~/Library/Application Support/sutando/` on macOS). Add a one-shot migration in `init.sh` that detects existing data at the repo root and either moves it (if no workspace exists yet) or warns.
+4. **Step 4 — drop legacy fallback.** Once every install is confirmed migrated, remove the repo-root fallback entirely. `$SUTANDO_WORKSPACE` becomes the single source of truth.
+
+## User migration (set `$SUTANDO_WORKSPACE` ahead of step 3)
+
+To move an existing install's runtime data out of the repo today, ahead of the default flip:
 
 1. Pick a workspace location (e.g. `~/Library/Application Support/sutando`).
 2. Move `tasks/`, `results/`, `state/`, `logs/`, and optionally `notes/` there.
