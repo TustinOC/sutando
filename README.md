@@ -2,11 +2,15 @@
 
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/uZHWXXmrCS) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Website](https://img.shields.io/badge/Web-sutando.ai-blue)](https://sutando.ai)
 
-**My AI Stand — Realtime by Day, Coding Itself by Night.**
+**My AI Stand — Realtime by Day, Rewriting Itself by Night.**
+**Summon my AI superpower.**
 
 Voice, vision, screen, meetings, calls when I'm engaged. Learns my patterns, ships its own code when I'm not. Runs across my Macs, interacts with people & their Stands.
 
 It belongs entirely to you.
+
+> 🛠 **Open source:** this repo — clone, build, run locally on your own Mac.
+> 🍎 **Native app preview:** [sutando.ai](https://sutando.ai) — packaged Mac app, request access.
 
 > **No *Claude Extra usage* required.** Sutando runs on your existing Claude Code subscription ($20, $100, or $200/month) with minimal extra costs — no separate Anthropic API key to top up — unlike agents that route every action through pay-per-token APIs and hosted services.
 
@@ -210,6 +214,7 @@ These unlock more capabilities. Add to `.env` when ready:
 | Claude for Chrome | Browser automation — navigate, read pages, fill forms, interact with web apps | [Install extension](https://claude.ai/chrome), log in with the same account as Claude Code |
 | Sutando app (menu bar) | Global hotkeys (see [Keyboard shortcuts](#keyboard-shortcuts)) | Auto-launches via `startup.sh` |
 | OS-supervised health checks | Detect stuck loops, dead watchers, and queue pileups even when core is unresponsive — macOS notifies you when Sutando is broken | `bash src/install-health-check-launchd.sh` (idempotent; uninstall with `--uninstall`) |
+| Multi-machine memory sync | Run the same agent identity across Mac mini + MacBook + Mac Studio etc.; memory + notes stay consistent via a private git repo you own | Create a private repo, add `SUTANDO_MEMORY_REPO=...` to `.env`, run `bash scripts/sync-memory.sh` once + cron it. See [docs/memory-sync.md](docs/memory-sync.md) |
 
 ---
 
