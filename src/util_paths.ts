@@ -21,6 +21,23 @@ function expandHome(p: string): string {
 	return p.replace(/^~/, process.env.HOME || '');
 }
 
+/**
+ * Workspace root — per-machine mutable runtime state (tasks/, results/, state/,
+ * logs/, and notes/ when $SUTANDO_PRIVATE_DIR is unset). Falls back to the repo
+ * root (parent of src/) so legacy installs where these folders sit beside src/
+ * keep working. See docs/storage-layout.md.
+ */
+export const WORKSPACE_DIR: string = (() => {
+	const raw = process.env.SUTANDO_WORKSPACE;
+	if (raw) return expandHome(raw);
+	return new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+})();
+
+/** Resolve a path under the workspace root ($SUTANDO_WORKSPACE). */
+export function workspacePath(...parts: string[]): string {
+	return join(WORKSPACE_DIR, ...parts);
+}
+
 /** Per-machine resolver. */
 export function personalPath(filename: string, workspace?: string): string {
 	const ws = workspace ?? process.cwd();

@@ -18,6 +18,19 @@ from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 
+# Workspace root — per-machine mutable runtime state (tasks/, results/, state/,
+# logs/, and notes/ when $SUTANDO_PRIVATE_DIR is unset). Falls back to REPO_DIR
+# so legacy installs where these folders sit beside src/ keep working.
+# See docs/storage-layout.md.
+WORKSPACE_DIR = Path(
+    os.path.expanduser(os.environ.get("SUTANDO_WORKSPACE", str(REPO_DIR)))
+)
+
+
+def workspace_path(*parts: str) -> Path:
+    """Resolve a path under the workspace root ($SUTANDO_WORKSPACE)."""
+    return WORKSPACE_DIR.joinpath(*parts)
+
 
 def _private_machine_dir() -> Path | None:
     root = os.environ.get("SUTANDO_PRIVATE_DIR")

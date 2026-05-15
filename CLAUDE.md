@@ -89,6 +89,8 @@ On each proactive loop pass, check `pending-questions.md` for unanswered items a
 - Task bridge: `src/task-bridge.ts`
 - Skills: `skills/`
 
+**Where data lives (three layers):** code in the repo, per-machine mutable state under `$SUTANDO_WORKSPACE`, cross-machine personal data under `$SUTANDO_PRIVATE_DIR`. Use `workspace_path()` / `workspacePath()` for `tasks/`, `results/`, `state/`, `logs/`; use `shared_personal_path()` / `sharedPersonalPath()` for `notes/`. Shell scripts source `src/workspace.sh`. Full design: `docs/storage-layout.md`.
+
 ## Task bridge
 
 Tasks arrive from multiple channels via the same file bridge:
