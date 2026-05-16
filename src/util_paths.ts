@@ -1,65 +1,42 @@
 // TypeScript twin of src/util_paths.py — personal-asset path resolution.
 //
-// Two helpers, one for per-machine state, one for shared-across-fleet state:
+// As of PR #748's tenant scaffold, these helpers delegate to `tenantPath`
+// (src/tenant.ts) which handles the three-level resolution
+// (per-tenant / per-device / fleet-shared) plus the single-tenant legacy
+// fallback. Single-tenant installs (no SUTANDO_TENANT_ID, no
+// state/tenant.json) see no behavior change — `tenantPath` falls through
+// to the legacy `$SUTANDO_PRIVATE_DIR/machine-<host>/<file>` shape when
+// `tenant-default/` hasn't been provisioned.
 //
-//   personalPath(filename)          — `$SUTANDO_PRIVATE_DIR/machine-<host>/<filename>`
-//                                     For files where each Mac has its own copy
+// Two helpers preserved as the public surface:
+//
+//   personalPath(filename)          — per-machine state
 //                                     (stand-identity.json, pending-questions.md).
+//                                     Maps to tenantPath(..., 'device').
+//   sharedPersonalPath(filename)    — fleet-shared state (notes, build_log).
+//                                     Maps to tenantPath(..., 'shared').
 //
-//   sharedPersonalPath(filename)    — `$SUTANDO_PRIVATE_DIR/<filename>`
-//                                     For files synced across the whole fleet
-//                                     (notes/, build_log.md).
-//
-// Both fall back to `<workspace>/<filename>` so existing installs keep working
-// until they migrate.
+// Special case: `stand-avatar.png` also lives under `<workspace>/assets/`
+// in the public repo. The avatar fallback is preserved here.
 
 import { existsSync } from 'node:fs';
-import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { tenantPath } from './tenant.js';
 
-function expandHome(p: string): string {
-	return p.replace(/^~/, process.env.HOME || '');
-}
-
-/** Per-machine resolver. */
+/** Per-machine resolver. Delegates to `tenantPath(..., 'device')`. */
 export function personalPath(filename: string, workspace?: string): string {
 	const ws = workspace ?? process.cwd();
-	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
-	if (privateRoot) {
-		const root = expandHome(privateRoot);
-		const host = hostname().split('.')[0];
-		const candidate = join(root, `machine-${host}`, filename);
-		if (existsSync(candidate)) return candidate;
-	}
-	// stand-avatar.png lives under assets/ in the public workspace.
+	// Avatar fallback — stand-avatar.png ships under assets/ in the public
+	// repo. Preserve the special case so a fresh install with no private
+	// dir still resolves the asset.
 	if (filename === 'stand-avatar.png') {
 		const inAssets = join(ws, 'assets', filename);
 		if (existsSync(inAssets)) return inAssets;
 	}
-	const wsPath = join(ws, filename);
-	if (existsSync(wsPath)) return wsPath;
-	// Nothing exists; return preferred private path so caller's existsSync()
-	// check fails gracefully.
-	if (privateRoot) {
-		const root = expandHome(privateRoot);
-		const host = hostname().split('.')[0];
-		return join(root, `machine-${host}`, filename);
-	}
-	if (filename === 'stand-avatar.png') return join(ws, 'assets', filename);
-	return wsPath;
+	return tenantPath(filename, 'device', ws);
 }
 
-/** Shared-across-fleet resolver (top-level private dir, not per-machine). */
+/** Shared-across-fleet resolver. Delegates to `tenantPath(..., 'shared')`. */
 export function sharedPersonalPath(filename: string, workspace?: string): string {
-	const ws = workspace ?? process.cwd();
-	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
-	if (privateRoot) {
-		const root = expandHome(privateRoot);
-		const candidate = join(root, filename);
-		if (existsSync(candidate)) return candidate;
-		const wsPath = join(ws, filename);
-		if (existsSync(wsPath)) return wsPath;
-		return candidate;
-	}
-	return join(ws, filename);
+	return tenantPath(filename, 'shared', workspace);
 }
