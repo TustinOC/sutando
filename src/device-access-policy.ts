@@ -155,8 +155,17 @@ export function defaultPolicyFor(profile: DeviceProfile): DeviceAccessPolicy {
 }
 
 /** Attach a policy to a DeviceSession. Callers may pass a fully-formed
- *  policy (precedence layer 3) instead of the defaulted one. */
+ *  policy (precedence layer 3) instead of the defaulted one.
+ *
+ *  Reloads the `state/device-policy.json` overrides on every call so an
+ *  owner edit is picked up by the next device registration without a
+ *  manual `reloadOverrides()` call or a process restart. The file is
+ *  small (a handful of device id → capability arrays), the read happens
+ *  only on `attachPolicy` invocations (not on every `checkPolicy` query
+ *  in the hot path), and registrations are an infrequent control-plane
+ *  event — so the cost is negligible and the UX win is real. */
 export function attachPolicy(session: DeviceSession, override?: Partial<DeviceAccessPolicy>): DeviceAccessPolicy {
+	reloadOverrides();
 	const base = defaultPolicyFor(session.profile);
 	if (override?.allowed) base.allowed = new Set(override.allowed);
 	if (override?.label) base.label = override.label;

@@ -175,4 +175,29 @@ describe('owner overrides via state/device-policy.json', () => {
 		assert.ok(p.allowed.has('task_write'));
 		assert.ok(!p.allowed.has('audio_listen'));
 	});
+
+	it('attachPolicy auto-reloads overrides — owner edits picked up without restart', () => {
+		// First attach: no override file, recorder gets task-only default.
+		const s1 = emptySession(profile({ id: 'plaud-notepin', category: 'recorder' }));
+		const p1 = attachPolicy(s1);
+		assert.ok(!p1.allowed.has('audio_listen'));
+		assert.equal(p1.owner_approved, false);
+
+		// Owner edits state/device-policy.json mid-process to grant
+		// audio_listen to that device id.
+		writeFileSync(
+			join(tempDir, 'state', 'device-policy.json'),
+			JSON.stringify({ 'plaud-notepin': ['task_write', 'audio_listen'] }),
+		);
+
+		// Second attach (e.g. recorder bridge re-registered, or a different
+		// pendant of the same profile id reconnects). Without auto-reload
+		// this would still see the cached old policy. With it, the owner
+		// edit lands without restart.
+		const s2 = emptySession(profile({ id: 'plaud-notepin', category: 'recorder' }));
+		const p2 = attachPolicy(s2);
+		assert.ok(p2.allowed.has('audio_listen'),
+			'attachPolicy must reload overrides — owner-edited grant should be visible');
+		assert.equal(p2.owner_approved, true);
+	});
 });
