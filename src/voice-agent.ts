@@ -879,6 +879,16 @@ async function main() {
 		// Dynamic import keeps cost-accounting an optional dependency — if
 		// the module is absent (older worktree, partial deploy), the catch
 		// below silently skips emit rather than crash session-end.
+		//
+		// Note on cost profile (per sonichi's #751 review of multi-record):
+		// `record()` does open+write+close per call — no explicit fsync,
+		// so the kernel batches writes via the page cache. Three syscalls
+		// per session-end (1 request + 1 ms + N tool_calls) is well below
+		// the threshold where batching to recordMany() would matter. The
+		// `_ensuredDirs` cache added in #749 fixup further amortizes the
+		// mkdir cost. If session-end ever needs to fire hundreds of events
+		// (e.g. per-utterance token counts once bodhi exposes them), revisit
+		// with a `recordMany([...])` API that keeps one fd open.
 		(async () => {
 			try {
 				const { record } = await import('./cost-accounting.js');
