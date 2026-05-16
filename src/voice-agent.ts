@@ -781,6 +781,31 @@ const mainAgent: MainAgent = {
 		} catch (e) {
 			console.error(`${ts()} [Agent] goodbye-detector error:`, e);
 		}
+
+		// Device-aware output routing — consumer for PR #741's scaffold.
+		// Env-gated default OFF; opt in via SUTANDO_OUTPUT_ROUTER=1. When on,
+		// the active non-laptop DeviceSession's HUD / file_push surfaces
+		// receive a render of the assistant turn alongside bodhi's normal
+		// voice path. Skipped for the laptop session because bodhi is already
+		// speaking through that transport — a routeReply would double-render.
+		if (process.env.SUTANDO_OUTPUT_ROUTER === '1') {
+			try {
+				const turns2 = ctx.getRecentTurns(2) as Array<{ role?: string; content?: string }>;
+				const lastAssistant2 = turns2.filter((t) => t?.role === 'assistant').pop();
+				const text2 = (lastAssistant2?.content || '').trim();
+				if (text2) {
+					const ds = await import('./device-session.js');
+					const active = ds.activeForVision();
+					if (active && active.profile.category !== 'laptop') {
+						const { routeReply } = await import('./output-router.js');
+						const result = await routeReply(active, { text: text2, kind: 'narrative' });
+						console.log(`${ts()} [Agent] output-router → ${active.deviceId} used=[${result.used.join(',')}] dropped=[${result.dropped.join(',')}]`);
+					}
+				}
+			} catch (err) {
+				console.error(`${ts()} [Agent] output-router error (non-fatal):`, err);
+			}
+		}
 	},
 };
 
