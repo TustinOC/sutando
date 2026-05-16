@@ -614,12 +614,21 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			// follow-up. For now we accept any profileId and synthesize a
 			// best-guess shape so the registry has a complete object. Bridges
 			// can override fields via the body if needed.
+			// Validate category against the known union so a lying caller
+			// (or a typo) can't pollute the registry with `category:'spaceship'`
+			// — downstream consumers do `switch(profile.category)` and would
+			// silently fall through.
+			const VALID_CATEGORIES = new Set(['glasses', 'audio_wearable', 'recorder', 'phone', 'laptop', 'other']);
+			const rawCategory = typeof body.category === 'string' ? body.category : 'other';
+			if (!VALID_CATEGORIES.has(rawCategory)) {
+				return respond(400, { status: 'failed', error: `invalid category "${rawCategory}"; must be one of ${[...VALID_CATEGORIES].join(',')}` });
+			}
 			const camera = (body.camera as deviceSession.DeviceProfile['camera']) ?? { enabled: true };
 			const hud = (body.hud as deviceSession.DeviceProfile['hud']) ?? { enabled: false };
 			const profile: deviceSession.DeviceProfile = {
 				id: profileId,
 				name: typeof body.name === 'string' ? body.name : profileId,
-				category: (body.category as deviceSession.DeviceProfile['category']) ?? 'other',
+				category: rawCategory as deviceSession.DeviceProfile['category'],
 				mic: body.mic !== false,
 				camera,
 				hud,
@@ -661,16 +670,27 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			return respond(200, { status: 'unregistered', deviceId });
 		}
 		if (url.pathname === '/vision/devices' && req.method === 'GET') {
+			// `transportReady` lets a bridge polling /vision/devices distinguish
+			// "registered AND deliverable" from "registered but the underlying
+			// transport isn't connected yet" (e.g. /vision/register raced ahead
+			// of setVisionSession() on cold start). Tracks the same predicate
+			// getSendFile() uses: voice transport present + isConnected !== false.
 			return respond(200, {
 				active: deviceSession.activeForVision()?.deviceId ?? null,
-				devices: deviceSession.list().map((s) => ({
-					deviceId: s.deviceId,
-					profile: s.profile,
-					createdAt: s.createdAt,
-					pushMode: s.pushMode,
-					pushSourceLabel: s.pushSourceLabel,
-					frameCount: s.frameCount,
-				})),
+				devices: deviceSession.list().map((s) => {
+					const voice = s.output.find((o) => o.kind === 'voice');
+					const t = voice && voice.kind === 'voice' ? voice.transport : null;
+					const transportReady = !!(t && t.sendFile && t.isConnected !== false);
+					return {
+						deviceId: s.deviceId,
+						profile: s.profile,
+						createdAt: s.createdAt,
+						pushMode: s.pushMode,
+						pushSourceLabel: s.pushSourceLabel,
+						frameCount: s.frameCount,
+						transportReady,
+					};
+				}),
 			});
 		}
 		respond(404, { error: 'not found' });
