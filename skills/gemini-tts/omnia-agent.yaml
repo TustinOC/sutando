@@ -1,0 +1,20 @@
+name: gemini-tts
+description: Render text to mp3 via Google Gemini Flash TTS. Free-tier eligible (1500 req/day). Default TTS for make-viral-video.
+version: 0.1.0
+category: media
+
+agent:
+  tools: [gemini_tts_render]
+
+capabilities:
+  intents:
+    - name: synthesize
+      triggers: [synthesize voice, narrate, render audio, text to speech with gemini]
+      description: Generate mp3 from text using Gemini Flash TTS.
+
+io:
+  inputs: [text]
+  outputs: [media_file]
+
+policy:
+  access_tier: owner

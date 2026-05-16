@@ -1,0 +1,37 @@
+name: macos-tools
+description: macOS native integrations — screen capture, calendar, reminders, contacts, Mail.app, Spotlight. Use when the user asks about screen, schedule, to-do, contacts, or wants to send email on macOS.
+version: 0.1.0
+category: platform
+
+agent:
+  tools: [screen_capture, calendar_query, reminders_query, reminders_add, contacts_search, mail_send, spotlight_search]
+
+capabilities:
+  intents:
+    - name: screen_capture
+      triggers: [what's on my screen, capture screen, take screenshot, see my screen]
+      description: Grab a screenshot via the screen-capture-server.
+    - name: calendar
+      triggers: [what's my schedule, today's calendar, next meeting, do I have anything]
+      description: Query macOS Calendar via gws.
+    - name: reminders
+      triggers: [my todo list, what's on my reminders, add a reminder, remind me to]
+      description: Read/write macOS Reminders.
+    - name: contacts
+      triggers: [look up contact, find email for, phone number for]
+      description: Resolve a name to email/phone via macOS Contacts.
+    - name: mail_send
+      triggers: [send email via mail, send from mac mail]
+      description: Send email via Mail.app (no OAuth required). Confirmation required.
+    - name: spotlight
+      triggers: [find file, search for file, where is the file]
+      description: macOS Spotlight file search.
+
+io:
+  inputs: [voice, text]
+  outputs: [voice, file_path, attachments]
+
+policy:
+  access_tier: owner
+  platform: darwin
+  confirmation_required_for: [mail_send, reminders_add]

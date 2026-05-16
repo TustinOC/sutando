@@ -1,0 +1,24 @@
+name: info-radar
+description: Monitor arXiv, GitHub, Hacker News, and tech news for topics the owner cares about. Surface discoveries via morning briefing or voice.
+version: 0.1.0
+category: research
+
+agent:
+  tools: [radar_scan, radar_digest]
+
+capabilities:
+  intents:
+    - name: scan
+      triggers: [radar scan, info radar, scan sources, check arxiv, check hacker news, what's new in]
+      description: Run a discovery scan across configured sources for topics in the owner's interest list.
+    - name: digest
+      triggers: [radar digest, what's the latest, recent discoveries]
+      description: Surface the most recent digest of discoveries.
+
+io:
+  inputs: [voice, text, scheduled]
+  outputs: [voice, digest_file]
+
+policy:
+  access_tier: owner
+  scheduled: daily_with_morning_briefing

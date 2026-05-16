@@ -1,0 +1,20 @@
+name: self-diagnose
+description: Sutando introspection — read logs + git + memory + build log over a chosen time window. Produces a concise narrative of what the agent has been doing, what's broken, and what to prioritize next.
+version: 0.1.0
+category: diagnostics
+
+agent:
+  tools: [self_diagnose_gather, self_diagnose_narrate]
+
+capabilities:
+  intents:
+    - name: introspect
+      triggers: [self diagnose, what have you been doing, what's broken, status report, gather logs]
+      description: Read logs/git/memory and narrate the agent's recent activity, regressions, and priorities.
+
+io:
+  inputs: [voice, text]
+  outputs: [voice, report_file]
+
+policy:
+  access_tier: owner

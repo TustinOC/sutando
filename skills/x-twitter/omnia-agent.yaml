@@ -1,0 +1,33 @@
+name: x-twitter
+description: Post, search, read, and monitor on X (Twitter) via API v2. Owner confirmation required before posting.
+version: 0.1.0
+category: communications
+
+agent:
+  tools: [x_post, x_search, x_read, x_mentions, x_timeline, x_engagement]
+
+capabilities:
+  intents:
+    - name: post
+      triggers: [post a tweet, tweet, post to x, post to twitter]
+      description: Compose and post a tweet. Owner confirmation required.
+    - name: search
+      triggers: [search twitter, find tweets about, search x]
+      description: Recent tweet search.
+    - name: read_thread
+      triggers: [read tweet, open tweet, show tweet]
+      description: Read a tweet and its thread.
+    - name: mentions
+      triggers: [check mentions, who replied, did anyone tag me]
+      description: Recent @mentions.
+    - name: engagement
+      triggers: [engagement on tweet, how did the tweet do, tweet stats]
+      description: Likes / retweets / view counts for a posted tweet.
+
+io:
+  inputs: [voice, text]
+  outputs: [voice, post_id]
+
+policy:
+  access_tier: owner
+  confirmation_required_for: [post]

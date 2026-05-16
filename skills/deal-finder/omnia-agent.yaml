@@ -1,0 +1,24 @@
+name: deal-finder
+description: Scan configured used-item listing sources (Craigslist, eBay, Facebook Marketplace) for matches against the owner's saved criteria. SMS + Telegram on hit.
+version: 0.1.0
+category: shopping
+
+agent:
+  tools: [deal_scan, deal_subscribe]
+
+capabilities:
+  intents:
+    - name: find
+      triggers: [find a deal, scan listings, check craigslist, look for, search for used]
+      description: One-shot scan against the configured criteria.
+    - name: subscribe
+      triggers: [watch for, notify me when, alert me on]
+      description: Add or update a saved search.
+
+io:
+  inputs: [voice, text, scheduled]
+  outputs: [voice, sms, telegram_dm]
+
+policy:
+  access_tier: owner
+  scheduled: hourly

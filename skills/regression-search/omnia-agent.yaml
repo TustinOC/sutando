@@ -1,0 +1,23 @@
+name: regression-search
+description: Search phone-call history for when a feature regressed; drill into individual calls to see what went wrong. Skips manual transcript review.
+version: 0.1.0
+category: diagnostics
+
+agent:
+  tools: [find_regression, diagnose_call]
+
+capabilities:
+  intents:
+    - name: find_regression
+      triggers: [when did this break, when did the bug start, find regression, last working call]
+      description: Locate the call window where a feature transitioned from working to broken.
+    - name: diagnose_call
+      triggers: [what went wrong in, diagnose call, why did this fail]
+      description: Deep-dive into a single call's transcript + tool calls + error path.
+
+io:
+  inputs: [voice, text]
+  outputs: [voice, summary_file]
+
+policy:
+  access_tier: owner

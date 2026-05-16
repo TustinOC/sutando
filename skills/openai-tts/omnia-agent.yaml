@@ -1,0 +1,20 @@
+name: openai-tts
+description: Render text to mp3 via OpenAI tts-1-hd. Use for video narration, demo voiceovers, audio notes.
+version: 0.1.0
+category: media
+
+agent:
+  tools: [openai_tts_render]
+
+capabilities:
+  intents:
+    - name: synthesize
+      triggers: [synthesize voice, narrate, render audio, text to speech with openai]
+      description: Generate mp3 from text using OpenAI's tts-1-hd.
+
+io:
+  inputs: [text]
+  outputs: [media_file]
+
+policy:
+  access_tier: owner
