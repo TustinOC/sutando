@@ -1,0 +1,28 @@
+name: phone-conversation
+description: Make outbound phone calls and join Zoom/Google Meet meetings with multi-turn Gemini conversation. Auto-summarizes on hangup.
+version: 0.1.0
+category: communications
+
+agent:
+  model: gemini-2.5-flash
+  system_prompt: |
+    You are Sutando on a phone call. Keep responses short and conversational —
+    spoken dialog only, no markdown. When the call ends, write a concise
+    summary covering decisions made, action items, and any open questions.
+  tools: [hang_up, dtmf, recent_context]
+
+capabilities:
+  intents:
+    - name: call
+      triggers: [call, dial, phone, ring]
+      description: Place an outbound phone call to a contact or number.
+    - name: join_meeting
+      triggers: [join, zoom, meet, dial in]
+      description: Dial into a Zoom or Google Meet bridge by meeting code/PIN.
+
+io:
+  inputs: [voice, dtmf]
+  outputs: [voice, summary_file]
+
+policy:
+  access_tier: owner

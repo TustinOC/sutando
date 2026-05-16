@@ -1,0 +1,21 @@
+name: morning-briefing
+description: Daily morning briefing — email triage, calendar, Discord, news, behavioral insight. Delivered via voice on connect or Discord DM otherwise.
+version: 0.1.0
+category: productivity
+
+agent:
+  tools: [gmail_triage, calendar_lookup, discord_summary, info_radar_digest]
+
+capabilities:
+  intents:
+    - name: brief
+      triggers: [morning briefing, daily briefing, brief me, what's happening, what's new today]
+      description: Generate the day's briefing on demand.
+
+io:
+  inputs: [voice, text, scheduled]
+  outputs: [voice, dm_file]
+
+policy:
+  access_tier: owner
+  scheduled: daily_at_0657_local

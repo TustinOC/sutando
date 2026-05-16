@@ -1,0 +1,24 @@
+name: meeting-prep
+description: Auto-prepare for upcoming calendar meetings — attendee research, recent thread context, talking points, agenda. Runs 30 min before each meeting or on demand.
+version: 0.1.0
+category: productivity
+
+agent:
+  tools: [calendar_lookup, contact_lookup, email_search, web_search]
+
+capabilities:
+  intents:
+    - name: prep_next
+      triggers: [prep next meeting, prepare for my meeting, what's my next meeting]
+      description: Brief the user on their next scheduled meeting.
+    - name: prep_named
+      triggers: [prep meeting with, prepare for the meeting with, brief me on]
+      description: Prep for a specific named meeting or attendee.
+
+io:
+  inputs: [voice, text]
+  outputs: [voice, prep_file]
+
+policy:
+  access_tier: owner
+  scheduled: 30m_before_each_meeting

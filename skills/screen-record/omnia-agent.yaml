@@ -1,0 +1,25 @@
+name: screen-record
+description: Start/stop macOS screen recording via ffmpeg. Result file lands in results/ for the user to retrieve.
+version: 0.1.0
+category: capture
+
+agent:
+  inline: false
+  tools: [screen_record_start, screen_record_stop]
+
+capabilities:
+  intents:
+    - name: start
+      triggers: [start recording, record my screen, capture screen, start screen record]
+      description: Begin a screen recording session.
+    - name: stop
+      triggers: [stop recording, end recording, finish screen record, save recording]
+      description: End the active recording and save the file.
+
+io:
+  inputs: [voice, text]
+  outputs: [media_file, file_push]
+
+policy:
+  access_tier: owner
+  platform: darwin

@@ -1,0 +1,26 @@
+name: image-generation
+description: Generate and edit images via Gemini Flash Image; generate videos via Veo. Text-to-image, image editing, text-to-video, image-to-video.
+version: 0.1.0
+category: media
+
+agent:
+  tools: [generate_image, edit_image, generate_video]
+
+capabilities:
+  intents:
+    - name: generate_image
+      triggers: [generate, draw, create image, picture of, make an image, make a picture]
+      description: Text-to-image generation.
+    - name: edit_image
+      triggers: [edit, modify, change, adjust the image, redraw]
+      description: Edit an existing image based on a text prompt.
+    - name: generate_video
+      triggers: [generate video, make a video, animate, video of]
+      description: Text-to-video or image-to-video generation.
+
+io:
+  inputs: [voice, text, image_attachment]
+  outputs: [media_file, file_push]
+
+policy:
+  access_tier: owner

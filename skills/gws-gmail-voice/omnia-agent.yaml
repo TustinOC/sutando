@@ -1,0 +1,31 @@
+name: gws-gmail-voice
+description: Inline Gmail triage + send for voice/phone agents. Wraps the gws Google Workspace CLI so unread inbox can be summarized without leaving the conversation.
+version: 0.1.0
+category: productivity
+
+agent:
+  inline: true
+  tools: [gmail_triage, gmail_search, gmail_send, gmail_read]
+
+capabilities:
+  intents:
+    - name: triage
+      triggers: [inbox, unread, triage, email check, what's new]
+      description: Summarize unread inbox; surface urgent + reply-needed items.
+    - name: search
+      triggers: [find email, search inbox, look up email]
+      description: Search Gmail by query string.
+    - name: send
+      triggers: [send email, reply email, email to]
+      description: Compose and send (or draft) an email.
+    - name: read
+      triggers: [read email, open email, show message]
+      description: Read a specific message by id or context.
+
+io:
+  inputs: [voice, text]
+  outputs: [voice, draft_file]
+
+policy:
+  access_tier: owner
+  confirmation_required_for: [send]
