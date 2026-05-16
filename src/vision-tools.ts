@@ -149,6 +149,7 @@ let sessionRef: MinimalSession | null = null;
 // unchanged while opening a clean seam for Mentra glasses, phone agent,
 // and future devices to register their own sessions.
 import * as deviceSession from './device-session.js';
+import { attachPolicy, checkPolicy, logDenial } from './device-access-policy.js';
 export { deviceSession };
 
 export function setVisionSession(session: unknown): void {
@@ -535,6 +536,16 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			return respond(200, stopStreaming());
 		}
 		if (url.pathname === '/vision/frame' && req.method === 'POST') {
+			// Policy gate: if a DeviceSession is active, it must hold the
+			// `vision_frame_send` capability. The legacy browser path (no
+			// active DeviceSession, frames go through sessionRef) is
+			// unaffected — backward compatible. Only registered devices
+			// (Mentra, future bridges) hit the gate.
+			const active = deviceSession.activeForVision();
+			if (active && !checkPolicy(active, 'vision_frame_send')) {
+				logDenial(active, 'vision_frame_send', 'POST /vision/frame');
+				return respond(403, { status: 'failed', error: `device ${active.deviceId} lacks vision_frame_send capability` });
+			}
 			const chunks: Buffer[] = [];
 			req.on('data', (c: Buffer) => chunks.push(c));
 			req.on('end', () => {
@@ -601,9 +612,16 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			};
 			try {
 				deviceSession.register(session);
+				// Attach a default access policy from the profile's category.
+				// Recorder + 'other'-category devices get default-deny; the owner
+				// can override per-device via state/device-policy.json. Skipping
+				// this would make every newly-registered device implicitly
+				// trusted — exactly the §5 Next "default-deny for new device
+				// types" requirement.
+				const policy = attachPolicy(session);
 				deviceSession.activate(deviceId);
-				console.log(`${ts()} [Vision] device registered + activated: ${deviceId} (profile=${profileId})`);
-				return respond(200, { status: 'registered', deviceId });
+				console.log(`${ts()} [Vision] device registered + activated: ${deviceId} (profile=${profileId}, policy.allowed=${[...policy.allowed].join(',') || '(none)'}, owner_approved=${policy.owner_approved})`);
+				return respond(200, { status: 'registered', deviceId, policy: { allowed: [...policy.allowed], owner_approved: policy.owner_approved } });
 			} catch (err) {
 				return respond(409, { status: 'failed', error: (err as Error).message });
 			}
