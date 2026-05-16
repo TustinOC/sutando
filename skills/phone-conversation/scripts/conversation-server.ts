@@ -972,6 +972,31 @@ function cleanupCall(callSid: string): void {
 		appendFileSync(join(WORKSPACE_DIR, 'data', 'call-metrics.jsonl'), JSON.stringify(metrics) + '\n');
 	} catch { /* best effort */ }
 
+	// Also emit per-call usage into the per-tenant cost-accounting ledger
+	// (PR #749). Mirrors voice-agent.writeVoiceMetrics() emit (PR #751):
+	// 1 request, total duration in ms, 1 tool_call per session.toolCalls
+	// entry. Token in/out counts deferred — same shape will light up when
+	// bodhi exposes them.
+	//
+	// device_id='phone-call:<callSid>' distinguishes phone-originated
+	// usage from laptop/glasses in audit-summary's by_device breakdown.
+	// For non-owner calls, the source string tags them so spam attribution
+	// is preserved without leaking the caller number into device_id keys.
+	(async () => {
+		try {
+			const { record } = await import(join(WORKSPACE_DIR, 'src', 'cost-accounting.js'));
+			const deviceId = `phone-call:${callSid}`;
+			const source = session.isOwner ? 'phone-conversation' : 'phone-conversation:non-owner';
+			record({ source, device_id: deviceId, kind: 'api_call', amount: 1, unit: 'request', model: VOICE_MODEL });
+			record({ source, device_id: deviceId, kind: 'api_call', amount: durationMs, unit: 'ms', model: VOICE_MODEL });
+			for (const tc of session.toolCalls || []) {
+				record({ source, device_id: deviceId, kind: 'tool', amount: 1, unit: 'tool_call', tool: tc.name });
+			}
+		} catch (err) {
+			console.log(`${ts()} [CostAccounting] phone emit error (non-fatal): ${(err as Error)?.message ?? err}`);
+		}
+	})();
+
 	// Auto-scan the latest call for issues (async, best effort)
 	try {
 		const scanScript = join(WORKSPACE_DIR, 'src', 'scan-call-logs.py');
