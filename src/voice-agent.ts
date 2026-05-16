@@ -784,10 +784,25 @@ const mainAgent: MainAgent = {
 
 		// Device-aware output routing — consumer for PR #741's scaffold.
 		// Env-gated default OFF; opt in via SUTANDO_OUTPUT_ROUTER=1. When on,
-		// the active non-laptop DeviceSession's HUD / file_push surfaces
-		// receive a render of the assistant turn alongside bodhi's normal
-		// voice path. Skipped for the laptop session because bodhi is already
-		// speaking through that transport — a routeReply would double-render.
+		// the active non-laptop DeviceSession's surfaces receive a render of
+		// the assistant turn alongside bodhi's voice path. Skipped for the
+		// laptop session because bodhi is already speaking through that
+		// transport — a routeReply would double-render.
+		//
+		// Silent-skip cases (intentional, not bugs):
+		// - getRecentTurns(2) shows only user turns (e.g. user interrupted,
+		//   or two quick user follow-ups before assistant). No assistant text
+		//   → text2 is empty → skip. The hook still fires after a real
+		//   assistant turn completes, so the typical case is covered.
+		// - kind='narrative' currently maps in #741's pickSurfaces to
+		//   voice + (file_push iff long body or attachments). For a Mentra
+		//   glasses session, this means voice fires through bodhi but HUD
+		//   does NOT render (narrative is the wrong kind for HUD). The
+		//   first behavior-visible effect of this hook is therefore
+		//   file_push to laptop on long replies; HUD render needs
+		//   kind='short' or 'alert', which a future PR can route based on
+		//   reply length / explicit hint from the model. See PR description
+		//   for the deferred kind-heuristic note.
 		if (process.env.SUTANDO_OUTPUT_ROUTER === '1') {
 			try {
 				const turns2 = ctx.getRecentTurns(2) as Array<{ role?: string; content?: string }>;
@@ -798,8 +813,14 @@ const mainAgent: MainAgent = {
 					const active = ds.activeForVision();
 					if (active && active.profile.category !== 'laptop') {
 						const { routeReply } = await import('./output-router.js');
-						const result = await routeReply(active, { text: text2, kind: 'narrative' });
-						console.log(`${ts()} [Agent] output-router → ${active.deviceId} used=[${result.used.join(',')}] dropped=[${result.dropped.join(',')}]`);
+						// Short replies (<=80 chars) get kind='short' so HUD fires
+						// for glasses-class devices; everything else stays
+						// 'narrative' (voice + maybe file_push for long bodies).
+						// Heuristic, not a contract — refine when real device
+						// dogfood reveals what feels right (per sonichi review).
+						const kind = text2.length <= 80 ? 'short' : 'narrative';
+						const result = await routeReply(active, { text: text2, kind });
+						console.log(`${ts()} [Agent] output-router → ${active.deviceId} kind=${kind} used=[${result.used.join(',')}] dropped=[${result.dropped.join(',')}]`);
 					}
 				}
 			} catch (err) {
