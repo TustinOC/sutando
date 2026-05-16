@@ -1,8 +1,9 @@
 """Sutando — Per-Tenant Identity (Python twin of src/tenant.ts).
 
-Mirrors the TypeScript module shipped in PR #748. See `src/tenant.ts` for the
-authoritative design doc — the layout, fallback ordering, and validation
-rules are identical.
+Mirrors the TypeScript module shipped in PR #748. Both languages implement
+the same design — the layout, fallback ordering, and validation rules are
+identical, and changes must land in both to stay aligned. See `src/tenant.ts`
+for the parallel implementation.
 
 Three-level path model:
 
@@ -28,6 +29,7 @@ import json
 import os
 import re
 import socket
+import sys
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -54,9 +56,9 @@ def _read_from_state_file(workspace: Path) -> Optional[str]:
         if isinstance(tid, str) and TENANT_ID_PATTERN.match(tid):
             return tid
         if tid is not None:
-            print(f"[Tenant] state/tenant.json id {tid!r} failed validation; using default")
+            print(f"[Tenant] state/tenant.json id {tid!r} failed validation; using default", file=sys.stderr)
     except Exception as e:
-        print(f"[Tenant] failed to read state/tenant.json: {e}")
+        print(f"[Tenant] failed to read state/tenant.json: {e}", file=sys.stderr)
     return None
 
 
@@ -74,7 +76,7 @@ def tenant_id(workspace: Optional[Path] = None) -> str:
         _cached_tenant_id = env_id
         return env_id
     if env_id:
-        print(f"[Tenant] SUTANDO_TENANT_ID {env_id!r} failed validation; using default")
+        print(f"[Tenant] SUTANDO_TENANT_ID {env_id!r} failed validation; using default", file=sys.stderr)
     from_state = _read_from_state_file(ws)
     if from_state:
         _cached_tenant_id = from_state
