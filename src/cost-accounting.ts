@@ -73,8 +73,15 @@ function ledgerPath(forTenant: string): string {
 	return tenantPath(`cost-accounting/usage-${forTenant}.jsonl`, 'shared', undefined, forTenant);
 }
 
+// Memoize mkdir targets so the per-record `mkdirSync` doesn't fire a
+// redundant syscall on every emit. Recursive mkdir is cheap but
+// non-zero; record() is called per tool/session-end, so the cache
+// saves N-1 syscalls per ledger across the lifetime of the process.
+const _ensuredDirs = new Set<string>();
 function ensureDir(path: string): void {
-	try { mkdirSync(dirname(path), { recursive: true }); } catch {}
+	const dir = dirname(path);
+	if (_ensuredDirs.has(dir)) return;
+	try { mkdirSync(dir, { recursive: true }); _ensuredDirs.add(dir); } catch {}
 }
 
 /** Emit one usage event. Atomic single write — `O_APPEND` guarantees
@@ -102,7 +109,7 @@ export interface UsageRollup {
 		requests: number;
 		ms: number;
 	};
-	by_model: Record<string, { in_tokens: number; out_tokens: number; requests: number }>;
+	by_model: Record<string, { in_tokens: number; out_tokens: number; requests: number; ms: number }>;
 	by_tool: Record<string, number>;
 	by_device: Record<string, number>;
 	event_count: number;
@@ -113,6 +120,12 @@ export interface UsageRollup {
  *
  *  `from` / `to` are ISO timestamps (inclusive). Omit to roll up all.
  *  Returns zeros + empty maps when no ledger exists yet.
+ *
+ *  TODO(scale): currently reads the whole ledger into memory. Fine for
+ *  near-term (weeks of events per tenant). When a long-running tenant
+ *  accumulates months of events and rollup() crosses ~50MB+, switch to
+ *  `createReadStream` + `readline` for streaming aggregation. Trigger:
+ *  audit-summary on multi-month windows starts feeling slow.
  */
 export function rollup(opts: { tenant_id?: string; from?: string; to?: string } = {}): UsageRollup {
 	const tid = opts.tenant_id ?? tenantId();
@@ -146,10 +159,11 @@ export function rollup(opts: { tenant_id?: string; from?: string; to?: string } 
 		if (event.unit === 'request') empty.totals.requests += event.amount;
 		if (event.unit === 'ms') empty.totals.ms += event.amount;
 		if (event.model) {
-			const m = (empty.by_model[event.model] ??= { in_tokens: 0, out_tokens: 0, requests: 0 });
+			const m = (empty.by_model[event.model] ??= { in_tokens: 0, out_tokens: 0, requests: 0, ms: 0 });
 			if (event.unit === 'in_tokens') m.in_tokens += event.amount;
 			if (event.unit === 'out_tokens') m.out_tokens += event.amount;
 			if (event.unit === 'request') m.requests += event.amount;
+			if (event.unit === 'ms') m.ms += event.amount;
 		}
 		if (event.tool) {
 			empty.by_tool[event.tool] = (empty.by_tool[event.tool] ?? 0) + event.amount;

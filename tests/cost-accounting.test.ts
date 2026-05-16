@@ -98,25 +98,36 @@ describe('cost-accounting ledger', () => {
 		assert.equal(rollup({ tenant_id: 'beta' }).totals.in_tokens, 200);
 	});
 
-	it('time-range filter respects from/to', () => {
-		// Three events with synthetic but real timestamps.
+	it('time-range filter respects from/to', async () => {
+		// Three events spaced ≥2ms apart. ts is ms-precision, so adjacent
+		// record() calls can collide on the same ms; setTimeout(2) guarantees
+		// separation so the from/to filter has a stable cut point.
 		const path = __ledgerPathForTests();
-		// We can't easily inject fake timestamps via `record()` because it
-		// stamps with `new Date()`; instead write three events with real
-		// timestamps spaced over the test.
 		record({ source: 's', kind: 'token', amount: 1, unit: 'in_tokens', model: 'm' });
-		const t1 = new Date().toISOString();
-		record({ source: 's', kind: 'token', amount: 1, unit: 'in_tokens', model: 'm' });
+		await new Promise((r) => setTimeout(r, 2));
 		const t2 = new Date().toISOString();
+		await new Promise((r) => setTimeout(r, 2));
+		record({ source: 's', kind: 'token', amount: 1, unit: 'in_tokens', model: 'm' });
+		await new Promise((r) => setTimeout(r, 2));
 		record({ source: 's', kind: 'token', amount: 1, unit: 'in_tokens', model: 'm' });
 		const all = rollup();
 		assert.equal(all.event_count, 3);
-		// From t2: should include only events at or after t2 — at minimum the
-		// third event.
 		const fromT2 = rollup({ from: t2 });
-		assert.ok(fromT2.event_count >= 1 && fromT2.event_count <= 2);
-		// Sanity: file path exists.
+		assert.equal(fromT2.event_count, 2);
 		assert.ok(path.endsWith('.jsonl'));
+	});
+
+	it('by_model now breaks out ms (for future audit-UI latency view)', () => {
+		record({ source: 's', kind: 'api_call', amount: 1, unit: 'request', model: 'gemini-2.5-flash' });
+		record({ source: 's', kind: 'api_call', amount: 2500, unit: 'ms', model: 'gemini-2.5-flash' });
+		record({ source: 's', kind: 'api_call', amount: 1, unit: 'request', model: 'gemini-2.5-pro' });
+		record({ source: 's', kind: 'api_call', amount: 800, unit: 'ms', model: 'gemini-2.5-pro' });
+		const r = rollup();
+		assert.equal(r.by_model['gemini-2.5-flash'].requests, 1);
+		assert.equal(r.by_model['gemini-2.5-flash'].ms, 2500);
+		assert.equal(r.by_model['gemini-2.5-pro'].requests, 1);
+		assert.equal(r.by_model['gemini-2.5-pro'].ms, 800);
+		assert.equal(r.totals.ms, 3300);
 	});
 
 	it('by_device fanout', () => {
