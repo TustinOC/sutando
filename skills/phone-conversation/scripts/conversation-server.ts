@@ -984,7 +984,11 @@ function cleanupCall(callSid: string): void {
 	// is preserved without leaking the caller number into device_id keys.
 	(async () => {
 		try {
-			const { record } = await import(join(WORKSPACE_DIR, 'src', 'cost-accounting.js'));
+			// Static relative import resolves via Node ESM + TypeScript's
+			// module resolver (better than the previous computed
+			// `import(join(WORKSPACE_DIR, ...))` which confused static
+			// analyzers, bundlers, and tsc's path tracking).
+			const { record } = await import('../../../src/cost-accounting.js');
 			const deviceId = `phone-call:${callSid}`;
 			const source = session.isOwner ? 'phone-conversation' : 'phone-conversation:non-owner';
 			record({ source, device_id: deviceId, kind: 'api_call', amount: 1, unit: 'request', model: VOICE_MODEL });
@@ -993,7 +997,9 @@ function cleanupCall(callSid: string): void {
 				record({ source, device_id: deviceId, kind: 'tool', amount: 1, unit: 'tool_call', tool: tc.name });
 			}
 		} catch (err) {
-			console.log(`${ts()} [CostAccounting] phone emit error (non-fatal): ${(err as Error)?.message ?? err}`);
+			// Include callSid so concurrent-call failures can be correlated
+			// when multiple emits race close together.
+			console.log(`${ts()} [CostAccounting] ${callSid} phone emit error (non-fatal): ${(err as Error)?.message ?? err}`);
 		}
 	})();
 
