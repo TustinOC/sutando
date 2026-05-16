@@ -110,6 +110,16 @@ export function pickSurfaces(
 	} else if (kind === 'alert') {
 		useHud = hasHud;
 		useVoice = hasVoice;
+		// `useFilePush = true` here is intentionally permissive — the
+		// "alert fans to all surfaces" rule from the roadmap. The actual
+		// `file_push.push()` invocation in `routeReply()` is gated on
+		// `reply.attachments?.length`, so an attachment-less alert
+		// produces NO spurious file write — the permissive flag here
+		// just says "we're willing to fire file_push IF there's something
+		// to send." If a future alert kind needs to send a file even
+		// without explicit attachments (e.g. "alert + auto-attach the
+		// triggering log line"), the caller passes attachments and this
+		// stays correct.
 		useFilePush = hasFilePush;
 	}
 
