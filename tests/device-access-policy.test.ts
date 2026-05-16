@@ -76,6 +76,18 @@ describe('defaultPolicyFor — category matrix', () => {
 		assert.equal(p.owner_approved, false);
 	});
 
+	it('recorder: voice_passthrough stays denied even with owner override of other caps', () => {
+		// Privacy-critical assertion. The CATEGORY_DEFAULTS comment explicitly
+		// states "Sutando never broadcasts through a recording pendant" —
+		// if a future change adds voice_passthrough to the recorder default
+		// list (or owner accidentally grants it), this test fails. Owner can
+		// still opt in via state/device-policy.json explicitly if they want
+		// to, but the default must stay denied.
+		const p = defaultPolicyFor(profile({ id: 'omi-pendant', category: 'recorder' }));
+		assert.ok(!p.allowed.has('voice_passthrough'),
+			'CATEGORY_DEFAULTS.recorder must NOT include voice_passthrough — Sutando does not broadcast through pendants');
+	});
+
 	it('unknown category (other) → empty allow set, owner_approved=false', () => {
 		const p = defaultPolicyFor(profile({ id: 'mystery-device', category: 'other' }));
 		assert.equal(p.allowed.size, 0);

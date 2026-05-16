@@ -161,14 +161,14 @@ export function attachPolicy(session: DeviceSession, override?: Partial<DeviceAc
 	if (override?.allowed) base.allowed = new Set(override.allowed);
 	if (override?.label) base.label = override.label;
 	if (override?.owner_approved !== undefined) base.owner_approved = override.owner_approved;
-	(session as DeviceSession & { policy?: DeviceAccessPolicy }).policy = base;
+	session.policy = base;
 	return base;
 }
 
 /** Is the device allowed to perform `capability`? Returns false (deny) if
  *  no policy has been attached — this is the safe default. */
 export function checkPolicy(session: DeviceSession, capability: Capability): boolean {
-	const p = (session as DeviceSession & { policy?: DeviceAccessPolicy }).policy;
+	const p = session.policy;
 	if (!p) return false;
 	return p.allowed.has(capability);
 }
