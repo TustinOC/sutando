@@ -127,9 +127,12 @@ export type PathScope = 'device' | 'shared';
  *  exists, returns the *preferred* private-dir path so an existsSync
  *  check fails gracefully and a subsequent write lands in the right place.
  */
-export function tenantPath(filename: string, scope: PathScope = 'shared', workspace?: string): string {
+export function tenantPath(filename: string, scope: PathScope = 'shared', workspace?: string, forTenant?: string): string {
 	const ws = workspace ?? workspaceDir();
-	const id = tenantId(ws);
+	// Cross-tenant queries pass `forTenant` explicitly; default uses the
+	// current cached tenant id. Keeping both shapes lets a caller read
+	// another tenant's data without invalidating their own cache.
+	const id = forTenant ?? tenantId(ws);
 	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
 
 	if (privateRoot) {
