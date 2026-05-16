@@ -29,6 +29,14 @@ export function personalPath(filename: string, workspace?: string): string {
 	// Avatar fallback — stand-avatar.png ships under assets/ in the public
 	// repo. Preserve the special case so a fresh install with no private
 	// dir still resolves the asset.
+	//
+	// TODO(classification): the avatar is conceptually fleet-shared (every
+	// Mac uses the same image), so it would arguably belong under
+	// `sharedPersonalPath`. Moving it would subtly change resolution order
+	// (`tenantPath(..., 'shared')` would check `tenant-<id>/` before the
+	// assets/ fallback) which could mask a future per-tenant-avatar feature.
+	// Leaving here for now; revisit if/when avatars get per-tenant
+	// customization.
 	if (filename === 'stand-avatar.png') {
 		const inAssets = join(ws, 'assets', filename);
 		if (existsSync(inAssets)) return inAssets;
