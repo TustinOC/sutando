@@ -59,6 +59,17 @@ function expandHome(p: string): string {
 	return p.replace(/^~/, process.env.HOME || '');
 }
 
+// Memoize the short hostname — called 3× per tenantPath() invocation,
+// and tenantPath() fires on every personalPath/sharedPersonalPath call
+// after the #753 migration. Hostname doesn't change at runtime; cache.
+const HOSTNAME_SHORT = hostname().split('.')[0];
+
+// Track filenames where we've already warned about both new + legacy
+// paths existing simultaneously. Without de-dup, every existsSync
+// check during partial migration would log a warning — owner would
+// see N×M repeated lines for N readers × M filenames.
+const _partialMigrationWarned = new Set<string>();
+
 function workspaceDir(): string {
 	return process.env.SUTANDO_WORKSPACE || process.cwd();
 }
@@ -125,17 +136,33 @@ export function tenantPath(filename: string, scope: PathScope = 'shared', worksp
 		const root = expandHome(privateRoot);
 		const tenantRoot = join(root, `tenant-${id}`);
 		const candidate = scope === 'device'
-			? join(tenantRoot, `machine-${hostname().split('.')[0]}`, filename)
+			? join(tenantRoot, `machine-${HOSTNAME_SHORT}`, filename)
 			: join(tenantRoot, filename);
-		if (existsSync(candidate)) return candidate;
 		// Single-tenant pre-migration fallback: an existing install may
 		// still have files at $SUTANDO_PRIVATE_DIR/machine-<host>/<file>
 		// (no tenant-default prefix). Try that path too before workspace.
+		const candidateExists = existsSync(candidate);
 		if (id === 'default') {
 			const legacy = scope === 'device'
-				? join(root, `machine-${hostname().split('.')[0]}`, filename)
+				? join(root, `machine-${HOSTNAME_SHORT}`, filename)
 				: join(root, filename);
-			if (existsSync(legacy)) return legacy;
+			const legacyExists = existsSync(legacy);
+			// Partial-migration warn: both paths exist for the same filename
+			// → owner has moved some files but not all. Resolver picks the
+			// new tenant path silently; warn-once so owner notices the
+			// inconsistency. Cheap (one log per filename per process).
+			if (candidateExists && legacyExists && !_partialMigrationWarned.has(filename)) {
+				_partialMigrationWarned.add(filename);
+				console.warn(
+					`[Tenant] partial migration: '${filename}' exists at BOTH ` +
+					`'${candidate}' AND legacy '${legacy}'. Resolver picks the tenant path. ` +
+					`Move or remove one to silence this warning.`,
+				);
+			}
+			if (candidateExists) return candidate;
+			if (legacyExists) return legacy;
+		} else {
+			if (candidateExists) return candidate;
 		}
 	}
 
@@ -148,13 +175,14 @@ export function tenantPath(filename: string, scope: PathScope = 'shared', worksp
 		const root = expandHome(privateRoot);
 		const tenantRoot = join(root, `tenant-${id}`);
 		return scope === 'device'
-			? join(tenantRoot, `machine-${hostname().split('.')[0]}`, filename)
+			? join(tenantRoot, `machine-${HOSTNAME_SHORT}`, filename)
 			: join(tenantRoot, filename);
 	}
 	return wsPath;
 }
 
-/** @internal — test-only reset for the tenant-id cache. */
+/** @internal — test-only reset for the tenant-id cache + partial-migration warn dedup. */
 export function __resetForTests(): void {
 	cachedTenantId = null;
+	_partialMigrationWarned.clear();
 }

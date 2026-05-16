@@ -154,6 +154,32 @@ describe('tenantPath resolution', () => {
 		assert.equal(p, join(tempPrivate, 'tenant-acme', 'does-not-exist.md'));
 	});
 
+	it('partial migration: warns once when both tenant + legacy paths exist for the same filename', () => {
+		// Set up BOTH the new tenant-default/notes.md AND the legacy
+		// $PRIVATE_DIR/notes.md (default tenant, scope='shared').
+		const tenantDir = join(tempPrivate, 'tenant-default');
+		mkdirSync(tenantDir, { recursive: true });
+		writeFileSync(join(tenantDir, 'notes.md'), 'new');
+		writeFileSync(join(tempPrivate, 'notes.md'), 'legacy');
+
+		// Spy on console.warn — count partial-migration warnings.
+		const origWarn = console.warn;
+		let warnCount = 0;
+		console.warn = (...args: unknown[]) => {
+			const msg = String(args[0] ?? '');
+			if (msg.includes('partial migration')) warnCount++;
+		};
+		try {
+			const p1 = tenantPath('notes.md', 'shared');
+			const p2 = tenantPath('notes.md', 'shared');  // second call same filename
+			assert.equal(p1, join(tenantDir, 'notes.md'));  // tenant path wins
+			assert.equal(p2, join(tenantDir, 'notes.md'));
+			assert.equal(warnCount, 1, 'partial-migration warning should fire exactly once per filename');
+		} finally {
+			console.warn = origWarn;
+		}
+	});
+
 	it('no SUTANDO_PRIVATE_DIR → workspace path always', () => {
 		delete process.env.SUTANDO_PRIVATE_DIR;
 		writeFileSync(join(tempWs, 'x.md'), 'x');
