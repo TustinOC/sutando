@@ -149,6 +149,7 @@ let sessionRef: MinimalSession | null = null;
 // unchanged while opening a clean seam for Mentra glasses, phone agent,
 // and future devices to register their own sessions.
 import * as deviceSession from './device-session.js';
+import * as ocProfileCatalog from './oc-profile-catalog.js';
 export { deviceSession };
 
 export function setVisionSession(session: unknown): void {
@@ -559,30 +560,41 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			if (!deviceId || !profileId) {
 				return respond(400, { status: 'failed', error: 'deviceId and profileId required' });
 			}
-			// Minimum-viable profile inference — full OC YAML loader is its own
-			// follow-up. For now we accept any profileId and synthesize a
-			// best-guess shape so the registry has a complete object. Bridges
-			// can override fields via the body if needed.
-			// Validate category against the known union so a lying caller
-			// (or a typo) can't pollute the registry with `category:'spaceship'`
-			// — downstream consumers do `switch(profile.category)` and would
-			// silently fall through.
+			// Try the OC profile catalog (PR #759) first. If the profileId
+			// resolves to a known device-profile yaml, use that as the base
+			// and let body fields override individual properties. Bridges
+			// (Mentra, Even G2, Meta Ray-Ban) can register with just
+			// { deviceId, profileId } and get a fully-formed profile.
+			//
+			// When the catalog is absent (no OC checkout) or profileId is
+			// not in it, fall back to synthesizing the profile from body
+			// fields — preserves backward compatibility for Mentra-bridge
+			// (PR #740) which currently sends all fields explicitly.
 			const VALID_CATEGORIES = new Set(['glasses', 'audio_wearable', 'recorder', 'phone', 'laptop', 'other']);
-			const rawCategory = typeof body.category === 'string' ? body.category : 'other';
+			const catalogProfile = ocProfileCatalog.loadProfile(profileId);
+			const rawCategory = typeof body.category === 'string'
+				? body.category
+				: (catalogProfile?.category ?? 'other');
 			if (!VALID_CATEGORIES.has(rawCategory)) {
 				return respond(400, { status: 'failed', error: `invalid category "${rawCategory}"; must be one of ${[...VALID_CATEGORIES].join(',')}` });
 			}
-			const camera = (body.camera as deviceSession.DeviceProfile['camera']) ?? { enabled: true };
-			const hud = (body.hud as deviceSession.DeviceProfile['hud']) ?? { enabled: false };
+			const camera = (body.camera as deviceSession.DeviceProfile['camera'])
+				?? catalogProfile?.camera
+				?? { enabled: true };
+			const hud = (body.hud as deviceSession.DeviceProfile['hud'])
+				?? catalogProfile?.hud
+				?? { enabled: false };
 			const profile: deviceSession.DeviceProfile = {
 				id: profileId,
-				name: typeof body.name === 'string' ? body.name : profileId,
+				name: typeof body.name === 'string' ? body.name : (catalogProfile?.name ?? profileId),
 				category: rawCategory as deviceSession.DeviceProfile['category'],
-				mic: body.mic !== false,
+				mic: body.mic !== undefined ? body.mic !== false : (catalogProfile?.mic ?? true),
 				camera,
 				hud,
-				gestures: Array.isArray(body.gestures) ? (body.gestures as string[]) : undefined,
-				role: typeof body.role === 'string' ? body.role : undefined,
+				gestures: Array.isArray(body.gestures)
+					? (body.gestures as string[])
+					: catalogProfile?.gestures,
+				role: typeof body.role === 'string' ? body.role : catalogProfile?.role,
 			};
 			// Reuse the voice-agent's transport — same one today's `sessionRef`
 			// points at — so registered devices get framed into the same Gemini
