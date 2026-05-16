@@ -869,6 +869,33 @@ async function main() {
 		} catch (err) {
 			console.log(`${ts()} [Observability] Failed to write metrics: ${err}`);
 		}
+		// Also record per-session usage in the per-tenant cost-accounting
+		// ledger from PR #749. Token counts aren't yet exposed by the
+		// realtime transport, so this first cut records what we *do* have:
+		// session duration + per-tool invocation counts. When bodhi exposes
+		// in/out tokens (or we add a thin counter around the transport),
+		// the same hook lights up the token totals without changing shape.
+		//
+		// Dynamic import keeps cost-accounting an optional dependency — if
+		// the module is absent (older worktree, partial deploy), the catch
+		// below silently skips emit rather than crash session-end.
+		(async () => {
+			try {
+				const { record } = await import('./cost-accounting.js');
+				const deviceId = 'laptop'; // future per-device emission lives
+				                            // in the bridge that owns the
+				                            // DeviceSession (PR #740 / Mentra).
+				record({ source: 'voice-agent', device_id: deviceId, kind: 'api_call', amount: 1, unit: 'request', model: VOICE_MODEL });
+				if (voiceSessionStart) {
+					record({ source: 'voice-agent', device_id: deviceId, kind: 'api_call', amount: Date.now() - voiceSessionStart, unit: 'ms', model: VOICE_MODEL });
+				}
+				for (const tc of voiceToolCalls) {
+					record({ source: 'voice-agent', device_id: deviceId, kind: 'tool', amount: 1, unit: 'tool_call', tool: tc.name });
+				}
+			} catch (err) {
+				console.log(`${ts()} [CostAccounting] non-fatal emit error: ${(err as Error)?.message ?? err}`);
+			}
+		})();
 	}
 
 	const session = new VoiceSession({
