@@ -544,7 +544,18 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			const active = deviceSession.activeForVision();
 			if (active && !checkPolicy(active, 'vision_frame_send')) {
 				logDenial(active, 'vision_frame_send', 'POST /vision/frame');
-				return respond(403, { status: 'failed', error: `device ${active.deviceId} lacks vision_frame_send capability` });
+				// Surface the current policy so the caller can immediately see
+				// what's granted vs. requested. Most useful for owner-edited
+				// state/device-policy.json typos — without this the bridge
+				// author has to fish for the granted set via /vision/devices.
+				return respond(403, {
+					status: 'failed',
+					error: `device ${active.deviceId} lacks vision_frame_send capability`,
+					current_policy: {
+						allowed: active.policy ? [...active.policy.allowed] : [],
+						owner_approved: active.policy?.owner_approved ?? false,
+					},
+				});
 			}
 			const chunks: Buffer[] = [];
 			req.on('data', (c: Buffer) => chunks.push(c));
