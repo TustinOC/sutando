@@ -141,22 +141,36 @@ interface MinimalSession {
 
 let sessionRef: MinimalSession | null = null;
 
-// TODO(roadmap §5 Now: "Define DeviceSession"): Replace this single-session
-// global with a DeviceSession map keyed by device ID. Today push-mode senders
-// (browser, Mentra glasses, Discord/Telegram photo helper, phone agent) all
-// race for one slot — last-set wins, and the phone-agent fix in
-// skills/phone-conversation/scripts/conversation-server.ts uses a fragile
-// swap-and-restore. Once DeviceSession exists, frames should carry a target
-// device ID and fan out only to that session.
+// DeviceSession registry (PR scaffold for roadmap §5 Now item 3, design at
+// `notes/devicesession-design-2026-05-16.md`). When a `DeviceSession` is
+// activated via `/vision/register`+`activate()`, frames route to that
+// session's voice transport. Otherwise the legacy `sessionRef` (set by
+// `setVisionSession`) is used — preserves today's browser/web-client path
+// unchanged while opening a clean seam for Mentra glasses, phone agent,
+// and future devices to register their own sessions.
+import * as deviceSession from './device-session.js';
+export { deviceSession };
+
 export function setVisionSession(session: unknown): void {
 	sessionRef = session as MinimalSession | null;
 	if (!session) stopStream();
 }
 
 function getSendFile(): ((b64: string, mime: string) => void) | null {
+	// Prefer the active DeviceSession when one is registered — that's the
+	// per-device routing the §5 Now item asks for. Falls back to the legacy
+	// `sessionRef` (today's laptop/browser path) when no DeviceSession is
+	// active. This dual-path will collapse to DeviceSession-only once
+	// voice-agent registers its own laptop session unconditionally (separate
+	// follow-up).
+	const active = deviceSession.activeForVision();
+	const voice = active?.output.find((o) => o.kind === 'voice');
+	if (voice && voice.kind === 'voice') {
+		const t = voice.transport;
+		if (t.sendFile && t.isConnected !== false) return t.sendFile.bind(t);
+	}
 	const t = sessionRef?.transport;
 	if (!t || !t.sendFile) return null;
-	// isConnected is optional — if exposed and false, skip; otherwise trust the call.
 	if (t.isConnected === false) return null;
 	return t.sendFile.bind(t);
 }
@@ -531,6 +545,82 @@ export function startVisionControlServer(port: number = DEFAULT_CONTROL_PORT): S
 			});
 			req.on('error', () => respond(500, { status: 'failed', error: 'request error' }));
 			return;
+		}
+		// DeviceSession registry endpoints (PR scaffold for roadmap §5 Now
+		// item 3). Bridges like Mentra POST to /vision/register on session
+		// connect; the registered session becomes the vision target so
+		// frames from that device land in the local voice transport. See
+		// `notes/devicesession-design-2026-05-16.md`.
+		if (url.pathname === '/vision/register' && req.method === 'POST') {
+			const body = await readJsonBody(req);
+			const deviceId = typeof body.deviceId === 'string' ? body.deviceId : undefined;
+			const profileId = typeof body.profileId === 'string' ? body.profileId : undefined;
+			const pushSourceLabel = typeof body.pushSourceLabel === 'string' ? body.pushSourceLabel : null;
+			if (!deviceId || !profileId) {
+				return respond(400, { status: 'failed', error: 'deviceId and profileId required' });
+			}
+			// Minimum-viable profile inference — full OC YAML loader is its own
+			// follow-up. For now we accept any profileId and synthesize a
+			// best-guess shape so the registry has a complete object. Bridges
+			// can override fields via the body if needed.
+			const camera = (body.camera as deviceSession.DeviceProfile['camera']) ?? { enabled: true };
+			const hud = (body.hud as deviceSession.DeviceProfile['hud']) ?? { enabled: false };
+			const profile: deviceSession.DeviceProfile = {
+				id: profileId,
+				name: typeof body.name === 'string' ? body.name : profileId,
+				category: (body.category as deviceSession.DeviceProfile['category']) ?? 'other',
+				mic: body.mic !== false,
+				camera,
+				hud,
+				gestures: Array.isArray(body.gestures) ? (body.gestures as string[]) : undefined,
+				role: typeof body.role === 'string' ? body.role : undefined,
+			};
+			// Reuse the voice-agent's transport — same one today's `sessionRef`
+			// points at — so registered devices get framed into the same Gemini
+			// Live session. Per-device transports are a §5 Next concern.
+			const transport = sessionRef?.transport ?? {};
+			const session: deviceSession.DeviceSession = {
+				deviceId,
+				profile,
+				createdAt: Date.now(),
+				lastFrameAt: null,
+				pushMode: false,
+				pushSourceLabel,
+				frameCount: 0,
+				output: [{ kind: 'voice', transport }],
+				close: async () => {},
+			};
+			try {
+				deviceSession.register(session);
+				deviceSession.activate(deviceId);
+				console.log(`${ts()} [Vision] device registered + activated: ${deviceId} (profile=${profileId})`);
+				return respond(200, { status: 'registered', deviceId });
+			} catch (err) {
+				return respond(409, { status: 'failed', error: (err as Error).message });
+			}
+		}
+		if (url.pathname === '/vision/unregister' && req.method === 'POST') {
+			const body = await readJsonBody(req);
+			const deviceId = typeof body.deviceId === 'string' ? body.deviceId : undefined;
+			if (!deviceId) {
+				return respond(400, { status: 'failed', error: 'deviceId required' });
+			}
+			deviceSession.unregister(deviceId);
+			console.log(`${ts()} [Vision] device unregistered: ${deviceId}`);
+			return respond(200, { status: 'unregistered', deviceId });
+		}
+		if (url.pathname === '/vision/devices' && req.method === 'GET') {
+			return respond(200, {
+				active: deviceSession.activeForVision()?.deviceId ?? null,
+				devices: deviceSession.list().map((s) => ({
+					deviceId: s.deviceId,
+					profile: s.profile,
+					createdAt: s.createdAt,
+					pushMode: s.pushMode,
+					pushSourceLabel: s.pushSourceLabel,
+					frameCount: s.frameCount,
+				})),
+			});
 		}
 		respond(404, { error: 'not found' });
 	});
