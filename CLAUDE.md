@@ -181,6 +181,12 @@ If Sutando.app's checkWatcher Timer sends `watcher` as a keystroke to the sutand
 
 **Cancel handling.** When you read a task whose `task:` body starts with `CANCEL_INSTRUCTION:` — written by the `cancel_task` voice tool — stop any in-flight work on the referenced task ID, write a brief confirm result for the CANCEL_INSTRUCTION task itself (e.g. `"Cancelled task-X (was in progress)"` or `"task-X already completed, nothing to cancel"`), and do NOT process the original referenced task. The CANCEL_INSTRUCTION task uses the regular task pipeline as its signal channel — picking it up means you've reached the user's cancel intent.
 
+**Per-channel behavior config.** Before processing any task with a `channel_id:` field, read `state/thread-config.json`. The file maps `channel_id` → behavior-override flags. Apply any matching rule for the duration of that task. Current flags:
+- `auto_engage_without_mention: true` — in this channel, do not require an explicit `@Mini` (or other bot) mention to engage; reply to any message that would benefit from your input.
+- Add new channels here as the owner authorizes them; don't extrapolate flags from one channel to another.
+
+This file is the canonical source of truth for per-channel behavior, not memory entries (which are too easy to overlook). Memory entries about specific channels should point at this config, not duplicate its content.
+
 **Voice session context.** Voice-agent's Gemini context window rolls off after ~10 minutes of turns; voice forgets specifics like "the post" or "Mini Draft A" that landed earlier in your session. Whenever you make a durable decision the voice agent may need to reference later — picking a draft, writing text to clipboard for a pending paste, committing to an active task — update `state/voice-session-context.json`. Schema:
 ```json
 {
