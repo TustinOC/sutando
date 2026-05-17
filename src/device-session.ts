@@ -71,6 +71,17 @@ export type OutputChannel =
 
 export type HudZone = 'center' | 'top' | 'bottom' | 'left' | 'right';
 
+/** Per-device access policy declared by `src/device-access-policy.ts`.
+ *  Defined here so DeviceSession can carry the field without a circular
+ *  import from device-access-policy.ts (which uses DeviceProfile). */
+export interface DeviceAccessPolicyRef {
+	/** Capabilities this device is granted. Set of capability strings —
+	 *  see `device-access-policy.ts` for the canonical Capability union. */
+	allowed: Set<string>;
+	label?: string;
+	owner_approved: boolean;
+}
+
 /** One connected device. Owns the slice of state today's vision-tools
  *  globals encode (push mode, source label, frame counts). */
 export interface DeviceSession {
@@ -82,6 +93,9 @@ export interface DeviceSession {
 	pushSourceLabel: string | null;
 	frameCount: number;
 	output: OutputChannel[];
+	/** Optional — populated by `attachPolicy()` from device-access-policy.ts.
+	 *  When absent, `checkPolicy()` denies everything (safe default). */
+	policy?: DeviceAccessPolicyRef;
 	/** Idempotent teardown. Called by `unregister()`. */
 	close: () => Promise<void>;
 }
