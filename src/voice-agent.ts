@@ -24,9 +24,10 @@
 import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
-import { existsSync, readFileSync, readdirSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { execSync as execSyncTop } from 'node:child_process';
-import { inlineTools } from './inline-tools.js';
+import { inlineTools, coreDocumentedSkills } from './inline-tools.js';
+import { setVisionSession, startVisionControlServer, stopVisionControlServer } from './vision-tools.js';
 import { injectText } from './browser-tools.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -93,15 +94,72 @@ const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
 // Default to sutando/ so Claude Code subprocess picks up CLAUDE.md automatically
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || new URL('..', import.meta.url).pathname;
+const PIDFILE = join(WORKSPACE_DIR, '.voice-agent.pid');
 const DEFAULT_THREAD_KEY = 'sutando_main';
 const SESSION_ID = `session_${Date.now()}`;
 const PHONE_PORT = Number(process.env.PHONE_PORT) || 3100;
 const PHONE_SERVER_URL = `http://localhost:${PHONE_PORT}`;
 const CALL_RESULTS_DIR = join(new URL('.', import.meta.url).pathname, '..', 'results', 'calls');
 
+/** Single-instance lock for this workspace.
+ *
+ * Voice-agent owns two ports (`:9900` WS server, `:7847` vision control) plus
+ * a fan-out of file watchers (tasks/, results/, context-drop, voice-state).
+ * A second copy that races for those ports — typically a terminal-launched
+ * `npm exec tsx src/voice-agent.ts` next to a healthy launchd one — used to
+ * survive an EADDRINUSE on `:9900` AND keep `:7847` bound with a dead Gemini
+ * session, so push-mode `/vision/start` from the web-client returned
+ * `No active voice session — vision streaming requires a connected session.`
+ *
+ * The pidfile prevents the duplicate from reaching ANY side effect (no port
+ * binds, no watchers wired, no `setVisionSession`) — it exits before the
+ * `VoiceSession` constructor runs.
+ *
+ * Stale pidfiles (SIGKILL / crash without `process.on('exit')` firing) are
+ * detected via `process.kill(pid, 0)` and overwritten. The rare race between
+ * two simultaneous startups is backstopped by the EADDRINUSE branch in
+ * `uncaughtException` below.
+ */
+function isProcessAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function acquirePidLock(): void {
+	const myPid = process.pid;
+	try {
+		// Atomic create-or-fail (O_EXCL). If another voice-agent is starting
+		// concurrently, exactly one open() wins; the other gets EEXIST.
+		const fd = openSync(PIDFILE, 'wx');
+		try { writeSync(fd, Buffer.from(`${myPid}\n`)); }
+		finally { closeSync(fd); }
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+		let raw = '';
+		try { raw = readFileSync(PIDFILE, 'utf-8').trim(); } catch {}
+		const oldPid = Number.parseInt(raw, 10);
+		if (oldPid && oldPid !== myPid && isProcessAlive(oldPid)) {
+			console.error(`${ts()} [Startup] FATAL: voice-agent already running (pid ${oldPid}) for ${WORKSPACE_DIR}`);
+			console.error(`${ts()} [Startup] Kill it first or remove ${PIDFILE}. Exiting.`);
+			process.exit(1);
+		}
+		console.warn(`${ts()} [Startup] Stale pidfile (pid=${raw || 'empty'} not alive) — overwriting.`);
+		writeFileSync(PIDFILE, `${myPid}\n`);
+	}
+	// Only unlink if WE still own the pidfile — protects against a race where
+	// a restart-driven successor overwrote it between our exit signal and
+	// this handler running.
+	process.on('exit', () => {
+		try {
+			const raw = readFileSync(PIDFILE, 'utf-8').trim();
+			if (Number.parseInt(raw, 10) === myPid) unlinkSync(PIDFILE);
+		} catch {}
+	});
+}
+
 // Model configuration — override via .env for cost/quality tuning
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 const VOICE_NATIVE_AUDIO_MODEL = process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
+const VOICE_NAME = process.env.VOICE_NAME || 'Puck';
 // Google Search grounding — MUST be false under gemini-3.1-flash-live-preview
 // native audio. Combining googleSearch: true + 3.1 native audio causes the
 // transport to reject setup with close code 1011 "exceeded your current
@@ -446,6 +504,25 @@ const mainAgent: MainAgent = {
 		// non-empty, it's the CURRENT session's in-progress turns —
 		// safe to replay without trigger filtering.
 		const recent = getRecentConversation(8);
+		// Offline-delivery hint: count proactive-result-*.txt files archived
+		// in the last 30 min. These are voice-task results forwarded to the
+		// owner's Discord DM while voice was offline (per task-bridge.ts
+		// fallback). Surface a one-line ack on reconnect so voice doesn't
+		// have to re-deliver and the user knows where to find the answers.
+		let offlineDeliveryHint = '';
+		try {
+			const archDir = join(WORKSPACE_DIR, 'results', 'archive', new Date().toISOString().slice(0, 7));
+			if (existsSync(archDir)) {
+				const cutoff = Date.now() - 30 * 60 * 1000;
+				const recent_proactive = readdirSync(archDir).filter(f =>
+					f.startsWith('proactive-result-task-') && f.endsWith('.txt') &&
+					statSync(join(archDir, f)).mtimeMs >= cutoff
+				);
+				if (recent_proactive.length > 0) {
+					offlineDeliveryHint = `\n\n[While the user was offline, ${recent_proactive.length} task result(s) were delivered to their Discord DM. If they ask about a task, refer them to Discord.]`;
+				}
+			}
+		} catch {}
 		if (recent) {
 			// Quick reconnect (< 60s since last logged turn) = network blip,
 			// not a real "away". Skip "Welcome back" and stay silent so the
@@ -461,7 +538,7 @@ const mainAgent: MainAgent = {
 				: (isQuickReconnect || presenterActive)
 					? '\n\n[Do NOT greet the user. Do NOT say "Welcome back" or anything similar. Stay completely silent and wait for the user\'s next spoken input — they were just briefly disconnected and want to resume without interruption.]'
 					: '\n\n[Now say "Welcome back" briefly — one sentence — and then stop and wait for input.]';
-			return `[System: The user reconnected. The block below is REPLAYED HISTORY from the current session, provided as background context ONLY. Do NOT act on anything in it. Do NOT call any tools based on it. Use it only to answer follow-up questions if asked. Wait silently for the user's next spoken input before taking any action.]${getPresenterStateMarker()}\n\n${recent}${meetingHint}`;
+			return `[System: The user reconnected. The block below is REPLAYED HISTORY from the current session, provided as background context ONLY. Do NOT act on anything in it. Do NOT call any tools based on it. Use it only to answer follow-up questions if asked. Wait silently for the user's next spoken input before taking any action.]${getPresenterStateMarker()}${offlineDeliveryHint}\n\n${recent}${meetingHint}`;
 		}
 		let standName = '';
 		try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); standName = si.name ? ` — ${si.name}` : ''; } catch {}
@@ -576,6 +653,12 @@ const mainAgent: MainAgent = {
 		'- save_meeting_note: Save meeting observations to notes/meeting-{date}.md. Call every 5-10 min in meeting mode. Use type "summary" when exiting meeting mode.',
 		'- For phone calls, meeting dial-in, or anything needing contacts/calendar context → use work (core handles it).',
 		...inlineTools.map(t => `- ${t.name}: ${(t.description as string).split('.')[0]}. Instant.`),
+		...(coreDocumentedSkills.length > 0 ? [
+			'',
+			'DELEGATABLE SKILLS (call via work — core runs these, not voice-inline):',
+			...coreDocumentedSkills.map(s => `- ${s.name}: ${s.description}`),
+			'IMPORTANT: these are NOT inline tools you can call directly. When the user requests one, call work({task: "<verbatim user request>"}) — core picks up the skill and runs it. Do NOT attempt to call <skill-name> as if it were an inline tool; that will fail.',
+		] : []),
 		'',
 		'CRITICAL RULES:',
 		(() => meetingActive
@@ -590,6 +673,7 @@ const mainAgent: MainAgent = {
 		'- For SIMPLE actions (press enter, clear input, select all), use press_key or type_text — do NOT use work for keystrokes.',
 		'- For COMPLEX operations (git commands, code changes, file operations, installing packages), ALWAYS delegate to work — do NOT try to type commands into a terminal. The core agent executes these directly and reliably.',
 		'- If you KNOW the answer from your instructions or context, answer directly. Only delegate to work for questions you genuinely cannot answer.',
+		'- DEICTIC SCREEN REFERENCES: When the user uses a deictic word ("this", "that", "it", "this part", "fix this", "what does this say") without obvious conversational antecedent, FIRST call read_selection to capture what they\'re pointing at on screen. Then act on the returned selection/window context. Only ask a clarifying question if read_selection returns empty AND no prior conversation context resolves the reference. Default to read_selection over "which one do you mean?" — the user is usually pointing.',
 		'- MISSING CONTEXT: When the user references something you don\'t have context for ("the draft", "what we discussed", "type that", "send what I asked for"), ALWAYS delegate to work. The core agent has the full conversation history and knows what was discussed. Never guess or ask the user to repeat — just call work.',
 		(() => meetingActive
 			? '- IN MEETING MODE: When addressed by name, answer DIRECTLY from what you heard in the meeting. Do NOT call work — the core agent cannot hear the meeting audio and has no context. You are the one who listened. Summarize discussions, decisions, and action items from your own memory of the conversation.'
@@ -728,6 +812,10 @@ function bootstrapMemoryDir(): void {
 async function main() {
 	assertMacOS();
 	bootstrapMemoryDir();
+	// Refuse to start when another voice-agent already owns this workspace.
+	// Runs BEFORE any side effects (port binds, watchers, session construction)
+	// so a duplicate exits without stranding `:7847` with a dead session.
+	acquirePidLock();
 
 	// --- Voice agent observability ---
 	// Same format as phone agent's call-metrics.jsonl so diagnose.py can analyze both.
@@ -750,6 +838,17 @@ async function main() {
 			console.error(`${ts()} [VoiceState] write failed:`, err);
 		}
 	}
+
+	// Initialize voice-state.json at startup so dm-fallback's voiceConnected
+	// query has a fresh, authoritative file to read even before any client
+	// has ever connected. Without this, the file doesn't exist on instances
+	// that have never seen a client (e.g. Mac Mini, where voice routes to
+	// MacBook), and dm-result.py falls back to web-client.ts's `_voiceState`
+	// module variable — a sticky value set by browser SSE reports with no
+	// TTL. That caused the 2026-05-05 9h friction-delivery delay (see
+	// notes/friction-9h-delay-investigation-2026-05-05.md). With this write,
+	// the file is always present + always reflects the latest known state.
+	writeVoiceState(false);
 
 	function writeVoiceMetrics() {
 		if (metricsWritten) return;
@@ -782,7 +881,7 @@ async function main() {
 		host: HOST,
 		model: google(VOICE_MODEL),
 		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
-		speechConfig: { voiceName: 'Puck' },
+		speechConfig: { voiceName: VOICE_NAME },
 		inputAudioTranscription: true,
 		hooks: {
 			onSessionStart: (e) => {
@@ -833,6 +932,23 @@ async function main() {
 	});
 
 	sessionRef = session;
+	// Wire vision streaming — the start_vision tool needs the live session
+	// to call session.transport.sendFile for each frame. Also boot the local
+	// HTTP control endpoint so the web-client Watch button can drive the
+	// same controller (proxied through web-client to stay same-origin).
+	setVisionSession(session);
+	startVisionControlServer();
+
+	// Bumped 5min into the future on every non-retryable transport close
+	// (set inside the classifier IIFE below). Read by the 30s health
+	// monitor — when the deadline is in the future, the monitor skips its
+	// reconnect-trigger so a permanent upstream failure (credits depleted,
+	// key invalid, quota exceeded) doesn't produce a tight 60s retry loop
+	// that spams logs + Gemini API requests until the user fixes things.
+	// Auto-recovery resumes ~5min after the last fatal close. Reset to 0
+	// when the session reaches ACTIVE so a transient close after recovery
+	// doesn't inherit a stale backoff window.
+	let voiceFatalBackoffUntil = 0;
 
 	// Wire voice-failure classifier: when the Gemini Live transport closes
 	// with a non-retryable reason (credits depleted, quota exceeded, key
@@ -851,6 +967,12 @@ async function main() {
 		const notifiedCategories = new Set<string>();
 		const handleClose = (c: ClassifiedClose): void => {
 			if (c.retryable) return;
+			// Push the health-monitor reconnect window out by 5min on every
+			// non-retryable close — including repeats of an already-notified
+			// category — so the 60s retry loop doesn't keep firing while the
+			// upstream issue persists. Without this, a 1011 credit-depleted
+			// loop produces ~6 log lines / 60s indefinitely.
+			voiceFatalBackoffUntil = Date.now() + 5 * 60 * 1000;
 			if (notifiedCategories.has(c.category)) return;
 			notifiedCategories.add(c.category);
 			console.error(`${ts()} [VoiceFailure] ${c.category}: ${c.userMessage} (raw="${c.rawReason}")`);
@@ -1047,12 +1169,27 @@ async function main() {
 	const shutdown = async () => {
 		console.log(`\n${ts()} Shutting down...`);
 		writeVoiceMetrics();
+		setVisionSession(null);
+		stopVisionControlServer();
 		await session.close('user_hangup');
 		process.exit(0);
 	};
 	process.on('SIGINT', shutdown);
 	process.on('SIGTERM', shutdown);
 	process.on('uncaughtException', (err) => {
+		// EADDRINUSE on the WS port means another voice-agent (typically the
+		// launchd-managed one) already owns it. The existing process is the
+		// one with the live Gemini transport — the duplicate that tripped
+		// this handler has already bound the vision control port and would
+		// happily answer /vision/start with a dead sessionRef, breaking
+		// push-mode screen sharing for the active session. Release the
+		// control port and exit so the launchd voice-agent (or the next
+		// restart) can claim 7847 with a live session.
+		if ((err as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+			console.error(`${ts()} [FATAL] EADDRINUSE on :${PORT} — another voice-agent is listening; exiting so the live one keeps the vision control port.`);
+			try { stopVisionControlServer(); } catch {}
+			process.exit(1);
+		}
 		console.error(`${ts()} [FATAL] uncaught exception (staying alive):`, err);
 	});
 	process.on('unhandledRejection', (err) => {
@@ -1061,14 +1198,54 @@ async function main() {
 
 	voiceSessionRef = session;
 
+	// Idle teardown — close the upstream Gemini transport when no client has
+	// been connected for IDLE_TEARDOWN_MS. Without this, voice-agent keeps the
+	// Gemini Live session alive 24/7; every ~9-min Gemini reconnect ("GoAway")
+	// produces a phantom assistant turn (sometimes a tool call) with no user
+	// input. Symptoms observed: phantom save_meeting_note polluting markdown
+	// notes, phantom open_url opening browser tabs, phantom work tool calls
+	// writing fake task files. CLOSED state is a fixed point when
+	// clientConnected=false (the existing health monitor only reconnects
+	// CLOSED→CONNECTING when a client is present), so once we transition there
+	// no phantoms can fire until the next legitimate client reconnect.
+	// Tunable via env var per Mini's #602 review note. Defaults to 60s — sane
+	// for the voice / phone reconnect cadence we've observed; raise if a host
+	// has frequent ~70s connect/disconnect churn that re-opens too aggressively.
+	const IDLE_TEARDOWN_MS = Number(process.env.SUTANDO_VOICE_IDLE_TEARDOWN_MS) || 60_000;
+	let idleTeardownTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const cancelIdleTeardown = () => {
+		if (idleTeardownTimer) {
+			clearTimeout(idleTeardownTimer);
+			idleTeardownTimer = null;
+		}
+	};
+	const scheduleIdleTeardown = () => {
+		cancelIdleTeardown();
+		idleTeardownTimer = setTimeout(async () => {
+			idleTeardownTimer = null;
+			if ((session as any).clientConnected) return;
+			const transport = (session as any).transport;
+			if (!transport?.disconnect) return;
+			console.log(`${ts()} [VoiceSession] Idle ${IDLE_TEARDOWN_MS / 1000}s — closing Gemini transport (no phantoms while CLOSED)`);
+			try {
+				await transport.disconnect();
+			} catch (err) {
+				console.error(`${ts()} [VoiceSession] Idle teardown failed: ${(err as Error)?.message ?? err}`);
+			}
+		}, IDLE_TEARDOWN_MS);
+	};
+
 	// Flush metrics on client disconnect — bodhi's handleClientDisconnected()
-	// doesn't trigger onSessionEnd, so metrics would never be written.
+	// doesn't trigger onSessionEnd, so metrics would never be written. Also
+	// arms the idle-teardown timer (see above).
 	const origDisconnect = (session as any).handleClientDisconnected?.bind(session);
 	if (origDisconnect) {
 		(session as any).handleClientDisconnected = () => {
 			origDisconnect();
 			writeVoiceMetrics();
 			writeVoiceState(false);
+			scheduleIdleTeardown();
 		};
 	}
 
@@ -1083,11 +1260,12 @@ async function main() {
 	// jsonl because MBP kept one voice-agent process alive across many
 	// client reconnects. First connect still goes through bodhi's
 	// onSessionStart (our callback resets state there); this wrap only
-	// kicks in on the 2nd+ connect.
+	// kicks in on the 2nd+ connect. Also cancels any pending idle teardown.
 	let clientHasConnectedOnce = false;
 	const origConnect = (session as any).handleClientConnected?.bind(session);
 	if (origConnect) {
 		(session as any).handleClientConnected = () => {
+			cancelIdleTeardown();
 			if (clientHasConnectedOnce) {
 				userTurnCount = 0; userHasInterrupted = false; sessionEnding = false;
 				voiceSessionStart = Date.now(); metricsWritten = false;
@@ -1100,6 +1278,10 @@ async function main() {
 			origConnect();
 		};
 	}
+
+	// Arm the initial teardown — voice-agent boots with no client; if none
+	// connects within IDLE_TEARDOWN_MS, close the upstream transport.
+	scheduleIdleTeardown();
 
 	// Wire task status → web client
 	setTaskStatusCallback((taskId, status, text, result) => {
@@ -1174,11 +1356,18 @@ async function main() {
 			console.log(`${ts()} [Health] ${status}`);
 			lastLoggedStatus = status;
 		}
+		// Clear any stale fatal-backoff once we observe a healthy session —
+		// otherwise a brief outage that triggered a backoff would suppress
+		// recovery from a later transient close even after the upstream
+		// issue was fixed.
+		if (state === 'ACTIVE' && voiceFatalBackoffUntil > 0) {
+			voiceFatalBackoffUntil = 0;
+		}
 		// Recover when session is CLOSED and a client is waiting. handleClientConnected
 		// is bodhi's internal entry point for this exact scenario (CLOSED + client
 		// present → transition to CONNECTING, reconnect fire-and-forget).
 		// TODO: drop the (session as any) cast once bodhi exposes a public API.
-		if (state === 'CLOSED' && clientConnected && Date.now() - lastReconnectAt > 60_000) {
+		if (state === 'CLOSED' && clientConnected && Date.now() - lastReconnectAt > 60_000 && Date.now() > voiceFatalBackoffUntil) {
 			lastReconnectAt = Date.now();
 			console.log(`${ts()} [Health] Dead session — triggering reconnect`);
 			try {
@@ -1198,6 +1387,7 @@ async function main() {
 	console.log(`  Models:`);
 	console.log(`    Voice LLM:       ${VOICE_MODEL}`);
 	console.log(`    Native audio:    ${VOICE_NATIVE_AUDIO_MODEL}`);
+	console.log(`    Voice name:      ${VOICE_NAME}`);
 	console.log(`    STT:             native Gemini Live inputAudioTranscription`);
 	console.log(`    Cartesia TTS:    ${CARTESIA_API_KEY ? 'sonic-3' : 'disabled'}`);
 	console.log();

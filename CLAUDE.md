@@ -37,6 +37,21 @@ Before creating a PR, check `gh pr list --state open` for an existing PR on the 
 
 Never commit directly to main. Always work on a feature branch.
 
+## Workspace contract
+
+All per-user mutable state — `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md`, `contextual-chips.json`, `core-status.json`, etc. — lives under a single **workspace** directory. Code, skills source, and repo configuration stay in the repo root (separate concern).
+
+**Resolution (every service reads the same):**
+
+1. `$SUTANDO_WORKSPACE` env var (override; `~` is expanded).
+2. `~/.sutando/workspace/` (default).
+
+The default deliberately avoids `~/Library/Application Support/sutando/` — that path is Sutando.app's territory (Chromium-style Cache/, GPUCache/, Cookies/, blob_storage/, etc.); the user-task workspace lives under its own hidden home-relative dir so the two concerns never collide. Historic anti-pattern: bridges fell back to the script's repo root via `Path(__file__).resolve().parent.parent`, which polluted `git status` and — when invoked from an app-bundled `src/` symlink — stranded owner DMs in a bundle-tasks/ dir while the watcher polled workspace-tasks/.
+
+**Use the helper, don't reinvent the fallback:**
+- Python: `from workspace_default import resolve_workspace` → returns a `Path`.
+- TypeScript: `process.env.SUTANDO_WORKSPACE || join(homedir(), '.sutando', 'workspace')`.
+
 ## Personal overrides
 
 If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It contains user-specific rules, preferences, and configuration that override or extend these shared instructions.
@@ -47,6 +62,38 @@ Signal your work status to `core-status.json` so the web UI can display it:
 - Start of significant work: `echo '{"status":"running","step":"<description>","ts":<epoch>}' > core-status.json`
 - When done: `echo '{"status":"idle","ts":<epoch>}' > core-status.json`
 This applies to all work — proactive loop passes, voice tasks, user requests, code changes.
+
+## Chat-path task tracking (issue #585)
+
+When you accept a non-trivial commitment from the user via **chat** (direct text input, not through voice/Discord/Telegram bridges), write a task file so the dashboard can track it.
+
+**When to write a task file from chat:**
+- The user asks you to do something concrete (close a PR, send an email, research a topic, fix a bug)
+- NOT for: quick questions, greetings, simple lookups, clarifications
+
+**How:**
+```bash
+local _ts="$(date +%s)"
+cat > "tasks/task-chat-${_ts}.txt" << EOF
+id: task-chat-${_ts}
+timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+task: <concise description of what you're doing>
+source: chat
+channel_id: local-chat
+user_id: ${SUTANDO_DM_OWNER_ID:-chat-local}
+access_tier: owner
+EOF
+```
+
+**When done:**
+Write a result file using the same task ID:
+```bash
+cat > "results/task-chat-${_ts}.txt" << EOF
+<result summary>
+EOF
+```
+
+This ensures the dashboard, result-watcher, and timeout logic work the same regardless of entry path.
 
 ## Memory
 
@@ -100,7 +147,28 @@ Tasks arrive from multiple channels via the same file bridge:
 - Proactive messages: write to `results/proactive-{ts}.txt` to speak to the user
 - To send files in replies, include `[file: /path/to/file]` in the result text
 
-**IMPORTANT:** On session start, check if the task watcher is running (`pgrep -f "watch-tasks"`). If not, start it with `bash src/watch-tasks.sh` using `run_in_background: true`. When notified, read the output — it lists ALL pending task files. Process every one, write results to `results/`, then restart the watcher. This is how voice commands reach you.
+**Result-body protocol markers** — when the result body STARTS with one of these, the bridge handles delivery specially. Use them when multiple related tasks should produce ONE user-facing reply instead of N separate ones:
+- `[deduped: task-<other-id>]` — both voice (task-bridge) and Discord (discord-bridge) silently archive this task as done, no narration, no DM. Put the full reply in the other task's result file and put this marker in each superseded task's result. The canonical way to handle thread-consolidated replies (e.g. when voice over-delegates 3 tasks for the same continuation utterance — see `src/task-bridge.ts:527`).
+- `[no-send]` — Discord bridge skips delivery for this task (still archives). Use when the task is internally handled but produces no user-visible reply.
+- `[REPLIED]` — Discord bridge skips delivery (already sent through another path).
+- `[file: /path]` / `[send: /path]` / `[attach: /path]` — Discord bridge extracts and attaches the file alongside the text body.
+
+**IMPORTANT:** On session start, ensure a task watcher is running. Use the `Monitor` tool to stream `bash src/watch-tasks-stream.sh` — it never exits during normal operation and emits `TASK_FILE: <name>` per new task as a per-event notification. When a notification arrives, Read the named file, process it, and write a result to `results/`. The stream watcher replaces the older one-shot `watch-tasks.sh` (retired 2026-05-14) — no more restart-on-event cycles.
+
+If Sutando.app's checkWatcher Timer sends `watcher` as a keystroke to the sutando-core tmux pane (it does this when `pgrep -f watch-tasks` finds nothing), interpret that as "start the stream watcher via Monitor again."
+
+**Cancel handling.** When you read a task whose `task:` body starts with `CANCEL_INSTRUCTION:` — written by the `cancel_task` voice tool — stop any in-flight work on the referenced task ID, write a brief confirm result for the CANCEL_INSTRUCTION task itself (e.g. `"Cancelled task-X (was in progress)"` or `"task-X already completed, nothing to cancel"`), and do NOT process the original referenced task. The CANCEL_INSTRUCTION task uses the regular task pipeline as its signal channel — picking it up means you've reached the user's cancel intent.
+
+**Voice session context.** Voice-agent's Gemini context window rolls off after ~10 minutes of turns; voice forgets specifics like "the post" or "Mini Draft A" that landed earlier in your session. Whenever you make a durable decision the voice agent may need to reference later — picking a draft, writing text to clipboard for a pending paste, committing to an active task — update `state/voice-session-context.json`. Schema:
+```json
+{
+  "updated_at": "<ISO ts>",
+  "active_drafts": [{"name": "...", "summary": "...", "path": "..."}],
+  "pending_action": {"kind": "paste|review|other", "what": "...", "where": "..."} | null,
+  "last_results": [{"task_id": "...", "subject": "...", "ts": "..."}]
+}
+```
+Keep `active_drafts` and `last_results` to ~3 entries each (drop oldest). Voice can call the `recent_context` tool to read this file when it senses confusion ("what was the post?" / "what's pending?"). Per Chi 2026-05-13.
 
 ## Tutorial
 
@@ -211,6 +279,8 @@ Prefer this for any "open X and do Y" task in a native app (Zoom join, Mail comp
 
 Preferred (interactive): Use **Playwright MCP tools** (`mcp__playwright__*`) or **Chrome plugin** (`mcp__claude-in-chrome__*`). These provide real browser control with live DOM access, screenshots, and form interaction.
 
+**Default: navigate within the active tab when the next URL has the same origin (scheme + host + port) as the current tab.** Only spawn a new tab for cross-origin navigation, when an existing tab is the only context that holds the relevant state (a logged-in session, a long-running app), or when the user explicitly asks for a new tab. `localhost:7844` and `localhost:8080` are DIFFERENT origins — same hostname, but different ports → different services → don't share a tab. This keeps the browser tab count bounded during multi-step flows — without it, every `mcp__claude-in-chrome__navigate` opens a fresh tab and the user ends up with dozens of half-used tabs after a research session.
+
 Fallback (non-interactive / headless): `src/browser.mjs` for scripted or background use:
 ```bash
 node src/browser.mjs "https://example.com"                    # get page text
@@ -251,10 +321,8 @@ open -a "Slack"
 open "https://github.com"           # open URL in default browser
 ```
 
-**Context drop + shortcuts** — the Sutando menu bar app (`src/Sutando/`) provides global hotkeys:
-- ⌃C — drop selected text, clipboard image, or Finder file to `tasks/`
-- ⌃V — toggle voice connection in the browser
-- ⌃M — toggle mute during voice
+**Context drop + shortcuts** — the Sutando menu bar app (`src/Sutando/`) provides global hotkeys. **Live config**: `~/.config/sutando/hotkeys.json` (per-user override) with defaults registered in `src/Sutando/main.swift:944` (`registerHotKey()` action list). When the user asks "what hotkeys do I have", read those sources — don't quote a static list from this file (it would drift behind the actual registration).
+
 Launches automatically via `startup.sh`. Check `tasks/` for dropped context.
 
 **Learn from demonstration** — when the user says "learn this", "remember my preference", "I always do it this way", or demonstrates a pattern:

@@ -17,26 +17,32 @@ const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 export { describeScreenTool, clickTool, scrollAndDescribeTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool, openUrlTool } from './browser-tools.js';
 import { describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool, openUrlTool } from './browser-tools.js';
 
+// Vision: one-shot frame + start/stop live screen-to-Gemini video.
+export { sendVisionFrameTool, startVisionTool, stopVisionTool } from './vision-tools.js';
+import { sendVisionFrameTool, startVisionTool, stopVisionTool } from './vision-tools.js';
+
 // --- File-open tool (moved out of recording-tools — generic file open, optionally fullscreen) ---
 
 export const openFileTool: ToolDefinition = {
 	name: 'open_file',
 	description:
-		'Open a file with the default macOS app. ALWAYS pass an absolute `path` (or one starting with $VAR / ~). ' +
+		'Open a file with macOS. ALWAYS pass an absolute `path` (or one starting with $VAR / ~). ' +
 		'Use for: "open the file", "open that", "can you open it". ' +
 		'If the user says "open the log" or similar, ASK which log they mean (voice-agent, discord-bridge, etc.) — do NOT guess. ' +
 		'Known files: "diagnostic tracker" or "diagnostics" = /tmp/phone-diagnostics-tracker.html, ' +
 		'"voice diagnostics" = /tmp/voice-diagnostics-tracker.html, ' +
-		'"voice context" / "the voice context file" / "the active context" = $SUTANDO_PRIVATE_DIR/voice-contexts/<active>.txt where <active> is the trimmed contents of $SUTANDO_PRIVATE_DIR/voice-contexts/active. Pass it with the env-var expanded by you (e.g. /Users/wangchi/.sutando-memory-sync/voice-contexts/ag2ai-investor.txt) or as $SUTANDO_PRIVATE_DIR/voice-contexts/ag2ai-investor.txt — both work. ' +
+		'"voice context" / "the voice context file" / "the active context" = $SUTANDO_PRIVATE_DIR/voice-contexts/<active>.txt where <active> is the trimmed contents of $SUTANDO_PRIVATE_DIR/voice-contexts/active. Pass it with the env-var expanded by you, or as $SUTANDO_PRIVATE_DIR/voice-contexts/<active>.txt — both work. ' +
+		'Pass `app` when the user names a specific app ("open with Sublime Text", "open the SQLite db in TablePlus") OR when recent conversation makes the intended app clear (e.g. user just said "I\'ll review this in VS Code"). Without `app`, macOS uses its default handler for that file type — leave unset when the default is fine. ' +
 		'Pass `fullscreen=true` if the user wants the file opened in fullscreen — works generically for any file type via Cmd+Ctrl+F to whichever app the OS routed the file to (QuickTime → Present mode, Preview → fullscreen PDF, Chrome → fullscreen page, etc.).',
 	parameters: z.object({
 		path: z.string().describe('Absolute file path to open.'),
+		app: z.string().optional().describe('Optional app name (e.g. "Sublime Text", "VS Code", "TablePlus") to open the file with. If omitted, macOS uses its default handler for the file type. Set this when the user names an app explicitly OR recent conversation makes the intended app clear; otherwise leave unset.'),
 		fullscreen: z.boolean().optional().describe('If true, send Cmd+Ctrl+F to the default app right after opening — generic native-fullscreen toggle, works for any file type (video, PDF, image, web page).'),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { path, fullscreen } = args as { path: string; fullscreen?: boolean };
-		console.log(`${ts()} [OpenFile] called (path=${path || 'none'}, fullscreen=${fullscreen || false})`);
+		const { path, app, fullscreen } = args as { path: string; app?: string; fullscreen?: boolean };
+		console.log(`${ts()} [OpenFile] called (path=${path || 'none'}, app=${app || 'default'}, fullscreen=${fullscreen || false})`);
 		try {
 			if (!path) return { error: 'No path provided. Pass an absolute file path. (For the most recent recording, call play_video — it auto-finds the file.)' };
 			// Expand $VAR / ${VAR} env-var references and ~ in the path so Sutando
@@ -63,10 +69,18 @@ export const openFileTool: ToolDefinition = {
 				return { error: `File not found: ${filePath}. Do not invent paths — use the exact path returned by the tool that produced the file (e.g. record_screen_with_narration returns subtitled_path/narrated_path/recording_path). For the most recent recording without a known path, call play_video instead.` };
 			}
 			// execFileSync — no shell interpolation of caller-controlled filePath
-			// (same CodeQL js/command-line-injection class as #27).
-			// `open <path>` lets macOS's LaunchServices route to the user's default
-			// app for that file type. open_file stays generic — no app forcing.
-			execFileSync('open', [filePath], { timeout: 5_000 });
+			// or caller-controlled app name (same CodeQL js/command-line-injection
+			// class as #27). Both are passed as separate argv entries, never spliced
+			// into a shell string.
+			//
+			// Resolution per issue #560:
+			//   1. Explicit `app` arg → `open -a <app> <path>`
+			//   2. No `app` → `open <path>` (macOS LaunchServices picks default)
+			// Contextual inference (rule 2 from issue) is the model's job — Gemini
+			// reads the conversation and decides whether to pass `app`. The tool
+			// only honors what it's told.
+			const openArgs = app ? ['-a', app, filePath] : [filePath];
+			execFileSync('open', openArgs, { timeout: 5_000 });
 			if (fullscreen) {
 				// Brief delay so the just-opened app becomes frontmost before
 				// the keystroke lands. Cmd+Ctrl+F is the macOS native-fullscreen
@@ -139,14 +153,22 @@ export const pressKeyTool: ToolDefinition = {
 			'enter': 36, 'return': 36, 'escape': 53, 'esc': 53, 'tab': 48,
 			'delete': 51, 'backspace': 51, 'space': 49,
 			'up': 126, 'down': 125, 'left': 123, 'right': 124,
+			// Common voice-spoken aliases — without these, the fallthrough to
+			// `keystroke "<key>"` types the literal string into the focused
+			// field instead of pressing the arrow. Observed 2026-05-13 voice
+			// call: Gemini called press_key(key="downarrow"); nothing scrolled.
+			'uparrow': 126, 'downarrow': 125, 'leftarrow': 123, 'rightarrow': 124,
+			'arrowup': 126, 'arrowdown': 125, 'arrowleft': 123, 'arrowright': 124,
 			'a': 0, 'c': 8, 'v': 9, 'x': 7, 'z': 6, 'f': 3, 's': 1, 'w': 13, 'q': 12,
 		};
 		const keyCode = keyMap[key.toLowerCase()];
 		if (keyCode === undefined) {
 			// Use keystroke for unknown keys
 			const modStr = modifiers.length ? ` using {${modifiers.map(m => m + ' down').join(', ')}}` : '';
+			// Escape single quotes for shell context (same pattern as switchAppTool).
+			const safeKey = key.replace(/\\/g, '\\\\').replace(/'/g, "'\\''").replace(/"/g, '\\"');
 			try {
-				execSync(`osascript -e 'tell application "System Events" to keystroke "${key}"${modStr}'`, { timeout: 3_000 });
+				execSync(`osascript -e 'tell application "System Events" to keystroke "${safeKey}"${modStr}'`, { timeout: 3_000 });
 			} catch (err) {
 				return { error: `press_key failed: ${err instanceof Error ? err.message : err}` };
 			}
@@ -244,45 +266,74 @@ export const captureScreenTool: ToolDefinition = {
 export const typeTextTool: ToolDefinition = {
 	name: 'type_text',
 	description:
-		'Type text into the currently focused field. Use for: "type hello", "enter my email". Instant.',
+		'Type text into the currently focused field. Use for: "type hello", "enter my email". Instant. ' +
+		'Pass `append=true` when the user wants the text added AFTER any existing selection ("add this", ' +
+		'"append", "type at the end") — without it, the paste branch will REPLACE the selection per macOS ' +
+		'Cmd-V semantics. Default is replace, which matches most "type X here" intents.',
 	parameters: z.object({
 		text: z.string().describe('The text to type'),
+		append: z.boolean().optional().describe('If true, collapse any selection to its end before pasting so the text is appended rather than replacing the selection. Use when the user says "add", "append", or "type at the end".'),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { text } = args as { text: string };
-		// Multi-line or long text: use clipboard paste (keystroke can't handle newlines)
-		// Gemini sends literal \n (two chars backslash+n), not actual newlines
-		const hasNewline = text.includes('\n') || text.includes('\r') || /\\n/.test(text) || text.length > 80;
-		if (hasNewline) {
+		const { text, append } = args as { text: string; append?: boolean };
+		// Multi-line, long, or non-ASCII text: use clipboard paste.
+		// AppleScript's `keystroke "..."` routes through virtual-key codes that
+		// can't represent characters outside the basic ASCII typing range —
+		// em-dashes (U+2014), curly quotes (U+2018-U+201D), and emoji all get
+		// corrupted (UTF-8 bytes reinterpreted as Mac Roman → e.g. 🤖 mojibake,
+		// — → "‚Äî"). The paste branch round-trips through the system pasteboard
+		// which preserves bytes. Per Chi 2026-05-13 frustration with emoji corruption.
+		// Gemini sends literal \n (two chars backslash+n), not actual newlines.
+		const hasNonAscii = /[^\x00-\x7f]/.test(text);
+		const needsPaste = text.includes('\n') || text.includes('\r') || /\\n/.test(text) || text.length > 80 || hasNonAscii;
+		if (needsPaste) {
 			try {
+				// Force UTF-8 locale for the child shell — voice-agent runs under
+				// launchd which doesn't inherit terminal LANG/LC_CTYPE, so the
+				// default POSIX/C locale would make `pbcopy < file` treat
+				// multi-byte UTF-8 sequences as garbled single-byte and put
+				// "??" on the pasteboard instead of 🤖. Pipe via stdin (input:)
+				// to bypass shell redirection entirely. Per Chi 2026-05-13 (PR #660
+				// follow-up: the first fix routed emoji to paste-branch but
+				// pbcopy still mangled bytes in launchd context).
+				const utf8Env = { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
 				let savedClipboard = '';
-				try { savedClipboard = execSync('pbpaste', { encoding: 'utf-8', timeout: 2_000 }); } catch {}
+				try { savedClipboard = execSync('pbpaste', { encoding: 'utf-8', timeout: 2_000, env: utf8Env }); } catch {}
 				// Convert literal \n to actual newlines
 				const pasteText = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-				const tmpClip = `/tmp/sutando-typetext-clip-${Date.now()}.txt`;
-				writeFileSync(tmpClip, pasteText);
-				execSync(`pbcopy < ${tmpClip}`, { timeout: 2_000 });
-				execSync(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`, { timeout: 5_000 });
+				execSync('pbcopy', { input: pasteText, encoding: 'utf-8', timeout: 2_000, env: utf8Env });
+				// Append mode: collapse selection to its end via Right-arrow before Cmd-V.
+				// Without this, macOS Cmd-V replaces the selection (standard semantics).
+				// Per Chi 2026-05-13: "the tool is replacing my selected text instead of appending."
+				if (append) {
+					execSync(`osascript -e 'tell application "System Events" to key code 124'`, { timeout: 3_000, env: utf8Env });
+				}
+				execSync(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`, { timeout: 5_000, env: utf8Env });
 				execSync('sleep 0.3');
 				if (savedClipboard) {
-					const tmpRestore = `/tmp/sutando-typetext-restore-${Date.now()}.txt`;
-					writeFileSync(tmpRestore, savedClipboard);
-					execSync(`pbcopy < ${tmpRestore}`, { timeout: 2_000 });
-					try { unlinkSync(tmpRestore); } catch {}
+					execSync('pbcopy', { input: savedClipboard, encoding: 'utf-8', timeout: 2_000, env: utf8Env });
 				}
-				try { unlinkSync(tmpClip); } catch {}
-				console.log(`${ts()} [TypeText] pasted (multi-line): ${text.slice(0, 40)}...`);
+				console.log(`${ts()} [TypeText] pasted (multi-line${append ? ', append' : ''}): ${text.slice(0, 40)}...`);
 				return { status: 'typed', text };
 			} catch (err) {
 				return { error: `Paste failed: ${err instanceof Error ? err.message : err}` };
 			}
 		}
 		// Single-line short text: use keystroke
-		const safeText = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+		// Escape backslash for AppleScript, single-quote for shell, double-quote for AppleScript.
+		// Same three-step chain as switchAppTool — missing single-quote escape allowed
+		// shell breakout via text containing apostrophes.
+		const safeText = text.replace(/\\/g, '\\\\').replace(/'/g, "'\\''").replace(/"/g, '\\"');
 		try {
+			// Append mode: collapse selection to its end via Right-arrow before typing.
+			// Without this, AppleScript keystroke replaces the selection (same Cmd-V-style
+			// behavior — System Events treats a keystroke into a selected region as replace).
+			if (append) {
+				execSync(`osascript -e 'tell application "System Events" to key code 124'`, { timeout: 3_000 });
+			}
 			execSync(`osascript -e 'tell application "System Events" to keystroke "${safeText}"'`, { timeout: 5_000 });
-			console.log(`${ts()} [TypeText] typed: ${text.slice(0, 40)}`);
+			console.log(`${ts()} [TypeText] typed${append ? ' (append)' : ''}: ${text.slice(0, 40)}`);
 			return { status: 'typed', text };
 		} catch (err) {
 			return { error: `Type failed: ${err instanceof Error ? err.message : err}` };
@@ -377,7 +428,13 @@ export const clipboardTool: ToolDefinition = {
 				return { status: 'read', content };
 			} else {
 				if (!text) return { error: 'No text provided to write' };
-				execSync(`echo ${JSON.stringify(text)} | pbcopy`, { timeout: 5_000 });
+				// Write to temp file then pipe to pbcopy — avoids shell injection via
+				// echo "$(cmd)" since JSON.stringify wraps in double-quotes which don't
+				// prevent $() substitution in bash.
+				const tmpPb = `/tmp/sutando-clipboard-${Date.now()}.txt`;
+				writeFileSync(tmpPb, text);
+				execSync(`pbcopy < "${tmpPb}"`, { timeout: 5_000 });
+				try { unlinkSync(tmpPb); } catch {}
 				console.log(`${ts()} [Clipboard] wrote: ${text.slice(0, 40)}`);
 				return { status: 'written', text };
 			}
@@ -390,11 +447,14 @@ export const clipboardTool: ToolDefinition = {
 export const cancelTaskTool: ToolDefinition = {
 	name: 'cancel_task',
 	description:
-		'Cancel a pending task. Default (no args) cancels the most recent. ' +
+		'Cancel a pending or in-flight task by writing a CANCEL_INSTRUCTION task that core will see next. ' +
+		'Default (no args) cancels the most recent. ' +
 		'Pass `taskId` to cancel a specific task by id (e.g. "task-1777686932069"). ' +
 		'Pass `query` to cancel the first task whose content contains the substring (case-insensitive). ' +
 		'Pass `list: true` to list pending tasks (id + first 60 chars of content) without cancelling. ' +
-		'Use when user says "cancel", "nevermind", "stop that", "what\'s queued", "cancel the one about X".',
+		'Use when user says "cancel", "nevermind", "stop that", "what\'s queued", "cancel the one about X". ' +
+		'Note: in-flight processing only halts when core reaches the CANCEL_INSTRUCTION task in its queue — ' +
+		'this prevents future pickup + tells core to abort if mid-task, but doesn\'t interrupt a single LLM turn.',
 	parameters: z.object({
 		taskId: z.string().optional().describe('Specific task id to cancel (matches the filename without .txt).'),
 		query: z.string().optional().describe('Case-insensitive substring to match against task content. Cancels first match.'),
@@ -407,10 +467,10 @@ export const cancelTaskTool: ToolDefinition = {
 			const tasksDir = join(process.cwd(), 'tasks');
 			const resultsDir = join(process.cwd(), 'results');
 			const files = readdirSync(tasksDir).filter(f => f.endsWith('.txt')).sort();
-			if (files.length === 0) return { status: 'nothing_to_cancel' };
 
 			// list mode: return id + preview, no cancel
 			if (list) {
+				if (files.length === 0) return { status: 'nothing_pending', count: 0, tasks: [] };
 				const items = files.map(f => {
 					const id = f.replace('.txt', '');
 					let preview = '';
@@ -425,33 +485,62 @@ export const cancelTaskTool: ToolDefinition = {
 				return { status: 'pending_tasks', count: items.length, tasks: items };
 			}
 
-			// targeted cancel: by exact id
-			let target: string | undefined;
+			// Targeting: by exact id, by query, or default-to-most-recent.
+			// IMPORTANT: target can be a file in `tasks/` OR a recently-archived task whose
+			// processing is in-flight (file already moved). For id-based cancels we accept
+			// either case; for query-based we need the file present to grep its content.
+			let targetId: string | undefined;
+			let targetFile: string | undefined;
 			if (taskId) {
 				const wantFile = taskId.endsWith('.txt') ? taskId : `${taskId}.txt`;
-				if (files.includes(wantFile)) target = wantFile;
-				else return { status: 'not_found', taskId };
+				targetId = wantFile.replace('.txt', '');
+				if (files.includes(wantFile)) targetFile = wantFile;
+				// else: accept the cancel even if file is gone (in-flight); core sees CANCEL and decides
 			} else if (query) {
-				// targeted cancel: by content query (case-insensitive substring)
+				if (files.length === 0) return { status: 'nothing_pending' };
 				const needle = query.toLowerCase();
 				for (const f of files) {
 					try {
 						const body = readFileSync(join(tasksDir, f), 'utf-8').toLowerCase();
-						if (body.includes(needle)) { target = f; break; }
+						if (body.includes(needle)) { targetFile = f; targetId = f.replace('.txt', ''); break; }
 					} catch { /* ignore */ }
 				}
-				if (!target) return { status: 'not_found', query };
+				if (!targetId) return { status: 'not_found', query };
 			} else {
-				// default: most recent
-				target = files[files.length - 1];
+				// default: most recent pending file
+				if (files.length === 0) return { status: 'nothing_pending' };
+				targetFile = files[files.length - 1];
+				targetId = targetFile.replace('.txt', '');
 			}
 
-			const targetId = target.replace('.txt', '');
-			// Write a cancelled result so the web UI shows it with the cancelled icon
-			writeFileSync(join(resultsDir, target), 'Cancelled.');
-			unlinkSync(join(tasksDir, target));
-			console.log(`${ts()} [CancelTask] cancelled: ${targetId}${taskId ? ' (by id)' : query ? ` (by query: ${query})` : ''}`);
-			return { status: 'cancelled', taskId: targetId };
+			// Write a CANCEL_INSTRUCTION task — core picks it up next and aborts/skips
+			// the named target. Design (Chi 2026-05-13): reuse the task pipeline as the
+			// cancel signal channel instead of building a parallel one.
+			const cancelTs = Date.now();
+			const cancelFilename = `task-${cancelTs}.txt`;
+			const cancelBody = [
+				`id: task-${cancelTs}`,
+				`timestamp: ${new Date().toISOString()}`,
+				`task: CANCEL_INSTRUCTION: stop processing ${targetId} if still in flight. If already completed, no-op. Reply briefly confirming.`,
+				`source: voice`,
+				`channel_id: local-voice`,
+				`user_id: voice-local`,
+				`access_tier: owner`,
+				``,
+			].join('\n');
+			writeFileSync(join(tasksDir, cancelFilename), cancelBody);
+
+			// Also unlink the original task file if it's still present — prevents
+			// double-pickup if core hadn't started yet. Best-effort.
+			if (targetFile) {
+				try { unlinkSync(join(tasksDir, targetFile)); } catch { /* already gone is fine */ }
+			}
+
+			// Touch a cancelled result for the web UI's cancel icon (best-effort).
+			try { writeFileSync(join(resultsDir, `${targetId}.txt`), 'Cancelled.'); } catch { /* ignore */ }
+
+			console.log(`${ts()} [CancelTask] cancel-instruction written for ${targetId}${taskId ? ' (by id)' : query ? ` (by query: ${query})` : ''} → ${cancelFilename}`);
+			return { status: 'cancel_instruction_queued', taskId: targetId, instruction: `task-${cancelTs}` };
 		} catch (err) {
 			return { error: `Cancel failed: ${err instanceof Error ? err.message : err}` };
 		}
@@ -461,15 +550,18 @@ export const cancelTaskTool: ToolDefinition = {
 export const toggleTasksTool: ToolDefinition = {
 	name: 'toggle_tasks',
 	description:
-		'Collapse or expand all tasks in the web UI. Use for: "collapse tasks", "expand tasks", "hide tasks", "show tasks". Instant.',
+		'Collapse or expand tasks in the web UI. Use for: "collapse tasks", "expand tasks", "hide tasks", "show tasks", "expand only the first task". Pass taskIndex=1 for "the first task", 2 for "the second", etc. (1-based, by display order); omit for all-tasks. Instant.',
 	parameters: z.object({
-		action: z.enum(['collapse', 'expand']).describe('"collapse" to hide all task results, "expand" to show them'),
+		action: z.enum(['collapse', 'expand']).describe('"collapse" to hide task results, "expand" to show them'),
+		taskIndex: z.number().int().min(1).optional().describe('1-based index of a single task to act on (by display order). Omit to act on all tasks.'),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { action } = args as { action: 'collapse' | 'expand' };
-		// Set data attribute on body — MutationObserver in the page picks it up and updates state
-		const js = `document.body.dataset.taskAction = \\\"${action}\\\"; \\\"done\\\"`;
+		const { action, taskIndex } = args as { action: 'collapse' | 'expand'; taskIndex?: number };
+		// Set data attribute on body — MutationObserver in the page picks it up and updates state.
+		// When taskIndex is set, encode as "expand:N" / "collapse:N"; handler in web-client.ts parses the suffix.
+		const actionStr = taskIndex ? `${action}:${taskIndex}` : action;
+		const js = `document.body.dataset.taskAction = \\\"${actionStr}\\\"; \\\"done\\\"`;
 		try {
 			execSync(`osascript -e 'tell application "Google Chrome"
 				repeat with w in windows
@@ -482,7 +574,7 @@ export const toggleTasksTool: ToolDefinition = {
 				end repeat
 				return "not found"
 			end tell'`, { timeout: 5_000 });
-			console.log(`${ts()} [ToggleTasks] ${action}`);
+			console.log(`${ts()} [ToggleTasks] ${actionStr}`);
 			return { status: action === 'collapse' ? 'collapsed' : 'expanded' };
 		} catch (err) {
 			return { error: `Toggle tasks failed: ${err instanceof Error ? err.message : err}` };
@@ -634,6 +726,31 @@ return frontApp`;
 	},
 };
 
+// --- Chat task creation (future hook) ------------------------------------------
+// Definition kept here for when /chat gets a tool-calling surface (SSE wiring +
+// UI handler). Currently NOT registered in inlineTools / ownerOnlyTools because
+// no caller in the architecture can reach it — /chat connects to agent-api, not
+// voice-agent. The active chat-path tracking is the shell snippet in CLAUDE.md.
+// See round-5 discussion on PR #695 for the architectural analysis.
+export const createChatTaskTool: ToolDefinition = {
+	name: 'create_chat_task',
+	description:
+		'Create a tracked task entry for the /chat web UI route. ' +
+		'Future hook: no current caller in the chat path (/chat connects to agent-api, not voice-agent). ' +
+		'The core agent (Claude Code) uses the CLAUDE.md shell-snippet path instead. ' +
+		'Voice tasks have their own tracking (source: voice).',
+	parameters: z.object({
+		task: z.string().describe('Description of the task being tracked'),
+	}),
+	execution: 'inline',
+	async execute(args) {
+		const { task } = args as { task: string };
+		const { writeChatTask } = await import('./task-bridge.js');
+		const taskId = writeChatTask(task);
+		return { status: 'created', taskId, message: `Chat task created: ${taskId}` };
+	},
+};
+
 /** All inline tools — import and spread into your tools list */
 // ─── Notes tools ─────────────────────────────────────────
 // Resolve at module-init: $SUTANDO_PRIVATE_DIR/notes (canonical) when set,
@@ -723,6 +840,59 @@ export const deleteNoteTool: ToolDefinition = {
 	},
 };
 
+// --- Voice session context (Chi 2026-05-13: voice agent loses context across turns) ---
+//
+// Background: voice-agent's Gemini context window is independent from core's. After
+// ~10 minutes of turns earlier transcript rolls off and voice "forgets" specifics
+// like "the post" or "Mini Draft A". The fix is a small JSON file at
+// `state/voice-session-context.json` that core writes whenever a durable decision
+// lands (active draft, pending paste, today's selected option). Voice can ask for
+// the file's contents at any time via `recent_context`.
+//
+// Schema (informal):
+//   {
+//     "updated_at": "<ISO ts>",
+//     "active_drafts": [
+//       { "name": "Mini Draft A", "summary": "...", "path": "/tmp/sutando-draft.txt" }
+//     ],
+//     "pending_action": { "kind": "paste", "what": "Mini Draft A", "where": "Cursor / X compose" } | null,
+//     "last_results": [
+//       { "task_id": "task-...", "subject": "DeepMind post drafted", "ts": "<ISO>" }
+//     ]
+//   }
+//
+// Core writes the file by direct fs operations — no inline tool needed for the writer
+// path (core is this Claude Code session and already has fs access). The tool here
+// is the READ path that voice-agent's Gemini can call when it senses confusion
+// ("what was the post we picked?" / "what's pending?").
+
+const VOICE_SESSION_CONTEXT_PATH = join(process.cwd(), 'state', 'voice-session-context.json');
+
+export const recentContextTool: ToolDefinition = {
+	name: 'recent_context',
+	description:
+		'Return the current voice-session context — active drafts, pending actions, recent task results — so you can pick up a thread even if it predates your Gemini context window. ' +
+		'Call this when the user references something with a deictic pronoun ("the post", "the draft", "the one I just typed") that you can\'t place from your own recent transcript. ' +
+		'Also fine to call proactively at the start of an active session to ground yourself. ' +
+		'Returns JSON with keys: active_drafts (array), pending_action (object|null), last_results (array of {task_id, subject, ts}). ' +
+		'If the file is missing or empty, returns {note: "no context recorded yet"}.',
+	parameters: z.object({}),
+	execution: 'inline',
+	async execute() {
+		try {
+			if (!existsSync(VOICE_SESSION_CONTEXT_PATH)) {
+				return { note: 'no context recorded yet — core hasn\'t written voice-session-context.json' };
+			}
+			const raw = readFileSync(VOICE_SESSION_CONTEXT_PATH, 'utf-8');
+			const parsed = JSON.parse(raw);
+			console.log(`${ts()} [RecentContext] returned (updated_at=${parsed.updated_at || 'unknown'}, ${(parsed.active_drafts || []).length} drafts, ${(parsed.last_results || []).length} results)`);
+			return parsed;
+		} catch (err) {
+			return { error: `recent_context read failed: ${err instanceof Error ? err.message : err}` };
+		}
+	},
+};
+
 // IMPORTANT: Every tool defined in browser-tools.ts MUST be added to BOTH arrays below.
 // Tools not registered here are invisible to Gemini — it will hallucinate actions instead
 // of calling them (e.g. "I've closed the video" without actually closing it).
@@ -761,7 +931,10 @@ function assertUniqueToolNames(tools: ToolDefinition[]): ToolDefinition[] {
 // commit). Restored 2026-04-25 after the iclr-highlight skill went silent on
 // the autonav cue — voice-agent had no way to call highlight_slide because the
 // skill's tools were never being merged into inlineTools.
-async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
+// Split by manifest `access_tier` so phone-conversation can include
+// owner-tier tools only when the caller is the verified owner. Manifest
+// access_tier values: "owner" (default if omitted) | "any_caller".
+async function loadSkillManifestTools(): Promise<{ owner: ToolDefinition[]; anyCaller: ToolDefinition[] }> {
 	// Scan the public-repo `skills/` dir AND the optional private skills dir
 	// pointed to by `$SUTANDO_PRIVATE_DIR/skills/` (e.g.
 	// `~/.sutando-memory-sync/skills/`). The private dir lets users keep
@@ -775,7 +948,8 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
 		dirsToScan.push(join(expanded, 'skills'));
 	}
-	const out: ToolDefinition[] = [];
+	const owner: ToolDefinition[] = [];
+	const anyCaller: ToolDefinition[] = [];
 	for (const skillsDir of dirsToScan) {
 		if (!existsSync(skillsDir)) continue;
 		let dirs: string[];
@@ -787,7 +961,7 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 		for (const dirName of dirs) {
 			const manifestPath = join(skillsDir, dirName, 'manifest.json');
 			if (!existsSync(manifestPath)) continue;
-			let manifest: { enabled?: boolean; tools?: string; config?: Record<string, string>; name?: string };
+			let manifest: { enabled?: boolean; tools?: string; config?: Record<string, string>; name?: string; access_tier?: string };
 			try {
 				manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 			} catch (err) {
@@ -800,21 +974,75 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 			}
 			if (!manifest.tools) continue;
 			const toolsPath = join(skillsDir, dirName, manifest.tools.replace(/^\.\//, ''));
+			const tier = manifest.access_tier === 'any_caller' ? 'any_caller' : 'owner';
 			try {
 				// @ts-ignore — dynamic relative import resolved at runtime by tsx
 				const mod = await import(toolsPath);
 				if (Array.isArray(mod.tools)) {
-					out.push(...mod.tools);
-					console.log(`[skill-loader] loaded ${mod.tools.length} tool(s) from ${manifest.name || dirName} (${skillsDir})`);
+					(tier === 'any_caller' ? anyCaller : owner).push(...mod.tools);
+					console.log(`[skill-loader] loaded ${mod.tools.length} tool(s) from ${manifest.name || dirName} [tier=${tier}] (${skillsDir})`);
 				}
 			} catch (err) {
 				console.warn(`[skill-loader] failed to import ${dirName}/${manifest.tools} from ${skillsDir}:`, err instanceof Error ? err.message : err);
 			}
 		}
 	}
-	return out;
+	return { owner, anyCaller };
 }
 const personalTools = await loadSkillManifestTools();
+const personalAllTools = [...personalTools.owner, ...personalTools.anyCaller];
+
+// Manifest-driven discovery of skills that core (not voice-inline) runs.
+// When a manifest has `documented_for_core: true` and a `core_description`,
+// the description is exposed to voice-agent's system-prompt assembly so
+// Gemini knows the capability exists and to delegate via `work` instead
+// of saying "I can't do that". The skill itself is NOT loaded inline — it
+// stays as docs+scripts and the core agent runs it when the work-task
+// arrives. Same scan-paths as loadSkillManifestTools.
+//
+// SYNC vs ASYNC NOTE (Mini's #592 review): this helper is sync because
+// we never need to import any module — we just read manifest.json files.
+// loadSkillManifestTools is async because it dynamically `await import()`s
+// a tools.ts. Don't try to align them — they're correctly sync/async for
+// what each one does.
+function loadCoreDocumentedSkills(): { name: string; description: string }[] {
+	const dirsToScan: string[] = [join(process.cwd(), 'skills')];
+	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
+	if (privateRoot) {
+		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
+		dirsToScan.push(join(expanded, 'skills'));
+	}
+	// Last-write-wins map so private (later in dirsToScan) overrides public —
+	// same precedence convention as loadSkillManifestTools above.
+	const byName = new Map<string, { name: string; description: string }>();
+	for (const skillsDir of dirsToScan) {
+		if (!existsSync(skillsDir)) continue;
+		let dirs: string[];
+		try {
+			dirs = readdirSync(skillsDir).filter(n => {
+				try { return statSync(join(skillsDir, n)).isDirectory(); } catch { return false; }
+			});
+		} catch { continue; }
+		for (const dirName of dirs) {
+			const manifestPath = join(skillsDir, dirName, 'manifest.json');
+			if (!existsSync(manifestPath)) continue;
+			let manifest: { documented_for_core?: boolean; core_description?: string; name?: string; tools?: string };
+			try {
+				manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+			} catch { continue; }
+			if (!manifest.documented_for_core || !manifest.core_description) continue;
+			// Dedup against inline-loaded skills: if the manifest also exposes
+			// a `tools:` entry, the skill is already inline-listed and
+			// double-listing here would teach Gemini both "call this inline"
+			// AND "delegate via work" simultaneously. Pick the inline path.
+			if (manifest.tools) continue;
+			const name = manifest.name || dirName;
+			byName.set(name, { name, description: manifest.core_description });
+		}
+	}
+	return Array.from(byName.values());
+}
+export const coreDocumentedSkills = loadCoreDocumentedSkills();
 
 export const inlineTools = assertUniqueToolNames([
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
@@ -824,12 +1052,15 @@ export const inlineTools = assertUniqueToolNames([
 	joinZoomTool, joinGmeetTool, lookupMeetingIdTool, callContactTool,
 	describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, slideControlTool, fullscreenTool,
 	showViewTool, readNoteTool, saveNoteTool, deleteNoteTool,
-	...personalTools ]);
+	recentContextTool,
+	sendVisionFrameTool, startVisionTool, stopVisionTool,
+	...personalAllTools ]);
 
 /** Tools available to any caller (including unverified) */
 export const anyCallerTools = [
 	getCurrentTimeTool,
 	getCoreStatusTool,
+	...personalTools.anyCaller,
 ];
 
 /** Owner-only tools (require isOwner) */
@@ -840,7 +1071,10 @@ export const ownerOnlyTools = [
 	clipboardTool, cancelTaskTool, toggleTasksTool, summonTool, dismissTool,
 	joinZoomTool, joinGmeetTool, callContactTool, slideControlTool, fullscreenTool,
 	showViewTool, readNoteTool, saveNoteTool, deleteNoteTool,
+	recentContextTool,
 	describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool,
+	sendVisionFrameTool, startVisionTool, stopVisionTool,
+	...personalTools.owner,
 ];
 
 /** Configurable tools — default to owner-only, can be opened to verified callers */

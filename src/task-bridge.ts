@@ -62,6 +62,32 @@ mkdirSync(RESULT_DIR, { recursive: true });
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
+/**
+ * Write a chat-path task file so the dashboard tracks chat-originated work.
+ * Called by the core agent (Claude Code) when it accepts a non-trivial task from chat.
+ * Reuses the same tasks/ directory and file format as voice/Discord/Telegram paths.
+ *
+ * Note: access_tier is hardcoded to "owner" because chat is local to the operator.
+ * Revisit if /chat ever opens to non-owner users (team/other tier).
+ */
+export function writeChatTask(taskDescription: string): string {
+	const taskId = `task-chat-${Date.now()}`;
+	const timestamp = new Date().toISOString();
+	const content = [
+		`id: ${taskId}`,
+		`timestamp: ${timestamp}`,
+		`task: ${taskDescription}`,
+		`source: chat`,
+		`channel_id: local-chat`,
+		`user_id: ${process.env.SUTANDO_DM_OWNER_ID || 'chat-local'}`,
+		`access_tier: owner`,
+		'',
+	].join('\n');
+	writeFileSync(join(TASK_DIR, `${taskId}.txt`), content);
+	console.log(`${ts()} [TaskBridge] Chat task: ${taskId}: ${taskDescription.slice(0, 100)}`);
+	return taskId;
+}
+
 // ---------------------------------------------------------------------------
 // Task status notifications — sent to the web client
 // ---------------------------------------------------------------------------
@@ -69,8 +95,52 @@ function ts(): string { return new Date().toISOString().slice(11, 23); }
 let _sendTaskStatus: ((taskId: string, status: string, text: string, result?: string) => void) | null = null;
 const _deliveredResults = new Set<string>();
 
-const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const _pendingTasks = new Map<string, number>(); // taskId → submission epoch ms
+const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes default
+// Per-task pending state: submission epoch, timeout (ms), and whether to
+// emit a Discord DM to the owner if this task hits its timeout. dm_on_timeout
+// defaults to false (silent timeout — Susan's PR #578 contract). Voice agent
+// can flip it true on critical tasks to get a fallback notification.
+type PendingTask = { submittedAt: number; timeoutMs: number; dmOnTimeout: boolean };
+const _pendingTasks = new Map<string, PendingTask>();
+
+/** True if the task file (in tasks/, tasks/processed/, or tasks/archive/
+ * — including month-partitioned subdirs `tasks/archive/YYYY-MM/`) is
+ * voice-originated (channel_id: local-voice). Used by the result watcher
+ * to decide whether to forward an unsent result to Discord DM when voice is
+ * offline. Returns false on missing file or parse error — bias toward not
+ * forwarding to keep Susan-rejected always-DM behavior off by default for
+ * non-voice tasks. */
+export function _isVoiceTask(taskId: string): boolean {
+	const candidates: string[] = [
+		join(TASK_DIR, `${taskId}.txt`),
+		join(TASK_DIR, 'processed', `${taskId}.txt`),
+		// Legacy flat-archive location — kept for any task archived before
+		// the YYYY-MM partitioning (PR #591) was introduced.
+		join(TASK_DIR, 'archive', `${taskId}.txt`),
+	];
+	// Active archive layout: tasks/archive/YYYY-MM/<taskId>.txt. Glob the
+	// month subdirs rather than rebuild the YYYY-MM from the task's mtime —
+	// the writer's archive month and current month can differ around month
+	// boundaries.
+	const archiveRoot = join(TASK_DIR, 'archive');
+	if (existsSync(archiveRoot)) {
+		try {
+			for (const entry of readdirSync(archiveRoot)) {
+				// Only month-shaped names (YYYY-MM); skip stray files.
+				if (!/^\d{4}-\d{2}$/.test(entry)) continue;
+				candidates.push(join(archiveRoot, entry, `${taskId}.txt`));
+			}
+		} catch {}
+	}
+	for (const p of candidates) {
+		if (!existsSync(p)) continue;
+		try {
+			const body = readFileSync(p, 'utf-8');
+			return body.split('\n').some(l => l.startsWith('channel_id: local-voice') || l.startsWith('source: voice'));
+		} catch {}
+	}
+	return false;
+}
 const _apiToken = process.env.SUTANDO_API_TOKEN || '';
 function _apiHeaders(): Record<string, string> {
 	const h: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -95,10 +165,33 @@ export const workTool: ToolDefinition = {
 		'This is how Sutando thinks and acts. Results are spoken back when ready.',
 	parameters: z.object({
 		task: z.string().describe('Full description of the task to perform'),
+		timeout_minutes: z
+			.number()
+			.optional()
+			.describe(
+				'Per-task timeout in minutes. Default 10. Pass a larger value (e.g. 30) for ' +
+				'multi-step jobs like rendering, batch encoding, or long research. Pass 0 for ' +
+				'no timeout — use sparingly, only when the user explicitly asks for a long ' +
+				'autonomous job that may legitimately take hours.'
+			),
+		dm_on_timeout: z
+			.boolean()
+			.optional()
+			.describe(
+				'If true, send a Discord DM to the owner when this task hits its timeout. ' +
+				'Default false (silent UI-only timeout, per Susan PR #578). Use only for ' +
+				'tasks the user has explicitly flagged as critical. The Chi-override to ' +
+				'default-true (2026-05-03 06:00 PT) was reverted at 06:47 PT after Chi flagged ' +
+				'a timeout DM that shouldn\'t have gone through.'
+			),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { task } = args as { task: string };
+		const { task, timeout_minutes, dm_on_timeout } = args as {
+			task: string;
+			timeout_minutes?: number;
+			dm_on_timeout?: boolean;
+		};
 
 		// Redirect pure screen-viewing tasks to inline tools (faster, no round-trip)
 		// Narrow match: only "describe/look at my screen" — not scroll, screenshot,
@@ -149,7 +242,19 @@ export const workTool: ToolDefinition = {
 			`user_id: ${ownerId}\n` +
 			`access_tier: owner\n`;
 		writeFileSync(join(TASK_DIR, `${taskId}.txt`), content);
-		_pendingTasks.set(taskId, Date.now());
+		// Resolve per-task timeout. 0 → no timeout. Negative or NaN → default.
+		// Cap at 6 hours to prevent runaway pending-state if the voice agent
+		// hallucinates a giant value.
+		let timeoutMs = DEFAULT_TASK_TIMEOUT_MS;
+		if (typeof timeout_minutes === 'number') {
+			if (timeout_minutes === 0) timeoutMs = 0;
+			else if (timeout_minutes > 0) timeoutMs = Math.min(timeout_minutes, 360) * 60 * 1000;
+		}
+		// Default FALSE (Susan PR #578 silent-timeout contract restored after
+		// Chi's 2026-05-03 06:00 override was reverted at 06:47 — the always-on
+		// default was producing unwanted DMs). Caller must explicitly pass
+		// dm_on_timeout: true on critical tasks where they want the fallback.
+		_pendingTasks.set(taskId, { submittedAt: Date.now(), timeoutMs, dmOnTimeout: dm_on_timeout === true });
 		// Record owner activity for status-aware-pivot in proactive loop
 		writeOwnerActivity('voice', task);
 		console.log(`${ts()} [TaskBridge] Task ${taskId}: ${task.slice(0, 100)}`);
@@ -171,9 +276,16 @@ export const workTool: ToolDefinition = {
 // and inject them into the conversation via a callback
 // ---------------------------------------------------------------------------
 
-/** Append a message to the persistent conversation log. */
+/** Append a message to the persistent conversation log. The text cap
+ *  matches Discord's per-message limit (2000 chars) so a single transcript
+ *  line never exceeds what could legitimately appear elsewhere in the
+ *  conversation. The previous 200-char cap was aggressive — it truncated
+ *  ordinary user/assistant turns mid-sentence, especially in CJK where one
+ *  character can render as multiple bytes. Lifted to LOG_LINE_MAX_CHARS;
+ *  override via SUTANDO_LOG_LINE_MAX_CHARS env if a host wants tighter logs. */
+const LOG_LINE_MAX_CHARS = Number(process.env.SUTANDO_LOG_LINE_MAX_CHARS) || 2000;
 export function logConversation(role: string, text: string): void {
-	const line = `${new Date().toISOString()}|${role}|${text.replace(/\n/g, ' ').slice(0, 200)}\n`;
+	const line = `${new Date().toISOString()}|${role}|${text.replace(/\n/g, ' ').slice(0, LOG_LINE_MAX_CHARS)}\n`;
 	try { appendFileSync(CONVERSATION_LOG, line); } catch { /* best effort */ }
 }
 
@@ -360,12 +472,64 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 	// Check every 2 seconds for new result files
 	setInterval(() => {
 		// Check for timed-out tasks — runs every interval regardless of result files
-		for (const [taskId, submittedAt] of _pendingTasks) {
-			if (Date.now() - submittedAt > TASK_TIMEOUT_MS) {
+		for (const [taskId, pending] of _pendingTasks) {
+			const { submittedAt, timeoutMs, dmOnTimeout } = pending;
+			// timeoutMs === 0 means "no timeout" — skip the check entirely.
+			if (timeoutMs === 0) continue;
+			if (Date.now() - submittedAt > timeoutMs) {
 				_pendingTasks.delete(taskId);
-				console.error(`${ts()} [TaskBridge] Task ${taskId} timed out after ${TASK_TIMEOUT_MS / 1000}s`);
-				_sendTaskStatus?.(taskId, 'timeout', 'Task timed out — core agent may be unresponsive');
-				onResult(`[Task timed out after ${Math.floor(TASK_TIMEOUT_MS / 60000)} minutes. The processing engine may need to be restarted.]`);
+				// Read the task body (or a snippet of it) so the timeout message
+				// can identify which task timed out — the prior generic "[Task
+				// timed out]" string left no clue when multiple tasks were in
+				// flight. Snippet is bounded to 80 chars to keep the voice
+				// narration short.
+				const taskFile = join(TASK_DIR, `${taskId}.txt`);
+				let taskSnippet = '';
+				if (existsSync(taskFile)) {
+					try {
+						const body = readFileSync(taskFile, 'utf-8');
+						const taskLine = body.split('\n').find(l => l.startsWith('task:'));
+						const raw = (taskLine ? taskLine.slice(5) : '').trim();
+						taskSnippet = raw.length > 80 ? raw.slice(0, 77) + '...' : raw;
+					} catch {}
+				}
+				console.error(`${ts()} [TaskBridge] Task ${taskId} (${taskSnippet || '?'}) timed out after ${timeoutMs / 1000}s`);
+				const statusMsg = taskSnippet
+					? `Task '${taskSnippet}' timed out — core agent may be unresponsive`
+					: 'Task timed out — core agent may be unresponsive';
+				_sendTaskStatus?.(taskId, 'timeout', statusMsg);
+				const minutes = Math.floor(timeoutMs / 60000);
+				const userMsg = taskSnippet
+					? `[Task ${taskId} ('${taskSnippet}') timed out after ${minutes} minutes. The processing engine may need to be restarted.]`
+					: `[Task ${taskId} timed out after ${minutes} minutes. The processing engine may need to be restarted.]`;
+				onResult(userMsg);
+				// Move the task file out of tasks/ so /tasks/active stops listing it
+				// as 'working' forever. (Without this, dedup-orphan tasks left behind
+				// after a consolidated reply pile up in the UI as stuck spinners.)
+				// Use archiveFile() — same destination (tasks/archive/<YYYY-MM>/) as
+				// the result-delivery archival paths so all timeout/done/dedupe lands
+				// in one place. (Mini's #589 review flagged the previous
+				// tasks/processed/ split as a learn-collector scan footprint.)
+				if (existsSync(taskFile)) {
+					archiveFile(taskFile, 'tasks', taskId);
+				}
+				// Discord DM fallback (opt-in via dm_on_timeout). Default off per
+				// Susan's PR #578 contract — silent timeout. We emit by writing
+				// a proactive-*.txt file; discord-bridge.py poll_proactive sends
+				// it to the owner's DM.
+				if (dmOnTimeout) {
+					try {
+						const proactiveTs = Math.floor(Date.now() / 1000);
+						const proactivePath = join(RESULT_DIR, `proactive-timeout-${taskId}-${proactiveTs}.txt`);
+						const dmBody = taskSnippet
+							? `⏱ Task '${taskSnippet}' timed out after ${minutes}m. The processing engine may need to be restarted, or the task may need a longer timeout via timeout_minutes.`
+							: `⏱ Task ${taskId} timed out after ${minutes}m.`;
+						writeFileSync(proactivePath, dmBody);
+						console.log(`${ts()} [TaskBridge] Wrote DM-on-timeout proactive file for ${taskId}`);
+					} catch (e) {
+						console.error(`${ts()} [TaskBridge] Failed to emit DM-on-timeout for ${taskId}:`, e);
+					}
+				}
 			}
 		}
 
@@ -373,22 +537,83 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 			const files = readdirSync(RESULT_DIR).filter(f => f.endsWith('.txt')).sort();
 			if (files.length === 0) return;
 
-			// Only deliver if a client is connected — otherwise keep files queued
-			if (!isClientConnected()) {
-				return;
-			}
+			const clientConnected = isClientConnected();
 
 			for (const file of files) {
 				if (_deliveredResults.has(file)) continue;
 				const path = join(RESULT_DIR, file);
 				const result = readFileSync(path, 'utf-8').trim();
+				if (!result) continue;
+				const taskId = file.replace('.txt', '');
+				// Deduped-marker result: agent consolidated this task's reply
+				// into another task's result file. Mark this task done silently
+				// and archive — no Discord post, no voice narration, no timeout.
+				// Format: first line is "[deduped: <other-task-id>]" (rest of
+				// file optional, displayed as the result body in the UI).
+				if (file.startsWith('task-') && /^\s*\[deduped:\s*task-/i.test(result)) {
+					console.log(`${ts()} [TaskBridge] ${taskId} is deduped marker; archiving silently`);
+					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+					_deliveredResults.add(file);
+					_pendingTasks.delete(taskId);
+					try {
+						fetch('http://localhost:7843/task-done', {
+							method: 'POST',
+							headers: _apiHeaders(),
+							body: JSON.stringify({ taskId, result }),
+						}).catch(() => {});
+					} catch {}
+					setTimeout(() => {
+						archiveFile(path, 'results', taskId);
+						const taskFile = join(TASK_DIR, `${taskId}.txt`);
+						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+					}, 5_000);
+					continue;
+				}
+				// Voice client offline → forward voice-task results to Discord DM
+				// via a proactive-result-*.txt file (poll_proactive in
+				// discord-bridge.py picks it up and DMs the owner). Skips files
+				// that aren't voice-originated tasks (Discord/Telegram bridges
+				// handle their own deliveries via pending_replies).
+				if (!clientConnected) {
+					if (file.startsWith('task-') && _isVoiceTask(taskId)) {
+						try {
+							const proactiveTs = Math.floor(Date.now() / 1000);
+							const proactivePath = join(RESULT_DIR, `proactive-result-${taskId}-${proactiveTs}.txt`);
+							writeFileSync(proactivePath, result);
+							console.log(`${ts()} [TaskBridge] Voice offline; forwarded ${taskId} result to Discord DM via ${proactivePath}`);
+							_deliveredResults.add(file);
+							_pendingTasks.delete(taskId);
+							setTimeout(() => {
+								archiveFile(path, 'results', taskId);
+								const taskFile = join(TASK_DIR, `${taskId}.txt`);
+								if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+							}, 10_000);
+						} catch (e) {
+							console.error(`${ts()} [TaskBridge] Failed to forward ${taskId} to Discord:`, e);
+						}
+					}
+					// Chat-path tasks have no bridge consumer — archive them directly
+					// so results/task-chat-*.txt files don't accumulate forever.
+					if (taskId.startsWith('task-chat-')) {
+						_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+						_deliveredResults.add(file);
+						_pendingTasks.delete(taskId);
+						console.log(`${ts()} [TaskBridge] Chat task archived (no client): ${taskId}`);
+						setTimeout(() => {
+							archiveFile(path, 'results', taskId);
+							const taskFile = join(TASK_DIR, `${taskId}.txt`);
+							if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+						}, 10_000);
+					}
+					// Other non-voice unsent results stay queued (their bridges deliver them)
+					continue;
+				}
 				if (result) {
-					const taskId = file.replace('.txt', '');
 					console.log(`${ts()} [TaskBridge] Result ${file}: ${result.slice(0, 100)}`);
 					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 					_deliveredResults.add(file);
 					_pendingTasks.delete(taskId);
-					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, 200)}`);
+					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, LOG_LINE_MAX_CHARS)}`);
 					onResult(result);
 					// Notify agent-api directly, then delete file
 					try {
@@ -398,7 +623,17 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 							body: JSON.stringify({ taskId, result }),
 						}).catch(() => {});
 					} catch {}
-					setTimeout(() => { archiveFile(path, 'results', path.split('/').pop()!.replace('.txt', '')); }, 10_000);
+					setTimeout(() => {
+						const taskIdFromFile = path.split('/').pop()!.replace('.txt', '');
+						archiveFile(path, 'results', taskIdFromFile);
+						// Also archive the originating task file so get_task_status
+						// stops counting it as "queued" — voice agent reads
+						// tasks/*.txt directly and otherwise sees stale files
+						// (Chi reported "task done in UI but queued in voice"
+						// on 2026-05-04 with 32 stale files in tasks/).
+						const taskFile = join(TASK_DIR, `${taskIdFromFile}.txt`);
+						if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskIdFromFile);
+					}, 10_000);
 				}
 			}
 		} catch {

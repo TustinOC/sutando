@@ -1,14 +1,13 @@
 #!/bin/bash
-# Streaming task watcher — companion to watch-tasks.sh.
+# Streaming task watcher — the canonical task-detection path.
 #
 # Runs fswatch indefinitely and emits ONE line per new task file appearance.
 # Designed to be invoked via Claude Code's `Monitor` tool, which streams
 # stdout lines as per-event notifications without process-restart cycles.
 #
-# Compared to watch-tasks.sh (one-shot, exits on first event so the caller
-# can be notified via process-exit): this script never exits during normal
-# operation. Migration is gated by which invocation pattern the agent uses
-# (Bash run_in_background vs Monitor), not by removing the old script.
+# Replaces the one-shot `watch-tasks.sh` (retired 2026-05-14) — that one
+# exited on first event so the caller had to restart it; this one stays
+# alive for the lifetime of the CLI session.
 #
 # Output format per event:
 #   TASK_FILE: <basename>
@@ -21,7 +20,20 @@
 
 set -u
 
-TASKS_DIR="${1:-$(dirname "$0")/../tasks}"
+# Resolve TASKS_DIR. Priority: explicit positional arg → $SUTANDO_WORKSPACE/tasks
+# → repo-relative fallback. The SUTANDO_WORKSPACE branch matches what every
+# bridge does (discord-bridge.py, telegram-bridge.py, dm-result.py — see
+# PRs #708/#720/#722/#723) — without it, the bridges write tasks to the
+# workspace but the watcher polls the repo's tasks/, so owner DMs land but
+# the agent never sees them. Diagnosed 2026-05-15 (~3 dropped DMs over
+# 17 min before the workaround restart).
+if [ -n "${1:-}" ]; then
+  TASKS_DIR="$1"
+elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+  TASKS_DIR="$SUTANDO_WORKSPACE/tasks"
+else
+  TASKS_DIR="$(dirname "$0")/../tasks"
+fi
 mkdir -p "$TASKS_DIR"
 # Canonicalize watched dir for the parent-dir filter below. fswatch always
 # emits PHYSICAL paths (e.g. /private/tmp/... not /tmp/...), so we resolve

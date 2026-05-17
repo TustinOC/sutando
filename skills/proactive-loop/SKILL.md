@@ -23,7 +23,9 @@ If an interval is provided in ARGUMENTS (e.g. "5m", "10m", "30m"), use it. Other
 
 ## Start the loop
 
-Use `/loop <interval>` with this prompt:
+If `CronList` already shows a recurring job that drives this loop — either a `main-loop` entry from `/schedule-crons` (typically `*/5 * * * *` → `/proactive-loop`) or a prior `/loop` invocation with the body below — **skip this section and run the per-pass body directly**. That cron is the canonical driver; adding another would compound on every fire — each `/proactive-loop` invocation would re-run `/loop`, scheduling another recurring job and growing the cron list unboundedly.
+
+Otherwise, use `/loop <interval>` with this prompt:
 
 ---
 
@@ -61,6 +63,7 @@ Skip step 6 (end the pass early after step 3) if and only if one of these applie
 1. **Check for tasks.** Look in `tasks/` for voice / Discord / Telegram / phone tasks. Look at `context-drop.txt` for context drops. Process anything found — execute the task, write results to `results/`.
    - **Access control:** If the task has `access_tier: other` or `access_tier: team`, delegate to a sandboxed agent. Do NOT process non-owner tasks with your full capabilities. Write the sandboxed output to results.
    - Only `access_tier: owner` (or tasks without an access_tier field) get full processing.
+   - **Thread consolidation:** when several tasks in a short window are the same continuation thought (e.g. voice over-delegating "yes, right, this is useful…" as 3 separate tasks), put the FULL reply in the latest task's result and put `[deduped: task-<latest-id>]` in each earlier task's result. The bridge silently archives the deduped ones — no voice cascade, no DM duplicates. See CLAUDE.md "Result-body protocol markers" for the full marker list.
 
 2. **Check pending questions.** Read `pending-questions.md`. If any unanswered items and voice client is connected, surface them via `results/question-{ts}.txt`. Also send a macOS notification.
 
@@ -98,8 +101,8 @@ Skip step 6 (end the pass early after step 3) if and only if one of these applie
    - **No merge authority for bots.** All merges remain owner's call. Bots prepare + review; owner merges.
    - Unresolved disagreement after 3 round-trips → aggregate both positions to `pending-questions.md`, proceed with whichever option is cheaper to reverse.
 
-11. **Update contextual chips.** Write `contextual-chips.json` with actionable chips based on current context. Only include items the owner can act on by clicking: open PRs ("Review PR #N"), upcoming meetings ("Join standup in 5min"), pending questions, recent unread results. Format: `{"chips": [{"label": "...", "desc": "..."}], "ts": EPOCH}`. The web UI polls this file and pins chips at the top of the starter tab.
+11. **Heartbeat.** If this pass shipped anything substantive (commit / PR opened or merged / memory edit / new note / new skill) AND (#bot2bot is configured AND other bot is active), post a short `done: <one-line summary>` to #bot2bot via the `bot2bot-post` skill. Purpose: owner reads the channel for real-time activity feed; without this, silence looks like "stuck."
 
-12. **Heartbeat.** If this pass shipped anything substantive (commit / PR opened or merged / memory edit / new note / new skill) AND (#bot2bot is configured AND other bot is active), post a short `done: <one-line summary>` to #bot2bot via the `bot2bot-post` skill. Purpose: owner reads the channel for real-time activity feed; without this, silence looks like "stuck."
+   **Note**: contextual-chips refresh used to be step 11 in this loop. As of 2026-05-05 it is owned exclusively by Sutando.app's 120s timer (PR #600). The proactive-loop must NOT write `contextual-chips.json` — Sutando.app is the single writer. If a future case calls for chip-state the menu-bar app can't see (e.g. decision-state from `pending-questions.md`), surface it via a different file Sutando.app reads, not by competing as a writer.
 
    **Do NOT fall back to `results/proactive-*.txt` for heartbeats if `bot2bot-post` is not installed.** That legacy path is polled by both Discord and Telegram bridges and produces duplicate deliveries to the owner's DMs (9-per-heartbeat in practice on 2026-04-20). If the skill is missing, skip the heartbeat silently; fold the summary into the next task-reply instead.

@@ -10,12 +10,25 @@
 
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
+import { CHAT_HTML } from './chat-ui.js';
 
 const HTTP_PORT = Number(process.env.CLIENT_PORT) || 8080;
 const HTTP_HOST = process.env.CLIENT_HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces for EC2
 const WS_PORT = Number(process.env.PORT) || 9900;
 const DEFAULT_WS_URL = `ws://localhost:${WS_PORT}`;
+
+// Workspace-relative paths must be resolved against an absolute REPO_DIR (not
+// process.cwd()) so the client works when launched from a bundle/launchd/symlink
+// install where CWD isn't the workspace root. Matches task-bridge.ts (issue #713).
+const REPO_DIR = (process.env.SUTANDO_WORKSPACE && existsSync(process.env.SUTANDO_WORKSPACE))
+    ? process.env.SUTANDO_WORKSPACE
+    : resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const TASK_DIR = join(REPO_DIR, 'tasks');
+const STATE_DIR = join(REPO_DIR, 'state');
+const SUBSCRIPTIONS_PATH = join(REPO_DIR, 'skills/subscription-scanner/state/subscriptions.json');
 
 const HTML = /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -239,6 +252,19 @@ const HTML = /* html */ `<!DOCTYPE html>
   .btn-mute { background: #2a2a3e; color: #888; }
   .btn-mute:hover { background: #3a3a4e; color: #fff; }
   .btn-mute.muted { background: #4a1a1a; color: #e94560; }
+  /* Watch (vision streaming) — matches the avatar 'seeing' palette (#fbbf24). */
+  .btn-watch { background: #2a2a3e; color: #888; }
+  .btn-watch:hover { background: #3a3a4e; color: #fff; }
+  .btn-watch.watching {
+    background: #3a2e10; color: #fbbf24; border: 1px solid #7a5a14;
+    box-shadow: 0 0 10px rgba(251, 191, 36, 0.35);
+    animation: btn-watch-pulse 1.6s ease-in-out infinite;
+  }
+  .btn-watch.watching:hover { background: #4a3a14; color: #ffd966; }
+  @keyframes btn-watch-pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(251, 191, 36, 0.3); }
+    50%      { box-shadow: 0 0 16px rgba(251, 191, 36, 0.55); }
+  }
   .btn-subtle { background: transparent; color: #444; font-size: 11px; padding: 5px 8px; }
   .btn-subtle:hover { color: #888; }
 
@@ -247,7 +273,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 
   /* Conversation */
   #transcript {
-    min-height: 80px; max-height: 30vh;
+    min-height: 80px; max-height: 50vh;
     background: #0e0e18; border-radius: 12px; padding: 10px 14px;
     overflow-y: auto; font-size: 16px; line-height: 1.6;
     margin-bottom: 6px;
@@ -311,6 +337,14 @@ const HTML = /* html */ `<!DOCTYPE html>
   .task-status.done { background: #1e4028; color: #4ecca3; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   .task-text { color: #d0d0d8; flex: 1; word-break: break-word; font-size: 16px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 1s yellow flash on a task-item when voice expand:N targets it.
+     Visual confirmation that the expand landed, independent of whether
+     the task has a result body to display. */
+  @keyframes task-flash-anim {
+    0% { background: rgba(255, 220, 100, 0.45); }
+    100% { background: transparent; }
+  }
+  .task-item.task-flash { animation: task-flash-anim 1s ease-out; }
   .task-text.expanded { white-space: normal; }
   .task-time { color: #777; font-size: 13px; flex-shrink: 0; }
   .task-expand {
@@ -516,7 +550,34 @@ const HTML = /* html */ `<!DOCTYPE html>
   .toast .toast-label { color: #4ecca3; font-weight: 600; }
   @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes toastOut { from { opacity: 1; } to { opacity: 0; transform: translateY(-8px); } }
+
+  /* Markdown styles inside .t-assistant — when the bridge result contains
+     headings/lists/code, render it instead of showing raw # ## etc. The
+     bubble already has a colored prefix ("Sutando: ") via .t-assistant::before. */
+  .t-assistant h1, .t-assistant h2, .t-assistant h3, .t-assistant h4 { color: #e8e8ee; font-weight: 700; margin: 0.5em 0 0.3em; }
+  .t-assistant h1 { font-size: 1.3em; }
+  .t-assistant h2 { font-size: 1.15em; }
+  .t-assistant h3 { font-size: 1.05em; }
+  .t-assistant p { margin: 0.4em 0; }
+  .t-assistant ul, .t-assistant ol { margin: 0.4em 0; padding-left: 1.6em; }
+  .t-assistant li { margin: 0.2em 0; }
+  .t-assistant code { background: #0a0a12; padding: 1px 5px; border-radius: 3px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 0.88em; color: #f8b878; }
+  .t-assistant pre { background: #0a0a12; padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0.5em 0; border: 1px solid #1e1e2a; }
+  .t-assistant pre code { background: none; padding: 0; color: #d0d0e0; font-size: 0.9em; }
+  .t-assistant a { color: #6ea3ff; text-decoration: none; }
+  .t-assistant a:hover { text-decoration: underline; }
+  .t-assistant strong { color: #f0f0f8; font-weight: 700; }
+  .t-assistant table { border-collapse: collapse; margin: 0.4em 0; font-size: 0.95em; }
+  .t-assistant th, .t-assistant td { border: 1px solid #1e1e2a; padding: 4px 8px; }
+  .t-assistant th { background: #14141e; }
+  .t-assistant blockquote { border-left: 3px solid #2a4060; padding-left: 10px; margin: 0.4em 0; color: #a0a0b0; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<!-- DOMPurify — agent results come from external task channels (Discord,
+     Telegram, voice, SMS) and aren't trusted input. marked@12 ships no
+     sanitizer by default, so unwrapped innerHTML on transcript replies would
+     execute embedded <script> / inline handlers. Sandbox before insertion. -->
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
 </head>
 <body>
 
@@ -569,7 +630,18 @@ const HTML = /* html */ `<!DOCTYPE html>
   <div class="controls">
     <button id="btn" class="btn-voice" onclick="toggle()" style="display:none">End Voice</button>
     <button id="btn-mute" class="btn-mute" onclick="toggleMute()" style="display:none">Mute</button>
+    <button id="btn-watch" class="btn-watch" onclick="toggleWatch()" title="Let Sutando watch your screen" style="display:none">👁️ Watch</button>
   </div>
+</div>
+<!-- Vision preview — shows what Sutando is seeing. Mirrors the MediaStream
+     captured by getDisplayMedia so the user can verify the picked surface
+     and see the same view the model gets. -->
+<div id="vision-preview-wrap" style="display:none; position: fixed; bottom: 16px; right: 16px; z-index: 200; background: rgba(0,0,0,0.6); border: 2px solid #fbbf24; border-radius: 10px; padding: 6px 6px 4px; box-shadow: 0 4px 18px rgba(0,0,0,0.35), 0 0 14px rgba(251,191,36,0.45); max-width: 280px;">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; font: 11px/1.2 -apple-system, system-ui, sans-serif; color:#fbbf24;">
+    <span style="display:inline-flex; align-items:center; gap:6px;">👁️ Sutando is seeing</span>
+    <span id="vision-preview-stats" style="color:#bbb; font-size:10px;"></span>
+  </div>
+  <video id="vision-preview" autoplay muted playsinline style="display:block; width: 100%; max-height: 180px; background:#000; border-radius:6px;"></video>
 </div>
 <input type="text" id="wsUrl" value="${DEFAULT_WS_URL}" />
 <script>
@@ -638,12 +710,14 @@ fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
     </svg>
   </div>
   <h2 id="hero-name">Sutando</h2>
-  <p class="tagline">Summon your AI superpower</p>
+  <p class="tagline">My AI Stand · Summon my AI superpower</p>
   <button class="btn-hero" onclick="toggle()">Start Voice</button>
 </div>
 
 <div id="status-bar" style="text-align:center;font-size:16px;color:#888;letter-spacing:0.3px;padding:12px 16px">
   <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃C</kbd> drop context
+  <span style="margin:0 8px;color:#444">|</span>
+  <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃S</kbd> drop screenshot
   <span style="margin:0 8px;color:#444">|</span>
   <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃V</kbd> voice
   <span style="margin:0 8px;color:#444">|</span>
@@ -920,7 +994,49 @@ function setStatus(text, state) {
 
 // ─── Task list ────────────────────────────────────────────
 // Expose on window so inline tools can access via Chrome AppleScript JS injection
-const taskMap = window.taskMap = {};
+// Restore taskMap + expandedTasks from localStorage so results don't disappear
+// across page refreshes. The /tasks/active API only returns the result text on
+// the first poll after the bridge writes it; once the result file is moved to
+// archive, the API returns the task with an empty result. Without persistence
+// here, refreshing the page wipes the results from the UI.
+const PERSIST_KEY_TASKS = 'sutando-taskmap-v1';
+const PERSIST_KEY_EXPAND = 'sutando-expanded-v1';
+const PERSIST_KEY_SHOW_DONE = 'sutando-show-done-v1';
+// Default-hide done tasks. With Tasks growing to top-30, completed work was
+// crowding out active items and the watcher-glance use case ("what's still
+// running?") got lost. Toggle persists across reloads.
+let showDone = (() => {
+  try { return localStorage.getItem(PERSIST_KEY_SHOW_DONE) === '1'; } catch { return false; }
+})();
+window.toggleShowDone = function() {
+  showDone = !showDone;
+  try { localStorage.setItem(PERSIST_KEY_SHOW_DONE, showDone ? '1' : '0'); } catch {}
+  renderTasks();
+};
+function loadPersistedTaskMap() {
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY_TASKS);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    // Reconstruct Date objects on time fields
+    Object.values(parsed).forEach(t => { if (t && t.time) t.time = new Date(t.time); });
+    return parsed;
+  } catch { return {}; }
+}
+function loadPersistedExpanded() {
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY_EXPAND);
+    if (!raw) return new Set();
+    return new Set(JSON.parse(raw));
+  } catch { return new Set(); }
+}
+function persistTaskMap() {
+  try { localStorage.setItem(PERSIST_KEY_TASKS, JSON.stringify(taskMap)); } catch {}
+}
+function persistExpanded() {
+  try { localStorage.setItem(PERSIST_KEY_EXPAND, JSON.stringify(Array.from(expandedTasks))); } catch {}
+}
+const taskMap = window.taskMap = loadPersistedTaskMap();
 function updateTask(taskId, status, text, result) {
   const existing = taskMap[taskId] || {};
   const isNew = !existing.status;
@@ -933,26 +1049,87 @@ function updateTask(taskId, status, text, result) {
   if ((status === 'working' || status === 'done') && !expandedTasks.has(taskId) && !userCollapsed) {
     expandedTasks.add(taskId);
   }
+  persistTaskMap();
+  persistExpanded();
   renderTasks();
 }
-const expandedTasks = window.expandedTasks = new Set();
+const expandedTasks = window.expandedTasks = loadPersistedExpanded();
 const userExpanded = window.userExpanded = new Set(); // user-initiated expands — never auto-collapse these
 let userCollapsed = false; // user manually collapsed — suppress auto-expand
-// Listen for external collapse/expand commands (from inline tools via AppleScript)
+// Listen for external collapse/expand commands (from inline tools via AppleScript).
+// Action is 'collapse' / 'expand' for all-tasks, or 'collapse:N' / 'expand:N' (1-based) for one.
 new MutationObserver(() => {
-  if (document.body.dataset.taskAction === 'collapse') { expandedTasks.clear(); userCollapsed = true; renderTasks(); document.body.dataset.taskAction = ''; }
-  if (document.body.dataset.taskAction === 'expand') { Object.keys(taskMap).forEach(id => { if (taskMap[id].result) expandedTasks.add(id); }); userCollapsed = false; renderTasks(); document.body.dataset.taskAction = ''; }
+  const a = document.body.dataset.taskAction || '';
+  if (!a) return;
+  const [verb, idxStr] = a.split(':');
+  const idx = idxStr ? parseInt(idxStr, 10) : NaN;
+  // Per-task ops ("expand:3") must use the SAME ordering the user actually sees.
+  // The primary #tasks container is display:none — only the dr-content "tasks"
+  // sub-tab is visible, which renders top-10 by time desc with no filter
+  // (line 2308 below). Voice "expand task N" hitting a different list than
+  // what the user can see produces the bug Chi caught — voice targeted a
+  // 3-day-old timeout task because it ranked 3rd in the unsliced filtered
+  // observer list, but the user's "task 3" was a recent done task that
+  // wasn't in the filtered set.
+  const visibleIds = Object.entries(taskMap)
+    .sort((a, b) => b[1].time - a[1].time)
+    .slice(0, 10)
+    .map(([id]) => id);
+  // All-tasks ops ("expand"/"collapse" with no index) still use the broader
+  // filtered list — "expand all" should reach everything non-done, not just
+  // the visible 10.
+  const allIds = Object.entries(taskMap)
+    .filter(([, t]) => showDone || t.status !== 'done')
+    .sort((a, b) => b[1].time - a[1].time)
+    .map(([id]) => id);
+  if (Number.isInteger(idx) && idx >= 1 && idx <= visibleIds.length) {
+    const targetId = visibleIds[idx - 1];
+    if (verb === 'expand') {
+      // Add target. Do NOT reset userCollapsed — if the user just said
+      // "collapse all" → "expand task N", we want ONLY N visible.
+      // Resetting userCollapsed to false lets the API-poll auto-expand
+      // block re-add all working tasks on the next 3s tick, undoing the
+      // collapse and making per-task expand look like a no-op.
+      expandedTasks.add(targetId); userExpanded.add(targetId);
+    }
+    else if (verb === 'collapse') { expandedTasks.delete(targetId); userExpanded.delete(targetId); }
+    renderTasks();
+    // Visual flash on the targeted task-item across BOTH render paths
+    // (primary + dynamic-region). 50ms delay lets renderTasks() paint
+    // first. Querying after the delay also catches the dr-content
+    // element which re-renders on its own 3s tick — by the time the
+    // user issues subsequent commands the flash will have ridden the
+    // next dynamic-region paint too.
+    setTimeout(function() {
+      document.querySelectorAll('[data-taskid="' + targetId + '"]').forEach(function(el) {
+        el.classList.remove('task-flash');
+        // Force reflow so the animation re-triggers on repeat expand:N.
+        void el.offsetWidth;
+        el.classList.add('task-flash');
+        setTimeout(function() { el.classList.remove('task-flash'); }, 1100);
+      });
+    }, 50);
+  } else {
+    if (verb === 'collapse') { expandedTasks.clear(); userCollapsed = true; renderTasks(); }
+    else if (verb === 'expand') { allIds.forEach(id => { if (taskMap[id].result) expandedTasks.add(id); }); userCollapsed = false; renderTasks(); }
+  }
+  document.body.dataset.taskAction = '';
 }).observe(document.body, { attributes: true, attributeFilter: ['data-task-action'] });
 function toggleResult(taskId) {
   if (expandedTasks.has(taskId)) { expandedTasks.delete(taskId); userExpanded.delete(taskId); } else { expandedTasks.add(taskId); userExpanded.add(taskId); userCollapsed = false; }
-  const el = document.getElementById('result-' + taskId);
-  if (el) el.style.display = expandedTasks.has(taskId) ? 'block' : 'none';
+  // Re-render the whole task list so the .task-text gets the expanded class,
+  // the "Show details" chip flips to "Hide", the displayText switches from
+  // summary to full, and the reply/action buttons appear. Just toggling the
+  // result block's display left the task header in a half-expanded state.
+  persistExpanded();
+  renderTasks();
 }
 window.toggleAllTasks = toggleAllTasks;
 function toggleAllTasks() {
   const hasExpanded = expandedTasks.size > 0;
   if (hasExpanded) { expandedTasks.clear(); userCollapsed = true; }
   else { Object.entries(taskMap).forEach(([id, t]) => { if (t.result) expandedTasks.add(id); }); userCollapsed = false; }
+  persistExpanded();
   renderTasks();
 }
 document.addEventListener('click', function(e) {
@@ -963,7 +1140,9 @@ document.addEventListener('click', function(e) {
   // handler and toggles before the user can copy.
   const sel = window.getSelection && window.getSelection();
   if (sel && sel.toString().length > 0) return;
-  const item = e.target.closest && e.target.closest('.task-item[data-taskid]');
+  // Only working-with-result items are clickable; data-taskid is on every
+  // task-item now (for flash), so gate the toggle on data-clickable.
+  const item = e.target.closest && e.target.closest('.task-item[data-clickable]');
   if (item) toggleResult(item.dataset.taskid);
 });
 // Collapse routing prefixes to a short category badge + clause head.
@@ -1012,20 +1191,45 @@ function renderTasks() {
   window._drTaskCount = entries.length;
   const hdr = $('tasks-header');
   if (entries.length === 0) { container.innerHTML = ''; if (hdr) hdr.style.display = 'none'; return; }
+  // Default-filter done tasks. error/pending/working always render so the
+  // user never loses sight of active work. Toggle in header reveals done.
+  const doneCount = entries.filter(([, t]) => t.status === 'done').length;
+  const visible = showDone ? entries : entries.filter(([, t]) => t.status !== 'done');
   if (hdr) {
     const hasExpanded = expandedTasks.size > 0;
     hdr.style.display = 'flex';
-    hdr.innerHTML = '<span>Tasks</span><span onclick="toggleAllTasks()" style="cursor:pointer">' +
+    hdr.style.gap = '12px';
+    const doneToggle = doneCount > 0
+      ? '<span onclick="toggleShowDone()" style="cursor:pointer">' +
+        (showDone ? 'hide ' + doneCount + ' done' : 'show ' + doneCount + ' done') +
+        '</span>'
+      : '';
+    hdr.innerHTML = '<span>Tasks</span>' +
+      doneToggle +
+      '<span onclick="toggleAllTasks()" style="cursor:pointer">' +
       (hasExpanded ? 'collapse all' : 'expand all') +
       '</span>';
   }
-  const sorted = entries.sort((a, b) => b[1].time - a[1].time).slice(0, 8);
-  container.innerHTML = sorted.map(([id, t]) => {
+  // Empty visible list with non-empty entries means everything is done and
+  // hidden. Show the header toggle so the user can reveal — clear the list.
+  if (visible.length === 0) { container.innerHTML = ''; return; }
+  // Render top-30 most recent. Was 8, but in active sessions (e.g. a kid
+  // iterating on a party plan) new tasks pushed earlier valuable results out
+  // of view within seconds. 30 keeps a longer history visible; localStorage
+  // persistence above keeps results from being lost across refreshes.
+  const sorted = visible.sort((a, b) => b[1].time - a[1].time).slice(0, 30);
+  container.innerHTML = sorted.map(([id, t], i) => {
     const icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
     const ago = Math.round((Date.now() - t.time) / 1000);
     const timeStr = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
-    const hasResult = t.result && t.status === 'done';
-    const clickAttr = hasResult ? ' data-taskid="' + id + '" style="cursor:pointer"' : '';
+    // Show the result if it exists, regardless of status. The agent's task
+    // bookkeeping sometimes leaves tasks in 'working' even after the result
+    // file is written — gating render on status === 'done' meant those
+    // results never showed up in the UI even though they were in taskMap.
+    const hasResult = !!t.result;
+    // Always emit data-taskid so flash + expand:N can target working tasks
+    // too. cursor:pointer + data-clickable only when there's a result to show.
+    const clickAttr = ' data-taskid="' + id + '"' + (hasResult ? ' data-clickable="1" style="cursor:pointer"' : '');
     const isExpanded = expandedTasks.has(id);
     const resultDisplay = isExpanded ? 'block' : 'none';
     const resultHtml = hasResult ? '<div id="result-' + id + '" style="display:' + resultDisplay + ';padding:8px 12px;color:#b8c8d8;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:#0d1520;border-radius:8px;margin:4px 0 6px 30px">' + t.result.replace(/</g,'&lt;') + '</div>' : '';
@@ -1045,9 +1249,15 @@ function renderTasks() {
       actionsHtml = '<div class="task-actions" data-replyfor="' + id + '">' + inner + '</div>';
     }
     const rawText = t.text || id;
-    // Default-tag bare tasks (no [Channel] prefix) as [Sutando-core].
-    const taggedRaw = /^\\[/.test(rawText) ? rawText : '[Sutando-core] ' + rawText;
-    const displayText = isExpanded ? taggedRaw : summarizeTaskText(taggedRaw);
+    // Default-tag bare tasks (no [Channel] prefix) as [Voice] — the
+    // overwhelming majority of un-prefixed tasks come from the voice agent.
+    const taggedRaw = /^\\[/.test(rawText) ? rawText : '[Voice] ' + rawText;
+    // Prepend the 1-based index INTO the display text so it always renders
+    // — earlier attempt with a separate <span class="task-num"> got
+    // zero-width even with min-width set (flex layout/min-content issue).
+    // Embedding sidesteps the layout question entirely.
+    const numPrefix = (i + 1) + '. ';
+    const displayText = numPrefix + (isExpanded ? taggedRaw : summarizeTaskText(taggedRaw));
     const textClass = isExpanded ? 'task-text expanded' : 'task-text';
     const expandChip = hasResult ? '<span class="task-expand">' + (isExpanded ? 'Hide ▾' : 'Show details ▸') + '</span>' : '';
     return '<div class="task-item"' + clickAttr + '>' +
@@ -1116,6 +1326,7 @@ function startTaskPolling() {
           delete taskMap[id];
         }
       }
+      persistTaskMap();
       renderTasks();
       // Update system status indicators
       const statusParts = [];
@@ -1685,11 +1896,288 @@ function doCleanup() {
   $('hero').style.display = '';
   $('btn').style.display = 'none';
   $('btn-mute').style.display = 'none';
+  $('btn-watch').style.display = 'none';
+  teardownPushSession();
+  stopVisionPoll();
   $('voice-status').className = 'status-pill voice-off';
   try { sessionStorage.removeItem('sutando-voice'); } catch {}
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
   updateStats();
 }
+
+// ─── Vision toggle (let Sutando see your screen) ──────────
+// The browser owns capture (so the user gets the native Chrome Tab / Window /
+// Entire Screen picker), and we POST each frame to /vision/frame. The same
+// MediaStream renders into the on-screen preview so the user sees exactly
+// what Sutando sees. Voice tools (start_vision/stop_vision) still flip the
+// button via the 2s poll for the server-side screencapture path.
+var VISION_FRAME_INTERVAL_MS = 1500; // 1280x720 JPEG q=0.6 → ~80–150KB/frame; ~0.7 fps
+var VISION_FRAME_WIDTH = 1280;
+var VISION_FRAME_HEIGHT = 720;
+var VISION_FRAME_QUALITY = 0.6;
+var _visionStreaming = false;        // last-known server state (push or pull)
+var _visionPushActive = false;       // this browser is the push-mode driver
+var _visionPollTimer = null;
+var _visionStream = null;            // MediaStream from getDisplayMedia
+var _visionFrameTimer = null;
+var _visionFrameCount = 0;
+var _visionCanvas = null;            // hidden canvas reused for toBlob
+// Auto-recover state: when voice-agent restarts, the browser still holds
+// a live MediaStream but the server has pushMode=false. We re-issue
+// /vision/start (without re-prompting for getDisplayMedia) to recover.
+// Capped to prevent thrashing if recovery genuinely fails.
+var _visionRearmInFlight = false;
+var _visionRearmCount = 0;
+var _VISION_REARM_LIMIT = 3;
+
+function applyVisionState(state) {
+  if (!state) return;
+  var streaming = !!state.streaming;
+  _visionStreaming = streaming;
+  var btn = document.getElementById('btn-watch');
+  if (!btn) return;
+  btn.className = streaming ? 'btn-watch watching' : 'btn-watch';
+  if (streaming) {
+    var src = state.source || 'screen';
+    var label = src === 'browser' ? 'screen' : src;
+    btn.textContent = '👁️ Watching (' + label + ')';
+    btn.title = 'Sutando is watching your ' + label + ' — click to stop';
+  } else {
+    btn.textContent = '👁️ Watch';
+    btn.title = 'Let Sutando watch your screen';
+  }
+  // Auto-recover: the server has fallen out of push mode (voice-agent
+  // restart, race, etc.) but we still hold a live MediaStream. Re-arm
+  // push mode without re-prompting for getDisplayMedia. If the stream
+  // is gone, just tear down our side.
+  var ourSideStale = _visionPushActive && (!streaming || state.source !== 'browser');
+  if (ourSideStale) {
+    if (_visionStream && _visionStream.active) {
+      rearmPushMode();
+    } else {
+      teardownPushSession();
+    }
+  } else if (streaming && state.source === 'browser') {
+    // Healthy push session — clear any prior recovery attempts.
+    _visionRearmCount = 0;
+  }
+}
+
+// Re-issue /vision/start so the server re-enters push mode, without
+// re-prompting the user for getDisplayMedia. The browser's MediaStream
+// is still live; only the server-side flag was lost. Capped at
+// _VISION_REARM_LIMIT consecutive attempts to prevent thrashing if
+// recovery genuinely fails (e.g., voice session is gone).
+function rearmPushMode() {
+  if (_visionRearmInFlight || _visionRearmCount >= _VISION_REARM_LIMIT) return;
+  if (!_visionStream || !_visionStream.active) return;
+  _visionRearmInFlight = true;
+  _visionRearmCount++;
+  fetch('/vision/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: 'browser' }),
+  }).then(function(r) {
+    return r.json().catch(function() { return {}; });
+  }).then(function(d) {
+    if (d && d.status === 'streaming') {
+      _visionRearmCount = 0;
+      addSystem('Vision: push mode re-armed (server restart detected).');
+    } else if (_visionRearmCount >= _VISION_REARM_LIMIT) {
+      addSystem('Vision: re-arm failed — click Watch to share again.');
+      teardownPushSession();
+    }
+  }).catch(function() {
+    if (_visionRearmCount >= _VISION_REARM_LIMIT) {
+      teardownPushSession();
+    }
+  }).finally(function() {
+    _visionRearmInFlight = false;
+  });
+}
+function pollVisionState() {
+  fetch('/vision/state').then(function(r) {
+    if (!r.ok) return null;
+    return r.json();
+  }).then(function(s) { if (s) applyVisionState(s); }).catch(function() {});
+}
+function startVisionPoll() {
+  pollVisionState();
+  if (_visionPollTimer) clearInterval(_visionPollTimer);
+  _visionPollTimer = setInterval(pollVisionState, 2000);
+}
+function stopVisionPoll() {
+  if (_visionPollTimer) { clearInterval(_visionPollTimer); _visionPollTimer = null; }
+  _visionStreaming = false;
+}
+
+function updateVisionPreviewStats() {
+  var stats = document.getElementById('vision-preview-stats');
+  if (stats) stats.textContent = _visionFrameCount + ' frame' + (_visionFrameCount === 1 ? '' : 's');
+}
+
+function captureAndSendFrame() {
+  var preview = document.getElementById('vision-preview');
+  if (!preview || !_visionStream) return;
+  // Wait for the video to actually have pixels — readyState >= HAVE_CURRENT_DATA (2)
+  if (preview.readyState < 2 || !preview.videoWidth || !preview.videoHeight) return;
+  if (!_visionCanvas) _visionCanvas = document.createElement('canvas');
+  _visionCanvas.width = VISION_FRAME_WIDTH;
+  _visionCanvas.height = VISION_FRAME_HEIGHT;
+  var ctx = _visionCanvas.getContext('2d');
+  ctx.drawImage(preview, 0, 0, VISION_FRAME_WIDTH, VISION_FRAME_HEIGHT);
+  _visionCanvas.toBlob(function(blob) {
+    if (!blob) return;
+    // Skip blank frames — getDisplayMedia sometimes paints a black frame
+    // for the first tick when the user switches surfaces; uploading a
+    // black JPEG just wastes context.
+    if (blob.size < 2048) return;
+    fetch('/vision/frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/jpeg' },
+      body: blob,
+    }).then(function(r) {
+      if (r.ok) {
+        _visionFrameCount++;
+        // Successful POST → server is in push mode again. Reset the
+        // recovery counter so future restarts get a fresh budget.
+        _visionRearmCount = 0;
+        updateVisionPreviewStats();
+      } else {
+        // 409 means the server's pushMode flag is false (voice-agent
+        // restart) — try to re-arm without waiting for the 2s state poll.
+        if (r.status === 409 && _visionPushActive) {
+          rearmPushMode();
+        }
+        // Surface the first rejection so the user sees why Sutando doesn't
+        // see frames (e.g. push mode not active because voice isn't ready).
+        if (_visionFrameCount === 0) {
+          r.text().then(function(t) { addSystem('Vision frame rejected (' + r.status + '): ' + t); }).catch(function() {});
+        }
+      }
+    }).catch(function() { /* network blip — next tick will retry */ });
+  }, 'image/jpeg', VISION_FRAME_QUALITY);
+}
+
+function teardownPushSession() {
+  _visionPushActive = false;
+  if (_visionFrameTimer) { clearInterval(_visionFrameTimer); _visionFrameTimer = null; }
+  if (_visionStream) {
+    try { _visionStream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {}
+    _visionStream = null;
+  }
+  var preview = document.getElementById('vision-preview');
+  if (preview) preview.srcObject = null;
+  var wrap = document.getElementById('vision-preview-wrap');
+  if (wrap) wrap.style.display = 'none';
+  _visionFrameCount = 0;
+  _visionRearmCount = 0;
+}
+
+async function startWatch() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    addSystem('Vision: this browser does not support screen sharing.');
+    return;
+  }
+  var stream;
+  try {
+    // User picks Chrome Tab / Window / Entire Screen here.
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: VISION_FRAME_WIDTH, height: VISION_FRAME_HEIGHT, frameRate: 2 },
+      audio: false,
+    });
+  } catch (err) {
+    // NotAllowedError when the user cancels the picker — silent.
+    if (err && err.name !== 'NotAllowedError') {
+      addSystem('Vision: ' + (err.message || 'screen share failed'));
+    }
+    return;
+  }
+  _visionStream = stream;
+  var preview = document.getElementById('vision-preview');
+  var wrap = document.getElementById('vision-preview-wrap');
+  if (preview) preview.srcObject = stream;
+  if (wrap) wrap.style.display = '';
+
+  // User can end sharing from the browser's native UI ("Stop sharing"
+  // toolbar) — clean up our side and tell the server.
+  var track = stream.getVideoTracks()[0];
+  if (track) track.addEventListener('ended', function() {
+    console.log('[Vision] track.ended fired — user stopped share via Chrome native UI (or track died)');
+    stopWatch();
+  });
+
+  // Tell the server we're entering push mode.
+  var startResp;
+  try {
+    var r = await fetch('/vision/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'browser' }),
+    });
+    startResp = await r.json().catch(function() { return { status: 'failed', error: 'bad json' }; });
+  } catch (e) {
+    startResp = { status: 'failed', error: 'voice-agent not reachable' };
+  }
+  if (startResp.status === 'failed') {
+    addSystem('Vision: ' + (startResp.error || 'failed to start'));
+    teardownPushSession();
+    pollVisionState();
+    return;
+  }
+  _visionPushActive = true;
+  _visionFrameCount = 0;
+  updateVisionPreviewStats();
+
+  // Wait for the first painted frame, then start the ticker. Without this
+  // the first capture often paints a black canvas because the video
+  // element hasn't rendered any data yet.
+  var startTicker = function() {
+    if (_visionFrameTimer) clearInterval(_visionFrameTimer);
+    setTimeout(captureAndSendFrame, 250);
+    _visionFrameTimer = setInterval(captureAndSendFrame, VISION_FRAME_INTERVAL_MS);
+  };
+  if (preview && preview.readyState >= 2 && preview.videoWidth) {
+    startTicker();
+  } else if (preview) {
+    preview.addEventListener('playing', startTicker, { once: true });
+  }
+  pollVisionState();
+}
+
+async function stopWatch() {
+  console.log('[Vision] stopWatch called — tearing down push session and POSTing /vision/stop');
+  console.trace('[Vision] stopWatch caller');
+  teardownPushSession();
+  try {
+    await fetch('/vision/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  } catch (e) {}
+  pollVisionState();
+}
+
+function toggleWatch() {
+  // Debug: log entry state so we can see why a click went to stop vs start.
+  // Common gotcha: a stale _visionPushActive=true from a prior dead
+  // session sends the click to stopWatch silently, and the user is stuck.
+  var streamAlive = !!(_visionStream && _visionStream.active);
+  console.log('[Vision] toggleWatch:',
+    'pushActive=' + _visionPushActive,
+    'streaming=' + _visionStreaming,
+    'streamAlive=' + streamAlive);
+  // Defensive: if we *think* we're pushing but the MediaStream is gone
+  // or its tracks have ended, drop the stale flag so the click resolves
+  // to startWatch instead of a no-op stopWatch.
+  if (_visionPushActive && !streamAlive) {
+    console.log('[Vision] toggleWatch: clearing stale _visionPushActive — stream is dead');
+    teardownPushSession();
+  }
+  if (_visionPushActive || _visionStreaming) {
+    stopWatch();
+  } else {
+    startWatch();
+  }
+}
+window.toggleWatch = toggleWatch;
 
 // ─── Mute toggle ──────────────────────────────────────────
 function toggleMute() {
@@ -1778,6 +2266,10 @@ function toggle() {
     $('btn-mute').style.display = '';
     $('btn-mute').textContent = 'Mute';
     $('btn-mute').className = 'btn-mute';
+    $('btn-watch').style.display = '';
+    $('btn-watch').textContent = '👁️ Watch';
+    $('btn-watch').className = 'btn-watch';
+    startVisionPoll();
     $('voice-status').className = 'status-pill voice-on';
     $('status').textContent = 'Voice active';
     try { sessionStorage.setItem('sutando-voice', '1'); } catch {}
@@ -1987,7 +2479,23 @@ function sendText() {
                 clearInterval(poll);
                 const re = document.createElement('div');
                 re.className = 't-entry t-assistant';
-                re.textContent = r.result;
+                // Render markdown if marked.js + DOMPurify both loaded; fall
+                // back to escaped textContent otherwise. Both required — marked
+                // alone would be unsafe innerHTML on agent results that
+                // originate from external task channels.
+                // Before this, headings/lists in long replies (e.g. skill
+                // suggestions) came through as raw "###" / "*" characters.
+                if (window.marked && window.DOMPurify) {
+                  try {
+                    re.innerHTML = window.DOMPurify.sanitize(
+                      window.marked.parse(r.result, { breaks: true, gfm: true })
+                    );
+                  } catch (e) {
+                    re.textContent = r.result;
+                  }
+                } else {
+                  re.textContent = r.result;
+                }
                 addCopyBtn(re);
                 $('transcript').appendChild(re);
                 $('transcript').scrollTop = $('transcript').scrollHeight;
@@ -2178,21 +2686,29 @@ function renderTabContent() {
     } else {
       var sorted = entries.sort(function(a,b) { return b[1].time - a[1].time; }).slice(0, 10);
       var icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
-      container.innerHTML = sorted.map(function(entry) {
+      container.innerHTML = sorted.map(function(entry, i) {
         var id = entry[0], t = entry[1];
         var ago = Math.round((Date.now() - t.time) / 1000);
         var timeStr = ago < 60 ? ago + 's ago' : Math.round(ago / 60) + 'm ago';
-        var hasResult = t.result && t.status === 'done';
+        // Render results whenever they exist — agent's task bookkeeping
+        // sometimes leaves tasks in 'working' state even after the result
+        // file is written. Same fix as the main renderTasks path above.
+        var hasResult = !!t.result;
         var isExpanded = expandedTasks.has(id);
-        var clickAttr = hasResult ? ' data-taskid="' + id + '" style="cursor:pointer"' : '';
+        // Always emit data-taskid (matches primary renderTasks path) so flash
+        // + expand:N can target working tasks. cursor only when clickable.
+        var clickAttr = ' data-taskid="' + id + '"' + (hasResult ? ' data-clickable="1" style="cursor:pointer"' : '');
         var resultDisplay = isExpanded ? 'block' : 'none';
         var resultHtml = hasResult ? '<div id="result-' + id + '" style="display:' + resultDisplay + ';padding:8px 12px;color:#b8c8d8;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;background:#0d1520;border-radius:8px;margin:4px 0 6px 30px">' + esc(t.result) + '</div>' : '';
         var rawText = t.text || id;
-        // Default-tag bare tasks (no [Channel] prefix) as [Sutando-core]
-        // so every row in the list shows a channel badge per Susan's
-        // 2026-04-19 17:04 ask.
-        var taggedRaw = /^\\[/.test(rawText) ? rawText : '[Sutando-core] ' + rawText;
-        var displayText = isExpanded ? taggedRaw : summarizeTaskText(taggedRaw);
+        // Default-tag bare tasks (no [Channel] prefix) as [Voice] — the
+        // overwhelming majority of un-prefixed tasks come from the voice agent.
+        // (Was [Sutando-core]; renamed 2026-05-03 per Chi's "rename to Voice".)
+        var taggedRaw = /^\\[/.test(rawText) ? rawText : '[Voice] ' + rawText;
+        // Prepend 1-based index — same as the primary renderTasks path,
+        // so voice can target tasks by number on this dynamic-region list too.
+        var numPrefix = (i + 1) + '. ';
+        var displayText = numPrefix + (isExpanded ? taggedRaw : summarizeTaskText(taggedRaw));
         var textClass = isExpanded ? 'task-text expanded' : 'task-text';
         var expandChip = hasResult ? '<span class="task-expand">' + (isExpanded ? 'Hide &#9662;' : 'Show details &#9656;') + '</span>' : '';
         return '<div class="task-item"' + clickAttr + '>' +
@@ -2641,6 +3157,298 @@ setInterval(() => {
 	}
 }, 30_000);
 
+// /paidsubscriptions page — full HTML, server-side rendered from
+// skills/subscription-scanner/state/subscriptions.json. Sortable table,
+// diff highlights from last scan, "Scan now" button.
+function renderSubscriptionsHtml(rawJson: string): string {
+	let data: any;
+	try { data = JSON.parse(rawJson); } catch (e: any) { data = { last_scan: null, subscriptions: [], scan_history: [], _parse_error: e?.message }; }
+	const lastScan = data.last_scan ? new Date(data.last_scan).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '— never scanned —';
+	const lastDiff = (data.scan_history && data.scan_history.length) ? data.scan_history[data.scan_history.length - 1] : { added: [], removed: [], amount_changed: [] };
+	const dataJson = JSON.stringify(data).replace(/</g, '\\u003c');
+
+	return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paid Subscriptions — Sutando</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background: #0e0e14; color: #e8e8ee; padding: 24px; min-height: 100vh; }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+  h1 { font-size: 22px; font-weight: 700; }
+  .subtitle { color: #707080; font-size: 13px; }
+  .meta { display: flex; gap: 20px; font-size: 13px; color: #888; margin: 12px 0 20px; flex-wrap: wrap; align-items: center; }
+  .meta strong { color: #c0c0d0; font-weight: 600; }
+  .scan-btn { background: #1e4028; color: #4ecca3; border: 1px solid #2a4a36; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .scan-btn:hover:not(:disabled) { background: #2a503a; }
+  .scan-btn:disabled { background: #1a1a2a; color: #444; border-color: #2a2a3e; cursor: wait; }
+  .scan-status { font-size: 12px; color: #4ecca3; margin-left: 8px; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { background: #14141e; border: 1px solid #1e1e2a; border-radius: 10px; padding: 14px 16px; }
+  .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: #707080; margin-bottom: 6px; }
+  .stat .value { font-size: 24px; font-weight: 700; color: #e8e8ee; }
+  .stat .sub { font-size: 11px; color: #888; margin-top: 4px; }
+  .stat.added .value { color: #4ecca3; }
+  .stat.removed .value { color: #e94560; }
+  .stat.uncertain .value { color: #f0ad4e; }
+
+  table { width: 100%; border-collapse: collapse; background: #14141e; border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #1e1e2a; font-size: 13px; }
+  th { background: #1a1a26; color: #a0a0b0; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; cursor: pointer; user-select: none; position: relative; }
+  th:hover { color: #e8e8ee; }
+  th.sort-asc::after { content: ' ▲'; color: #4ecca3; }
+  th.sort-desc::after { content: ' ▼'; color: #4ecca3; }
+  tbody tr:hover { background: #181826; }
+  td.amount { text-align: right; font-variant-numeric: tabular-nums; }
+  td.amount .currency { color: #707080; font-size: 11px; margin-left: 2px; }
+
+  .status { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .status.active { background: #1e4028; color: #4ecca3; }
+  .status.cancelled { background: #2a1a20; color: #e94560; }
+  .status.uncertain { background: #2a2418; color: #f0ad4e; }
+
+  .vendor { color: #e8e8ee; font-weight: 600; }
+  .account { color: #888; font-size: 12px; }
+  .notes { color: #707080; font-size: 11px; font-style: italic; max-width: 320px; }
+  .freq { color: #a0a0b0; font-size: 12px; }
+
+  .row-added { background: rgba(78, 204, 163, 0.08); }
+  .row-cancelled { opacity: 0.55; }
+  .row-cancelled td { text-decoration: line-through; text-decoration-color: #e94560; }
+  .row-cancelled .vendor { color: #e94560; text-decoration-color: #e94560; }
+
+  .empty { text-align: center; padding: 40px; color: #555; }
+  footer { margin-top: 32px; color: #555; font-size: 11px; text-align: center; }
+  footer a { color: #888; text-decoration: none; }
+  footer a:hover { color: #4ecca3; }
+
+  details { margin-top: 24px; }
+  details summary { cursor: pointer; color: #707080; font-size: 12px; padding: 8px 0; }
+  details summary:hover { color: #a0a0b0; }
+  pre { background: #0a0a12; padding: 14px; border-radius: 8px; overflow-x: auto; font-size: 11px; color: #a0a0b0; margin-top: 8px; max-height: 300px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>💳 Paid Subscriptions</h1>
+      <div class="subtitle">Scanned from Gmail receipts</div>
+      <div style="margin-left:auto"><a href="/" style="color:#707080;font-size:12px;text-decoration:none;border:1px solid #2a2a3e;padding:5px 12px;border-radius:6px;">← Dashboard</a></div>
+    </header>
+
+    <div class="meta">
+      <span><strong>Last scan:</strong> ${escapeHtml(lastScan)}</span>
+      <button class="scan-btn" id="scanBtn" onclick="triggerScan()">⟳ Scan now</button>
+      <span class="scan-status" id="scanStatus"></span>
+    </div>
+
+    <div id="summary" class="summary"></div>
+
+    <div id="diff-banner"></div>
+
+    <table id="subs-table">
+      <thead>
+        <tr>
+          <th data-key="vendor">Vendor</th>
+          <th data-key="amount" class="amount">Amount</th>
+          <th data-key="frequency">Frequency</th>
+          <th data-key="account">Account</th>
+          <th data-key="last_charged">Last charged</th>
+          <th data-key="next_charge">Next charge</th>
+          <th data-key="status">Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody id="subs-tbody"></tbody>
+    </table>
+
+    <details>
+      <summary>Raw JSON</summary>
+      <pre id="raw-json"></pre>
+    </details>
+
+    <footer>
+      Subscription data lives at <code>skills/subscription-scanner/state/subscriptions.json</code> (gitignored).<br>
+      Auto-scan runs monthly via the <code>subscription-scan</code> cron. Source: Gmail receipts via Claude MCP.
+    </footer>
+  </div>
+
+<script>
+  const data = ${dataJson};
+  const tbody = document.getElementById('subs-tbody');
+  const summary = document.getElementById('summary');
+  const diffBanner = document.getElementById('diff-banner');
+  const rawJson = document.getElementById('raw-json');
+  const lastDiff = (data.scan_history && data.scan_history.length) ? data.scan_history[data.scan_history.length - 1] : { added: [], removed: [], amount_changed: [] };
+
+  let sortKey = 'amount';
+  let sortDir = 'desc';
+
+  function fmtMoney(amount, currency) {
+    if (amount === null || amount === undefined) return '<span style="color:#555">—</span>';
+    const sym = currency === 'EUR' ? '€' : currency === 'GBP' ? '£' : '$';
+    return sym + amount.toFixed(2) + (currency && currency !== 'USD' ? ' <span class="currency">' + currency + '</span>' : '');
+  }
+
+  function fmtDate(d) {
+    if (!d) return '<span style="color:#555">—</span>';
+    return d;
+  }
+
+  function escapeHtmlClient(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function monthlyEquivalent(sub) {
+    if (sub.amount === null || sub.amount === undefined) return null;
+    if (sub.frequency === 'monthly') return sub.amount;
+    if (sub.frequency === 'annual') return sub.amount / 12;
+    return sub.amount;
+  }
+
+  function renderSummary() {
+    const subs = data.subscriptions || [];
+    const active = subs.filter(s => s.status === 'active');
+    const uncertain = subs.filter(s => s.status === 'uncertain');
+    const cancelled = subs.filter(s => s.status === 'cancelled');
+
+    let monthlyTotal = 0, monthlyKnown = 0, monthlyUnknown = 0;
+    for (const s of active) {
+      const me = monthlyEquivalent(s);
+      if (me !== null) {
+        const usdRate = s.currency === 'EUR' ? 1.08 : (s.currency === 'GBP' ? 1.27 : 1.0);
+        monthlyTotal += me * usdRate;
+        monthlyKnown++;
+      } else {
+        monthlyUnknown++;
+      }
+    }
+
+    summary.innerHTML = \`
+      <div class="stat"><div class="label">Active</div><div class="value">\${active.length}</div><div class="sub">\${monthlyUnknown ? monthlyUnknown + ' missing price' : 'all priced'}</div></div>
+      <div class="stat"><div class="label">Monthly burn (~)</div><div class="value">$\${monthlyTotal.toFixed(0)}</div><div class="sub">\${monthlyKnown}/\${active.length} priced • \$\${(monthlyTotal*12).toFixed(0)}/yr</div></div>
+      <div class="stat uncertain"><div class="label">Uncertain</div><div class="value">\${uncertain.length}</div><div class="sub">verify these</div></div>
+      <div class="stat removed"><div class="label">Cancelled</div><div class="value">\${cancelled.length}</div><div class="sub">recent cancellations</div></div>
+    \`;
+  }
+
+  function renderDiffBanner() {
+    const a = lastDiff.added || [];
+    const r = lastDiff.removed || [];
+    const c = lastDiff.amount_changed || [];
+    if (a.length === 0 && r.length === 0 && c.length === 0) {
+      diffBanner.innerHTML = '<div style="font-size:12px;color:#555;margin-bottom:14px;">No changes since previous scan.</div>';
+      return;
+    }
+    const parts = [];
+    if (a.length) parts.push('<span style="color:#4ecca3">+' + a.length + ' added: ' + a.map(escapeHtmlClient).join(', ') + '</span>');
+    if (r.length) parts.push('<span style="color:#e94560">−' + r.length + ' removed: ' + r.map(escapeHtmlClient).join(', ') + '</span>');
+    if (c.length) parts.push('<span style="color:#f0ad4e">' + c.length + ' price changed</span>');
+    diffBanner.innerHTML = '<div style="font-size:13px;margin-bottom:14px;padding:10px 14px;background:#181826;border-radius:8px;border-left:3px solid #4ecca3;">Since last scan: ' + parts.join(' • ') + '</div>';
+  }
+
+  function renderTable() {
+    const subs = (data.subscriptions || []).slice();
+    const addedSet = new Set(lastDiff.added || []);
+
+    subs.sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (sortKey === 'amount') { av = monthlyEquivalent(a) ?? -1; bv = monthlyEquivalent(b) ?? -1; }
+      if (av === null || av === undefined) av = '';
+      if (bv === null || bv === undefined) bv = '';
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    tbody.innerHTML = '';
+    if (subs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No subscriptions found yet. Click "Scan now" to populate.</td></tr>';
+      return;
+    }
+    for (const s of subs) {
+      const tr = document.createElement('tr');
+      const isAdded = addedSet.has(s.vendor);
+      if (s.status === 'cancelled') tr.className = 'row-cancelled';
+      else if (isAdded) tr.className = 'row-added';
+      tr.innerHTML = \`
+        <td><div class="vendor">\${escapeHtmlClient(s.vendor)}</div><div class="account">\${escapeHtmlClient(s.category || '')}</div></td>
+        <td class="amount">\${fmtMoney(s.amount, s.currency)}</td>
+        <td><span class="freq">\${escapeHtmlClient(s.frequency || '')}</span></td>
+        <td><span class="account">\${escapeHtmlClient(s.account || '')}</span></td>
+        <td>\${fmtDate(s.last_charged)}</td>
+        <td>\${fmtDate(s.next_charge)}</td>
+        <td><span class="status \${escapeHtmlClient(s.status || '')}">\${escapeHtmlClient(s.status || '')}</span></td>
+        <td><span class="notes">\${escapeHtmlClient(s.notes || '')}</span></td>
+      \`;
+      tbody.appendChild(tr);
+    }
+    document.querySelectorAll('th[data-key]').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.key === sortKey) th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  document.querySelectorAll('th[data-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const k = th.dataset.key;
+      if (k === sortKey) sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
+      else { sortKey = k; sortDir = (k === 'vendor' || k === 'frequency' || k === 'status' || k === 'account') ? 'asc' : 'desc'; }
+      renderTable();
+    });
+  });
+
+  async function triggerScan() {
+    const btn = document.getElementById('scanBtn');
+    const status = document.getElementById('scanStatus');
+    btn.disabled = true;
+    status.textContent = '⏳ queueing...';
+    try {
+      const r = await fetch('/paidsubscriptions/scan', { method: 'POST' });
+      const j = await r.json();
+      if (j.ok) {
+        status.textContent = '✓ ' + j.message;
+        // poll for fresh data every 5s for 3 minutes
+        let elapsed = 0;
+        const poll = setInterval(async () => {
+          elapsed += 5;
+          if (elapsed > 180) { clearInterval(poll); btn.disabled = false; status.textContent = '⚠ scan still running — refresh in a moment'; return; }
+          const fresh = await fetch('/paidsubscriptions/data').then(r => r.json()).catch(() => null);
+          if (fresh && fresh.last_scan && fresh.last_scan !== data.last_scan) {
+            clearInterval(poll);
+            status.textContent = '✓ scan complete — refreshing...';
+            setTimeout(() => location.reload(), 800);
+          }
+        }, 5000);
+      } else {
+        status.textContent = '✗ ' + (j.error || 'failed');
+        btn.disabled = false;
+      }
+    } catch (e) {
+      status.textContent = '✗ ' + (e.message || 'network error');
+      btn.disabled = false;
+    }
+  }
+
+  rawJson.textContent = JSON.stringify(data, null, 2);
+  renderSummary();
+  renderDiffBanner();
+  renderTable();
+</script>
+</body>
+</html>`;
+}
+
+function escapeHtml(s: string): string {
+	return String(s).replace(/[<>&"']/g, c => (({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'} as Record<string, string>)[c] || c));
+}
+
 const server = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
@@ -2720,7 +3528,7 @@ const server = createServer((req, res) => {
 	if (url.pathname === '/voice-mode') {
 		let mode = 'active';
 		try {
-			const raw = readFileSync('state/voice-mode.txt', 'utf-8').trim();
+			const raw = readFileSync(join(STATE_DIR, 'voice-mode.txt'), 'utf-8').trim();
 			if (raw === 'meeting' || raw === 'active') mode = raw;
 		} catch {}
 		res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2814,6 +3622,46 @@ const server = createServer((req, res) => {
 		return;
 	}
 
+	// Vision control proxy. The voice-agent process exposes /vision/{state,
+	// start, stop, frame} on 127.0.0.1:VISION_CONTROL_PORT (default 7847); the
+	// browser hits us same-origin to avoid CORS and to keep one public surface.
+	// /vision/frame carries a binary JPEG body — preserve content-type and
+	// pass the buffer through. If voice-agent isn't up, the fetch fails and
+	// we surface a synthetic "session not ready" state so the Watch button
+	// can't get stuck mid-toggle.
+	if (
+		url.pathname === '/vision/state' ||
+		url.pathname === '/vision/start' ||
+		url.pathname === '/vision/stop' ||
+		url.pathname === '/vision/frame'
+	) {
+		const port = Number(process.env.VISION_CONTROL_PORT) || 7847;
+		const method = req.method === 'POST' ? 'POST' : 'GET';
+		const isFrame = url.pathname === '/vision/frame';
+		const chunks: Buffer[] = [];
+		req.on('data', (c: Buffer) => chunks.push(c));
+		req.on('end', async () => {
+			try {
+				const incomingType = (req.headers['content-type'] as string | undefined) || (isFrame ? 'image/jpeg' : 'application/json');
+				const r = await fetch(`http://127.0.0.1:${port}${url.pathname}`, {
+					method,
+					headers: method === 'POST' ? { 'Content-Type': incomingType } : undefined,
+					body: method === 'POST' ? (chunks.length ? Buffer.concat(chunks) : (isFrame ? Buffer.alloc(0) : '{}')) : undefined,
+				});
+				const text = await r.text();
+				res.writeHead(r.status, { 'Content-Type': 'application/json' });
+				res.end(text);
+			} catch (err) {
+				const fallback = url.pathname === '/vision/state'
+					? { streaming: false, source: null, fps: 0, frames: 0, durationMs: 0, sessionReady: false }
+					: { status: 'failed', error: 'voice-agent not reachable' };
+				res.writeHead(url.pathname === '/vision/state' ? 200 : 503, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify(fallback));
+			}
+		});
+		return;
+	}
+
 	// Note view event from the in-page note reader. Writes the current slug +
 	// content to /tmp/sutando-note-viewing.json; the voice-agent's
 	// startNoteViewingWatcher picks it up and injects into Gemini so the
@@ -2838,6 +3686,85 @@ const server = createServer((req, res) => {
 				res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'parse failed' }));
 			}
 		});
+		return;
+	}
+
+	// Clean chat-first UI — Gemini/Claude-app style. Same task-bridge
+	// backend as the dashboard textbox; markdown rendering + full-viewport
+	// chat + persistent history. Lives at /chat to leave / untouched.
+	if (url.pathname === '/chat') {
+		res.writeHead(200, {
+			'Content-Type': 'text/html; charset=utf-8',
+			'Cache-Control': 'no-cache, no-store, must-revalidate',
+		});
+		res.end(CHAT_HTML);
+		return;
+	}
+
+	// Paid subscriptions dashboard. Reads skills/subscription-scanner/state/subscriptions.json
+	// and renders a sortable table with diff highlights from the previous scan.
+	// Trigger an out-of-cycle scan via POST to /paidsubscriptions/scan.
+	if (url.pathname === '/paidsubscriptions') {
+		try {
+			const dataPath = SUBSCRIPTIONS_PATH;
+			const raw = existsSync(dataPath) ? readFileSync(dataPath, 'utf-8') : '{"last_scan":null,"subscriptions":[],"scan_history":[]}';
+			res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+			res.end(renderSubscriptionsHtml(raw));
+		} catch (e: any) {
+			res.writeHead(500, { 'Content-Type': 'text/plain' });
+			res.end('Error reading subscriptions: ' + (e?.message || String(e)));
+		}
+		return;
+	}
+	if (url.pathname === '/paidsubscriptions/data') {
+		try {
+			const dataPath = SUBSCRIPTIONS_PATH;
+			const raw = existsSync(dataPath) ? readFileSync(dataPath, 'utf-8') : '{"last_scan":null,"subscriptions":[],"scan_history":[]}';
+			res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+			res.end(raw);
+		} catch (e: any) {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: e?.message || String(e) }));
+		}
+		return;
+	}
+	if (url.pathname === '/paidsubscriptions/scan' && req.method === 'POST') {
+		// Localhost-only: this endpoint writes an owner-tier task file that
+		// the watcher processes with full agent privileges. Without this
+		// guard, anyone on the same LAN or a tailscale-funnel'd public URL
+		// could `curl -X POST http://<host>:8080/paidsubscriptions/scan`
+		// and silently enqueue arbitrary work. Per PR #651 Blocker 1.
+		// Reads req.socket.remoteAddress directly rather than a header
+		// (X-Forwarded-For et al. are spoofable). IPv4-mapped IPv6
+		// (::ffff:127.0.0.1) and IPv6 loopback (::1) are both localhost.
+		const remote = req.socket?.remoteAddress || '';
+		const isLocalhost = (
+			remote === '127.0.0.1' ||
+			remote === '::1' ||
+			remote === '::ffff:127.0.0.1'
+		);
+		if (!isLocalhost) {
+			res.writeHead(403, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: false, error: 'forbidden: /paidsubscriptions/scan accepts localhost connections only' }));
+			return;
+		}
+		try {
+			const taskId = `task-${Date.now()}`;
+			// Pointer (not inline) — prevents prompt-injection via
+			// header-shaped lines in scan-prompt.md (`source:`,
+			// `access_tier:`, etc.) being parsed as real task headers.
+			// Per PR #651 Blocker 2. The agent reads the file when it
+			// processes the task. `access_tier: owner` is explicit per
+			// Chi's review — relying on the absence-of-field default
+			// is fragile.
+			const taskContent = `id: ${taskId}\ntimestamp: ${new Date().toISOString()}\ntask: Run subscription scan (out-of-cycle, triggered from /paidsubscriptions UI). Read the full instructions in skills/subscription-scanner/scan-prompt.md and follow them verbatim.\nsource: web\nfrom: paidsubscriptions-ui\naccess_tier: owner\n`;
+			writeFileSync(join(TASK_DIR, `${taskId}.txt`), taskContent);
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: true, task_id: taskId, message: 'Scan queued; the next proactive-loop pass will pick it up (~1 min). Refresh to see results.' }));
+		} catch (e: any) {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
+		}
 		return;
 	}
 

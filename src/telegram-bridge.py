@@ -8,12 +8,24 @@ Usage: python3 src/telegram-bridge.py
 
 import json
 import os
+import sys
 import time
 import urllib.request
 import urllib.error
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+# Vision-frame helper — pushes the latest photo into the active voice session
+# so Gemini can react in-stream. No-op when voice isn't connected. Import is
+# best-effort so the bridge keeps booting if vision_push.py is missing.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from vision_push import push_image as _push_vision_image  # type: ignore
+except Exception:  # pragma: no cover — bridge must keep running
+    def _push_vision_image(path: str, source: str = "telegram") -> bool:  # type: ignore
+        return False
+
+from workspace_default import resolve_workspace  # noqa: E402
+REPO = resolve_workspace()
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
 
@@ -80,14 +92,14 @@ STATE_DIR = REPO / "state"
 ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
 ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
-TASKS_DIR.mkdir(exist_ok=True)
-RESULTS_DIR.mkdir(exist_ok=True)
+TASKS_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def write_owner_activity(channel: str, summary: str) -> None:
     """Record owner activity — see src/discord-bridge.py for schema."""
     try:
-        STATE_DIR.mkdir(exist_ok=True)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
             "ts": int(time.time()),
             "channel": channel,
@@ -311,6 +323,13 @@ def main():
                     local_path = download_file(file_id, "photo")
                     if local_path:
                         attachment_note = f"\n[Photo attached: {local_path}]"
+                        # If voice is connected, also push the photo as a
+                        # vision frame so Gemini sees it in-stream (in
+                        # addition to the file-attached task pipeline).
+                        try:
+                            _push_vision_image(local_path, source="telegram")
+                        except Exception:
+                            pass
                 if "document" in msg:
                     file_id = msg["document"]["file_id"]
                     fname = msg["document"].get("file_name", "file")

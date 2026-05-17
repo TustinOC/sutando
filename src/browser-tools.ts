@@ -28,21 +28,23 @@ export function injectText(session: any, text: string) {
 }
 
 // Vision model — override via .env (default: flash-lite for this trivial 20-word task)
-const VISION_MODEL = process.env.VISION_MODEL || 'gemini-3.1-flash-lite-preview';
+const VISION_MODEL = process.env.VISION_MODEL || 'gemini-3.1-flash-lite';
 
 // --- Scroll ---
 
 export const scrollTool: ToolDefinition = {
 	name: 'scroll',
 	description:
-		'Scroll the currently focused application. Works in Chrome, VS Code, or any app. Use for: "scroll down", "scroll up", "scroll to top", "scroll to bottom". Use target for specific areas in Chrome: "sidebar", "chat history", "code block".',
+		'Scroll the currently focused application. Works in Chrome, VS Code, or any app. Use for: "scroll down", "scroll up", "scroll to top", "scroll to bottom". Pass amount=small for "scroll a little" / "a bit", large for "scroll a lot". Use target for specific areas in Chrome: "sidebar", "chat history", "code block".',
 	parameters: z.object({
 		direction: z.enum(['down', 'up', 'top', 'bottom']).describe('Scroll direction. Use "top" or "bottom" to jump to start/end of page.'),
+		amount: z.enum(['small', 'medium', 'large']).optional().describe('How far to scroll for down/up. small=150px, medium=400px (default), large=800px. Ignored for top/bottom.'),
 		target: z.string().optional().describe('Optional: which area to scroll in Chrome. E.g. "sidebar", "chat history", "nav", "code". Omit for main content.'),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { direction, target } = args as { direction: 'down' | 'up' | 'top' | 'bottom'; target?: string };
+		const { direction, amount, target } = args as { direction: 'down' | 'up' | 'top' | 'bottom'; amount?: 'small' | 'medium' | 'large'; target?: string };
+		const px = amount === 'small' ? 150 : amount === 'large' ? 800 : 400;
 		try {
 			// Check which app is frontmost
 			let frontApp = '';
@@ -59,7 +61,7 @@ export const scrollTool: ToolDefinition = {
 				let js: string;
 				if (direction === 'top') js = scrollFn('e.scrollTop=0');
 				else if (direction === 'bottom') js = scrollFn('e.scrollTop=e.scrollHeight');
-				else js = scrollFn(`e.scrollBy(0,${direction === 'down' ? 600 : -600})`);
+				else js = scrollFn(`e.scrollBy(0,${direction === 'down' ? px : -px})`);
 				const tmpScroll = `/tmp/sutando-scroll-${Date.now()}.scpt`;
 				writeFileSync(tmpScroll, `tell application "Google Chrome" to tell active tab of front window to execute javascript "${js.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
 				execSync(`osascript ${tmpScroll}`, { timeout: 5_000 });
@@ -72,7 +74,7 @@ export const scrollTool: ToolDefinition = {
 				let js: string;
 				if (direction === 'top') js = scrollFn('e.scrollTop=0');
 				else if (direction === 'bottom') js = scrollFn('e.scrollTop=e.scrollHeight');
-				else js = scrollFn(`e.scrollBy(0,${direction === 'down' ? 600 : -600})`);
+				else js = scrollFn(`e.scrollBy(0,${direction === 'down' ? px : -px})`);
 				const tmpScroll = `/tmp/sutando-scroll-${Date.now()}.scpt`;
 				writeFileSync(tmpScroll, `tell application "Google Chrome" to tell active tab of front window to execute javascript "${js.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
 				execSync(`osascript ${tmpScroll}`, { timeout: 5_000 });
@@ -212,7 +214,7 @@ export const closeTabTool: ToolDefinition = {
 export const openUrlTool: ToolDefinition = {
 	name: 'open_url',
 	description:
-		'Open a URL in a new Chrome tab. Use for: "open github.com", "go to that link".',
+		'Open a URL in Chrome. Reuses the active tab when the target shares origin (scheme + host + port) with what\'s already in the active tab; spawns a new tab only for cross-origin URLs. Use for: "open github.com", "go to that link".',
 	parameters: z.object({
 		url: z.string().describe('The URL to open'),
 	}),
@@ -221,10 +223,32 @@ export const openUrlTool: ToolDefinition = {
 		const { url } = args as { url: string };
 		// Escape backslashes first, then quotes — prevents shell injection via osascript
 		const safeUrl = url.replace(/\\/g, '\\\\').replace(/'/g, "'\\''").replace(/"/g, '\\"');
+		// Parse target origin (scheme + host + port). If unparseable, fall back to new-tab behavior.
+		let targetOrigin = '';
+		try { targetOrigin = new URL(url).origin; } catch { /* not a real URL, e.g. "about:blank" — let Chrome handle */ }
 		try {
-			execSync(`osascript -e 'tell application "Google Chrome" to tell front window to make new tab with properties {URL:"${safeUrl}"}'`, { timeout: 5_000 });
-			console.log(`${ts()} [OpenURL] opened: ${url}`);
-			return { status: 'opened', url };
+			// Query active-tab URL to decide reuse vs new-tab. If origin matches, set URL on active
+			// tab; otherwise open a new tab. Falls back to new-tab on any error so callers never
+			// silently fail to open the URL.
+			let reused = false;
+			if (targetOrigin) {
+				try {
+					const activeUrl = execSync(`osascript -e 'tell application "Google Chrome" to get URL of active tab of front window'`, { timeout: 3_000 }).toString().trim();
+					if (activeUrl) {
+						let activeOrigin = '';
+						try { activeOrigin = new URL(activeUrl).origin; } catch {}
+						if (activeOrigin && activeOrigin === targetOrigin) {
+							execSync(`osascript -e 'tell application "Google Chrome" to set URL of active tab of front window to "${safeUrl}"'`, { timeout: 5_000 });
+							reused = true;
+						}
+					}
+				} catch { /* fall through to new-tab */ }
+			}
+			if (!reused) {
+				execSync(`osascript -e 'tell application "Google Chrome" to tell front window to make new tab with properties {URL:"${safeUrl}"}'`, { timeout: 5_000 });
+			}
+			console.log(`${ts()} [OpenURL] ${reused ? 'reused active tab' : 'opened new tab'}: ${url}`);
+			return { status: reused ? 'reused' : 'opened', url };
 		} catch (err) {
 			return { error: `Failed to open ${url}: ${err instanceof Error ? err.message : err}` };
 		}
@@ -239,8 +263,10 @@ export const openUrlTool: ToolDefinition = {
 // --- Describe screen (vision) ---
 
 async function describeScreenshot(imagePath: string, previousDescs: string[] = []): Promise<string> {
-	const apiKey = process.env.GEMINI_API_KEY;
-	if (!apiKey) return 'Vision description unavailable (no GEMINI_API_KEY)';
+	// Prefer free-tier voice key (gemini-3.1-flash-lite-preview is free-tier eligible on REST
+	// generateContent — verified 2026-05-14). Falls back to paid GEMINI_API_KEY if voice key absent.
+	const apiKey = process.env.GEMINI_VOICE_API_KEY || process.env.GEMINI_API_KEY;
+	if (!apiKey) return 'Vision description unavailable (no GEMINI_VOICE_API_KEY or GEMINI_API_KEY)';
 	try {
 		// Fixes CodeQL #27 (js/command-line-injection): use execFileSync argv array instead of shell string
 		const safePath = imagePath.replace(/[^a-zA-Z0-9_\-./]/g, '');
