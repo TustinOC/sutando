@@ -14,6 +14,27 @@ cd "$REPO"
 # $SUTANDO_ROOT.
 export SUTANDO_ROOT="$REPO"
 
+# Git committer attribution from stand-identity.json (opt-in, no env var).
+# The repo-local `user.email` (set to the GitHub privacy noreply) is the
+# AUTHOR — CLA-Assistant resolves it to the owner's GitHub account, gating
+# the PR check. The COMMITTER is free to carry per-host attribution so that
+# `git log --format='%h %an / %cn %s'` distinguishes which Sutando host
+# crafted each commit (Mini, MacBook, …). Without this, all bot commits
+# share both fields and you lose track of which fleet host did the work.
+#
+# Silent fall-through on every "no identity" path: missing file, missing
+# jq, empty/malformed fields. OSS users see no change — they don't ship a
+# stand-identity.json. Fleet hosts opt in by virtue of having one.
+if [ -f "$REPO/stand-identity.json" ] && command -v jq > /dev/null 2>&1; then
+  _stand_name=$(jq -r '.name // empty' "$REPO/stand-identity.json" 2>/dev/null)
+  _stand_machine=$(jq -r '.machine // empty' "$REPO/stand-identity.json" 2>/dev/null)
+  if [ -n "$_stand_name" ] && [ -n "$_stand_machine" ]; then
+    git -C "$REPO" config committer.name "$_stand_name"
+    git -C "$REPO" config committer.email "${_stand_machine}@noreply.sutando.local"
+  fi
+  unset _stand_name _stand_machine
+fi
+
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
 # pending-questions.md, build_log.md, crons.json, …). Idempotent — safe to
@@ -131,6 +152,17 @@ mkdir -p tasks results data
 # notes/post-mortem-dm-flood-2026-04-15.md.
 python3 "$REPO/src/archive-stale-results.py" || true
 
+# Core heartbeat — per-host alive signal under state/cores/<hostname>.alive.
+# Foundation for multi-core / cross-machine "who's running?" checks. Single
+# instance per host; gracefully cleans up its .alive file on SIGTERM.
+if ! pgrep -f "src/core_heartbeat.py" > /dev/null 2>&1; then
+  echo "  Starting core heartbeat..."
+  python3 "$REPO/src/core_heartbeat.py" > /tmp/core-heartbeat.log 2>&1 &
+  echo "  ✓ core heartbeat"
+else
+  echo "  ✓ core heartbeat (already running)"
+fi
+
 # 0. Credential proxy for quota tracking (port 7846)
 if ! lsof -i :7846 > /dev/null 2>&1; then
   echo "  Starting credential proxy (port 7846)..."
@@ -209,6 +241,22 @@ if [ -f "$SUT_SRC" ] && { [ ! -f "$SUT_BIN" ] || [ "$SUT_SRC" -nt "$SUT_BIN" ]; 
   echo "  Compiling Sutando (source newer than binary)..."
   if (cd "$REPO/src/Sutando" && swiftc -O -o Sutando main.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
     echo "  ✓ Sutando compiled"
+
+    # Sync the fresh binary into the .app bundle if one exists, ensure the
+    # AppleEvents usage-description key is present, and re-sign so the
+    # cdhash matches. Without NSAppleEventsUsageDescription macOS silently
+    # denies AppleEvents — getFinderSelection() returns [] and the ⌃C
+    # drop handler logs "Nothing selected" with no permission prompt.
+    SUT_APP="$REPO/src/Sutando/Sutando.app"
+    if [ -d "$SUT_APP" ]; then
+      cp "$SUT_BIN" "$SUT_APP/Contents/MacOS/Sutando"
+      /usr/libexec/PlistBuddy \
+        -c "Add :NSAppleEventsUsageDescription string 'Sutando reads your Finder selection to drop files into the agent task queue.'" \
+        "$SUT_APP/Contents/Info.plist" 2>/dev/null || true
+      codesign --force --sign - "$SUT_APP" 2>/dev/null || true
+      echo "  ✓ Sutando.app synced + signed"
+    fi
+
     if pgrep -f "src/Sutando/Sutando" > /dev/null 2>&1; then
       pkill -f "src/Sutando/Sutando" 2>/dev/null || true
       # Wait for kernel cleanup to drain before relaunch — fixed sleep 1

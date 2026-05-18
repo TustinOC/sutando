@@ -12,8 +12,9 @@ import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdir
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
+import { resolveWorkspace } from './workspace_default.js';
 
-const REPO_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+const REPO_DIR = resolveWorkspace();
 const TASK_DIR = join(REPO_DIR, 'tasks');
 const RESULT_DIR = join(REPO_DIR, 'results');
 const STATE_DIR = join(REPO_DIR, 'state');
@@ -81,6 +82,7 @@ export function writeChatTask(taskDescription: string): string {
 		`channel_id: local-chat`,
 		`user_id: ${process.env.SUTANDO_DM_OWNER_ID || 'chat-local'}`,
 		`access_tier: owner`,
+		`priority: normal`,
 		'',
 	].join('\n');
 	writeFileSync(join(TASK_DIR, `${taskId}.txt`), content);
@@ -240,7 +242,8 @@ export const workTool: ToolDefinition = {
 			`source: voice\n` +
 			`channel_id: local-voice\n` +
 			`user_id: ${ownerId}\n` +
-			`access_tier: owner\n`;
+			`access_tier: owner\n` +
+			`priority: urgent\n`;
 		writeFileSync(join(TASK_DIR, `${taskId}.txt`), content);
 		// Resolve per-task timeout. 0 → no timeout. Negative or NaN → default.
 		// Cap at 6 hours to prevent runaway pending-state if the voice agent
@@ -384,7 +387,8 @@ export function startContextDropWatcher(onContextDrop: (content: string) => void
 						`source: context-drop\n` +
 						`channel_id: local-hotkey\n` +
 						`user_id: ${ownerId}\n` +
-						`access_tier: owner\n`,
+						`access_tier: owner\n` +
+						`priority: normal\n`,
 					);
 					unlinkSync(CONTEXT_DROP_FILE);
 					// Also inject into Gemini if available
@@ -471,6 +475,18 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 
 	// Check every 2 seconds for new result files
 	setInterval(() => {
+		// Defensive try/catch around the timeout-check loop. Without this,
+		// a single throw during _pendingTasks iteration (corrupt entry,
+		// race with concurrent delete/set, unhandled rejection in a
+		// destructure of `pending`) takes down the visible behavior of
+		// this tick — the readdir block below has its own try/catch, but
+		// the loop above did not. Observed live 2026-05-16: post-restart
+		// voice-agent's result-watcher fell silent (no TaskBridge log
+		// lines across 30+ minutes) while the 30s health monitor's
+		// setInterval kept firing normally — same Node process, same
+		// event loop, so the only differential was an early throw in
+		// this body that propagated past the setInterval callback.
+		try {
 		// Check for timed-out tasks — runs every interval regardless of result files
 		for (const [taskId, pending] of _pendingTasks) {
 			const { submittedAt, timeoutMs, dmOnTimeout } = pending;
@@ -531,6 +547,9 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					}
 				}
 			}
+		}
+		} catch (err) {
+			console.error(`${ts()} [TaskBridge] timeout-check loop threw (non-fatal, continuing watch):`, err);
 		}
 
 		try {
@@ -636,8 +655,14 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					}, 10_000);
 				}
 			}
-		} catch {
-			// Directory might not exist yet or file in transit
+		} catch (err) {
+			// Directory might not exist yet or file in transit. Log on
+			// unusual exceptions (not ENOENT) so a real file-system
+			// problem is observable, while still containing the throw.
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code && code !== 'ENOENT') {
+				console.error(`${ts()} [TaskBridge] result-scan threw (non-fatal):`, err);
+			}
 		}
 	}, 2000);
 }

@@ -52,6 +52,26 @@ The default deliberately avoids `~/Library/Application Support/sutando/` — tha
 - Python: `from workspace_default import resolve_workspace` → returns a `Path`.
 - TypeScript: `process.env.SUTANDO_WORKSPACE || join(homedir(), '.sutando', 'workspace')`.
 
+### Existing-repo installs: trigger the migration (or pin `SUTANDO_WORKSPACE` as stop-gap)
+
+If your loop / cron / scripts polled `<repo>/tasks/` directly before #762 (and any component — Python or TS — that hardcoded the repo path via `Path(__file__).parent.parent` or `new URL('..', import.meta.url)` is still doing so), you'll see a silent **path divergence**:
+
+- The bridge (and any caller of `resolve_workspace()`) writes new tasks to the canonical default `~/.sutando/workspace/tasks/`.
+- Any component still reading from `<repo>/tasks/` via a relative path won't see them.
+- Result: new tasks never reach the loop. Observed 2026-05-16 — 7 owner DMs orphaned over 19 minutes before the divergence was caught.
+
+**Preferred fix:** restart the bridge and sutando-app. The migration code from #762 (`_migrate_from_legacy`) auto-moves `<repo>/{tasks,results,state}` → `~/.sutando/workspace/{tasks,results,state}` on first new-default run. After migration, both sides agree on the canonical default and no env var is needed.
+
+**Stop-gap (if migration won't run):** pin `SUTANDO_WORKSPACE` in `.env` at the repo root and restart the bridges:
+
+```bash
+SUTANDO_WORKSPACE=/full/path/to/your/repo
+```
+
+**Caveat:** this revives the git-status-pollution antipattern that #762 was designed to escape (every `tasks/`, `results/`, `state/` write shows up in `git status`). Use sparingly; prefer the migration when possible.
+
+**Fresh installs** can skip this entirely — the `~/.sutando/workspace/` default works because nothing else polls the repo path.
+
 ## Personal overrides
 
 If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It contains user-specific rules, preferences, and configuration that override or extend these shared instructions.
@@ -82,8 +102,11 @@ source: chat
 channel_id: local-chat
 user_id: ${SUTANDO_DM_OWNER_ID:-chat-local}
 access_tier: owner
+priority: normal
 EOF
 ```
+
+**Priority field**: `urgent` (voice/phone, sub-second latency target) | `normal` (chat/owner DM, default) | `low` (cron, health-check, non-owner DMs). When more than one task is pending, the consumer processes highest-priority first; tie-breaker is mtime FIFO. Defaults per source are encoded in `src/task_priority.py:default_priority_for_source`.
 
 **When done:**
 Write a result file using the same task ID:
@@ -94,6 +117,25 @@ EOF
 ```
 
 This ensures the dashboard, result-watcher, and timeout logic work the same regardless of entry path.
+
+## Core liveness signal
+
+Each running sutando-core writes `<workspace>/state/cores/<hostname>.alive`
+every 30 seconds (started by `src/startup.sh` as a background process; source
+at `src/core_heartbeat.py`). The file is per-host so multiple cores on
+different machines coexist; mtime is the cross-host "is this core alive?"
+signal (younger than ~90s → alive). On SIGTERM/SIGINT the .alive file is
+unlinked so peers see a graceful shutdown immediately.
+
+Payload schema:
+```json
+{"host": "...", "pid": ..., "started_at": ..., "last_beat_at": ..., "status": "...", "schema_version": 1}
+```
+
+This is foundation for the lease-based multi-core scheduler — workers consult
+the alive directory to know who's available before assigning a claim. For
+single-machine use today it also gives `health-check.py` and the dashboard a
+cleaner liveness probe than scanning `pgrep -f claude`.
 
 ## Memory
 

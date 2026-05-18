@@ -29,6 +29,17 @@ from typing import Optional
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 from util_paths import shared_personal_path  # noqa: E402
+from workspace_default import resolve_workspace  # noqa: E402
+
+# Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
+# source-code root (src/, skills/, logs/, .env, build_log.md). Before PR #762's
+# resolver existed, every consumer hardcoded REPO_DIR / "tasks" — so when the
+# owner set $SUTANDO_WORKSPACE to a non-repo location, health-check kept
+# writing alerts to <repo>/tasks/ while the watcher was reading from
+# $SUTANDO_WORKSPACE/tasks/. Three task-health alerts on 2026-05-16 landed in
+# the wrong dir before this fix; same drift class as src/watch-tasks-stream.sh
+# pre-#736 and skills/self-diagnose pre-#769.
+WORKSPACE_DIR = resolve_workspace()
 
 def _default_memory_dir() -> str:
     """Auto-detect Claude Code memory dir from repo path."""
@@ -104,9 +115,18 @@ def check_memory_sync() -> dict:
                 break
     if not repo_url:
         return {"name": name, "status": "warn", "detail": "SUTANDO_MEMORY_REPO not set — cross-machine sync disabled"}
-    sync_dir = Path.home() / ".sutando-memory-sync"
-    if not sync_dir.exists():
-        return {"name": name, "status": "warn", "detail": "repo configured but never synced — run bash ~/.sutando-memory-sync/scripts/sync-memory.sh"}
+    # Memory-sync clone dir: PR #764 renamed legacy ~/.sutando-memory-sync/
+    # → ~/.sutando/memory-sync/. Check new path first; fall back to legacy
+    # for installs that haven't migrated yet (sync-memory.sh auto-migrates
+    # on next run when env is unset).
+    sync_dir_new = Path.home() / ".sutando" / "memory-sync"
+    sync_dir_legacy = Path.home() / ".sutando-memory-sync"
+    if sync_dir_new.exists():
+        sync_dir = sync_dir_new
+    elif sync_dir_legacy.exists():
+        sync_dir = sync_dir_legacy
+    else:
+        return {"name": name, "status": "warn", "detail": "repo configured but never synced — run bash scripts/sync-memory.sh"}
     git_dir = sync_dir / ".git" / "FETCH_HEAD"
     if git_dir.exists():
         age_h = (time.time() - git_dir.stat().st_mtime) / 3600
@@ -291,7 +311,7 @@ def _voice_log_path() -> Path:
     permanently warn "voice-agent.log not found" on Sutando.app installs.
     """
     launchd_log = Path.home() / "Library/Application Support/Sutando/logs/voice-agent.log"
-    workspace_log = REPO_DIR / "logs" / "voice-agent.log"
+    workspace_log = WORKSPACE_DIR / "logs" / "voice-agent.log"
     if launchd_log.exists() and launchd_log.stat().st_size > 0:
         return launchd_log
     return workspace_log
@@ -575,7 +595,7 @@ def check_core_proactive_loop(threshold_sec: int = 600) -> dict:
     Status is anything other than "running" → ok regardless of age.
     """
     name = "core-proactive-loop"
-    status_path = REPO_DIR / "core-status.json"
+    status_path = WORKSPACE_DIR / "core-status.json"
     if not status_path.exists():
         return {"name": name, "status": "ok", "detail": "core-status.json not yet written"}
     try:
@@ -610,7 +630,7 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     alert.
     """
     name = "task-queue"
-    tasks_dir = REPO_DIR / "tasks"
+    tasks_dir = WORKSPACE_DIR / "tasks"
     if not tasks_dir.exists():
         return {"name": name, "status": "ok", "detail": "tasks/ not yet created"}
     # *.txt at the top level only — archive lives in tasks/archive/<YYYY-MM>/
@@ -658,7 +678,7 @@ def run_all_checks() -> list[dict]:
     # Critical files
     for name, path in [
         ("CLAUDE.md", REPO_DIR / "CLAUDE.md"),
-        ("build_log.md", REPO_DIR / "build_log.md"),
+        ("build_log.md", WORKSPACE_DIR / "build_log.md"),
         (".env", REPO_DIR / ".env"),
     ]:
         checks.append(check_file(path, name))
@@ -772,7 +792,7 @@ def run_all_checks() -> list[dict]:
         # so log-stale warnings never fired (caught 2026-05-05 when Mini's
         # logs/discord-bridge.log was 36h stale but health-check stayed "ok").
         import time
-        log_file = REPO_DIR / "logs" / f"{name}.log"
+        log_file = WORKSPACE_DIR / "logs" / f"{name}.log"
         if not log_file.exists():
             log_file = REPO_DIR / "src" / f"{name}.log"
         detail = "running"
@@ -784,7 +804,7 @@ def run_all_checks() -> list[dict]:
                 detail = f"running but log stale ({int(age_sec)}s old)"
 
         # Check 3: Heartbeat file freshness (overrides log staleness if fresh)
-        heartbeat_file = REPO_DIR / "state" / f"{name}.heartbeat"
+        heartbeat_file = WORKSPACE_DIR / "state" / f"{name}.heartbeat"
         if heartbeat_file.exists():
             hb_age = time.time() - heartbeat_file.stat().st_mtime
             if hb_age <= 120:  # heartbeat is fresh — bridge is alive
@@ -922,11 +942,10 @@ def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None
         return
 
     if state_file is None or tasks_dir is None:
-        REPO = Path(__file__).resolve().parent.parent
         if state_file is None:
-            state_file = REPO / "state" / "health-last-alerted.json"
+            state_file = WORKSPACE_DIR / "state" / "health-last-alerted.json"
         if tasks_dir is None:
-            tasks_dir = REPO / "tasks"
+            tasks_dir = WORKSPACE_DIR / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
     state_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -962,6 +981,7 @@ def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None
         f"source: health-check\n"
         f"user_id: health-check\n"
         f"access_tier: owner\n"
+        f"priority: low\n"
     )
     task_path = tasks_dir / f"task-health-{int(time.time())}.txt"
     task_path.write_text(body)
@@ -1000,7 +1020,7 @@ def notify_for_failures(
         return
 
     if state_file is None:
-        state_file = REPO_DIR / "state" / "health-last-notified.json"
+        state_file = WORKSPACE_DIR / "state" / "health-last-notified.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
 
     set_key = "|".join(sorted(c["name"] for c in failures))
@@ -1148,7 +1168,7 @@ def main():
                     # dotenv, etc.) — restart would crash on import.
                     # Log path uses logs/ (post-PR #251 refactor).
                     subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
-                                     stdout=open(str(REPO_DIR / "logs" / f"{c['name']}.log"), "a"),
+                                     stdout=open(str(WORKSPACE_DIR / "logs" / f"{c['name']}.log"), "a"),
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
                 elif c["name"] == "sutando-app":

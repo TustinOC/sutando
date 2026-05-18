@@ -54,6 +54,7 @@ except ModuleNotFoundError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
+from task_priority import default_priority_for_source  # noqa: E402
 REPO = resolve_workspace()
 
 # Vision-frame helper — pushes image attachments into the active voice session
@@ -1989,18 +1990,32 @@ async def on_message(message):
 
 @client.event
 async def on_message_edit(before, after):
-    """Handle edited messages that add a mention the bot didn't have before.
-    Scenario: user sends a message, then edits to add @Sutando mention later.
-    Without this handler, Discord fires on_message once on CREATE and the edit
-    is invisible to the bridge."""
+    """Handle edited messages in two cases:
+    Case 1: edit introduced a @Sutando mention that wasn't there before.
+    Case 2 (issue #795): owner edited their own DM within 5 minutes — treat as
+    a replacement task so corrections ("actually do X instead") are picked up."""
     if after.author == client.user:
         return
     if after.author.bot and client.user not in after.mentions:
         return
-    # Only reprocess if the edit introduced a mention that wasn't there before
+    # Case 1: edit introduced a bot mention
     if _message_mentions_bot(after) and not _message_mentions_bot(before):
         print(f"  [edit] mention added to msg {after.id} — reprocessing", flush=True)
         await _handle_discord_message(after, force=True)
+        return
+    # Case 2: owner edited their own DM within 5 minutes
+    if not isinstance(after.channel, discord.DMChannel):
+        return  # channel edits fire on embed unfurls/link previews — too noisy
+    if not after.content or after.content == before.content:
+        return  # attachment update or embed unfurl with no text change
+    sender_id = str(after.author.id)
+    if sender_id not in load_allowed():
+        return
+    age_sec = time.time() - after.created_at.timestamp()
+    if age_sec > 300:
+        return
+    print(f"  [edit] owner edited DM {after.id} within {age_sec:.0f}s — reprocessing as new task", flush=True)
+    await _handle_discord_message(after, force=True)
 
 
 async def _handle_discord_message(message, force=False):
@@ -2549,6 +2564,7 @@ async def _handle_discord_message(message, force=False):
             except Exception as e:
                 print(f"  [auto-react] {react_emoji} failed: {e}", flush=True)
 
+    priority = default_priority_for_source("discord", access_tier)
     task_file.write_text(
         f"id: {task_id}\n"
         f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}Z\n"
@@ -2557,6 +2573,7 @@ async def _handle_discord_message(message, force=False):
         f"channel_id: {message.channel.id}\n"
         f"user_id: {message.author.id}\n"
         f"access_tier: {access_tier}\n"
+        f"priority: {priority}\n"
         f"{tier_instructions.get(access_tier, tier_instructions['other'])}"
     )
     pending_replies[task_id] = message.channel
