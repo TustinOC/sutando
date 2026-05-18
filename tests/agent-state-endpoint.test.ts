@@ -115,6 +115,13 @@ describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 	});
 
 	it('accepts all 5 valid agent states via the correct track', async () => {
+		// Pre-clear tool track. Without this, a prior test (or prior
+		// process state) that left the tool track at `working`/`seeing`
+		// makes /sse-status return that tool-track value instead of the
+		// browser-track value being set below — the tool track has
+		// precedence by design. The "tool track takes precedence" test
+		// at line 149 already follows this convention; closing #800.
+		await fetchJson('/mute-state?state=idle&source=tool');
 		// Browser track (no source=tool): idle / listening / speaking only.
 		for (const state of ['idle', 'listening', 'speaking']) {
 			const body = await fetchJson(`/mute-state?state=${state}`);
@@ -158,6 +165,13 @@ describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 	});
 
 	it('rejects invalid agent state (keeps previous value)', async () => {
+		// Pre-clear tool track for the same reason as the line-117 test:
+		// if a prior test left the tool track at `working`/`seeing`, the
+		// baseline assertion below ("invalid value should not overwrite —
+		// expected 'listening'") fails because /sse-status surfaces the
+		// tool-track value instead of the browser-track value we just set.
+		// Same root cause as #800; observed flaking on #739's rebase CI.
+		await fetchJson('/mute-state?state=idle&source=tool');
 		// Set a known baseline
 		await fetchJson('/mute-state?state=listening');
 		// Try invalid
