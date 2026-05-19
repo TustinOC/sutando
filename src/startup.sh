@@ -428,6 +428,30 @@ done
 echo ""
 open "http://localhost:8080"
 
+# Multi-core agent pool (#880). Opt-in via $SUTANDO_CORE_POOL_SIZE in .env.
+# Default `1` (today's single-core behavior); set to N>=2 to install N
+# launchd-managed claude sessions that share the workspace. The install
+# script's pre-flight refuses if the `/proactive-loop-pool` skill isn't
+# present yet, so this line is safe to keep enabled even before Phase 2b
+# lands. `|| true` ensures startup proceeds to the foreground core launch
+# even if the pool install errors (e.g. launchctl unavailable, claude not
+# on PATH). Re-running startup is idempotent — the install script does
+# `bootout`-then-`bootstrap` on each plist, no zombies.
+#
+# Sanitize the env var FIRST so a non-numeric value (typo, comment dangling
+# in .env) doesn't blow up under `set -e` from `[ ... -gt 1 ]` returning
+# exit 2 on non-numeric input. Treat anything non-digit as `1` (skip install).
+__pool_size="${SUTANDO_CORE_POOL_SIZE:-1}"
+case "$__pool_size" in
+    ''|*[!0-9]*) __pool_size=1 ;;
+esac
+if [ "$__pool_size" -gt 1 ]; then
+    echo ""
+    echo "Installing multi-core pool (SUTANDO_CORE_POOL_SIZE=$__pool_size)..."
+    bash "$REPO/scripts/install-core-pool.sh" "$__pool_size" || true
+fi
+unset __pool_size
+
 # Delegate to scripts/start-cli.sh — canonical sutando-core launch command.
 # Single source of truth so Sutando.app's Restart Core menu can invoke the
 # same launch path without duplicating the tmux + claude flags.

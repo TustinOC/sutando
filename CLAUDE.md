@@ -255,6 +255,8 @@ bash src/startup.sh
 ```
 This also starts the screen capture server (needs terminal for Screen Recording permission).
 
+**Multi-core pool (opt-in, #880).** To run N parallel claude sessions sharing this workspace, add `SUTANDO_CORE_POOL_SIZE=3` (or any N≥2) to `.env` and re-run `bash src/startup.sh`. The startup script installs N launchd-managed cores via `scripts/install-core-pool.sh`; the install pre-flight refuses if the `/proactive-loop-pool` skill isn't yet installed at `~/.claude/skills/proactive-loop-pool/`, so today's default is safe to enable even before Phase 2b lands. `bash src/restart.sh` honors the same env var (it delegates to startup.sh). Disable: remove the env var + run `bash scripts/uninstall-core-pool.sh`.
+
 ## Skills
 
 Use skills installed in ~/.claude/skills/ when available. Prefer existing skills over writing new code from scratch.
