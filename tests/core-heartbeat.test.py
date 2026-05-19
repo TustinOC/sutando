@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for src/core_heartbeat.py — per-host liveness signal.
+"""Tests for src/core_heartbeat.py — per-slot liveness signal.
 
 Run: python3 tests/core-heartbeat.test.py
 Exit: 0 on pass, 1 on fail.
@@ -24,33 +24,72 @@ def _short_host() -> str:
 
 class TestHeartbeatWrite(unittest.TestCase):
     def setUp(self):
-        self._saved_env = os.environ.get("SUTANDO_WORKSPACE")
+        self._saved_workspace = os.environ.get("SUTANDO_WORKSPACE")
+        self._saved_core_id = os.environ.get("SUTANDO_CORE_ID")
         self.tmp = Path(tempfile.mkdtemp(prefix="core-heartbeat-"))
         os.environ["SUTANDO_WORKSPACE"] = str(self.tmp)
+        # Unset SUTANDO_CORE_ID by default — tests opt in by setting it.
+        # Default heartbeat path under unset is `core-default.alive`.
+        os.environ.pop("SUTANDO_CORE_ID", None)
         # Force re-import so module picks up the new env.
         sys.modules.pop("core_heartbeat", None)
 
     def tearDown(self):
-        if self._saved_env is not None:
-            os.environ["SUTANDO_WORKSPACE"] = self._saved_env
-        elif "SUTANDO_WORKSPACE" in os.environ:
-            del os.environ["SUTANDO_WORKSPACE"]
+        for k, v in (
+            ("SUTANDO_WORKSPACE", self._saved_workspace),
+            ("SUTANDO_CORE_ID", self._saved_core_id),
+        ):
+            if v is not None:
+                os.environ[k] = v
+            elif k in os.environ:
+                del os.environ[k]
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
         sys.modules.pop("core_heartbeat", None)
 
-    def test_write_beat_creates_per_host_file(self):
+    def test_write_beat_creates_default_slot_file_when_core_id_unset(self):
+        """Legacy single-core path: env var unset → file is `core-default.alive`.
+        Matches the fallback in `_core_id()` and keeps single-core installs
+        working without forcing them to set SUTANDO_CORE_ID."""
         import core_heartbeat
         core_heartbeat.write_beat()
-        alive_path = self.tmp / "state" / "cores" / f"{_short_host()}.alive"
+        alive_path = self.tmp / "state" / "cores" / "core-default.alive"
         self.assertTrue(alive_path.is_file(), f"expected {alive_path} to exist")
 
+    def test_write_beat_creates_per_slot_file_when_core_id_set(self):
+        """Pool path: SUTANDO_CORE_ID=N → file is `core-N.alive`. This is the
+        filename `claim_task.py:_is_alive()` reads; without alignment, the
+        channel-affinity (#884) handler check returns False on every call."""
+        os.environ["SUTANDO_CORE_ID"] = "5"
+        sys.modules.pop("core_heartbeat", None)
+        import core_heartbeat
+        core_heartbeat.write_beat()
+        alive_path = self.tmp / "state" / "cores" / "core-5.alive"
+        self.assertTrue(alive_path.is_file(), f"expected {alive_path} to exist")
+        # And the legacy/default file MUST NOT be written alongside — that
+        # would race with another slot writing the same path.
+        legacy_path = self.tmp / "state" / "cores" / "core-default.alive"
+        self.assertFalse(legacy_path.exists(), "default slot file leaked while CORE_ID was set")
+
+    def test_blank_core_id_falls_back_to_default(self):
+        """Whitespace-only / empty env value collapses to `default` rather
+        than producing the malformed filename `core-.alive`."""
+        os.environ["SUTANDO_CORE_ID"] = "   "
+        sys.modules.pop("core_heartbeat", None)
+        import core_heartbeat
+        core_heartbeat.write_beat()
+        self.assertTrue((self.tmp / "state" / "cores" / "core-default.alive").is_file())
+        self.assertFalse((self.tmp / "state" / "cores" / "core-.alive").exists())
+
     def test_write_beat_payload_schema(self):
+        os.environ["SUTANDO_CORE_ID"] = "2"
+        sys.modules.pop("core_heartbeat", None)
         import core_heartbeat
         core_heartbeat.write_beat(status="custom-status")
-        data = json.loads((self.tmp / "state" / "cores" / f"{_short_host()}.alive").read_text())
+        data = json.loads((self.tmp / "state" / "cores" / "core-2.alive").read_text())
         # Required fields
         self.assertEqual(data["host"], _short_host())
+        self.assertEqual(data["core_id"], "2")
         self.assertEqual(data["pid"], os.getpid())
         self.assertEqual(data["status"], "custom-status")
         self.assertEqual(data["schema_version"], 1)
@@ -64,15 +103,15 @@ class TestHeartbeatWrite(unittest.TestCase):
         a concurrent reader at the destination path never sees a half-file."""
         import core_heartbeat
         core_heartbeat.write_beat()
-        alive = self.tmp / "state" / "cores" / f"{_short_host()}.alive"
-        tmp = self.tmp / "state" / "cores" / f"{_short_host()}.alive.tmp"
+        alive = self.tmp / "state" / "cores" / "core-default.alive"
+        tmp = self.tmp / "state" / "cores" / "core-default.alive.tmp"
         self.assertTrue(alive.exists())
         self.assertFalse(tmp.exists(), "tmp file should have been renamed away")
 
     def test_write_beat_overwrites_on_second_call(self):
         import core_heartbeat
         core_heartbeat.write_beat(status="first")
-        path = self.tmp / "state" / "cores" / f"{_short_host()}.alive"
+        path = self.tmp / "state" / "cores" / "core-default.alive"
         first_data = json.loads(path.read_text())
         time.sleep(0.01)
         core_heartbeat.write_beat(status="second")
@@ -99,7 +138,11 @@ class TestHeartbeatCli(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="core-heartbeat-cli-"))
-        self.env = {**os.environ, "SUTANDO_WORKSPACE": str(self.tmp)}
+        # CLI tests exercise the pool path: pin SUTANDO_CORE_ID to a known
+        # value so we can assert against `core-<id>.alive` deterministically.
+        # Strip any inherited SUTANDO_CORE_ID first to avoid env leakage.
+        base_env = {k: v for k, v in os.environ.items() if k != "SUTANDO_CORE_ID"}
+        self.env = {**base_env, "SUTANDO_WORKSPACE": str(self.tmp), "SUTANDO_CORE_ID": "3"}
 
     def tearDown(self):
         import shutil
@@ -112,10 +155,11 @@ class TestHeartbeatCli(unittest.TestCase):
             env=self.env, capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
-        alive = self.tmp / "state" / "cores" / f"{_short_host()}.alive"
+        alive = self.tmp / "state" / "cores" / "core-3.alive"
         self.assertTrue(alive.is_file())
         data = json.loads(alive.read_text())
         self.assertEqual(data["status"], "smoke")
+        self.assertEqual(data["core_id"], "3")
 
     def test_sigterm_cleans_up_alive_file(self):
         """Graceful shutdown removes the .alive file so peers see the core
@@ -127,7 +171,7 @@ class TestHeartbeatCli(unittest.TestCase):
             env=self.env,
         )
         # Wait for first beat to land.
-        alive = self.tmp / "state" / "cores" / f"{_short_host()}.alive"
+        alive = self.tmp / "state" / "cores" / "core-3.alive"
         for _ in range(40):
             if alive.exists():
                 break

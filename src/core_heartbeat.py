@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""Per-host heartbeat for sutando-core sessions.
+"""Per-slot heartbeat for sutando-core sessions.
 
-Writes a small JSON file at `<workspace>/state/cores/<hostname>.alive` every
-30 seconds while running. The file's content reports the core's pid, host,
-start time, last beat, and a free-form status string; the file's mtime is
-the cross-host "is this core still up?" signal.
+Writes a small JSON file at `<workspace>/state/cores/core-<id>.alive` every
+30 seconds while running. `<id>` is `$SUTANDO_CORE_ID` (set per-slot by the
+pool launchd plist) — falls back to `default` for the legacy single-core
+install where the env var is unset. The file's content reports the core's
+pid, host, start time, last beat, and a free-form status string; the file's
+mtime is the "is this core still up?" signal that the claim primitive
+(`src/claim_task.py`) consumes.
 
-Why
----
+Why per-slot, not per-host
+--------------------------
 Today's "is the core alive?" check reads `core-status.json` at the workspace
 root — a single file written by the proactive-loop each pass. That's fine
-for a single-machine install: one core, one status. The moment we want
-multi-core (multiple Claude Code sessions sharing a workspace, or sutando
-running on both Mac Studio + MacBook against a synced workspace), one file
-can no longer represent N processes.
+for a single-machine, single-core install. The moment we want multi-core
+(N parallel claude sessions on one Mac sharing a workspace, #880), one file
+can no longer represent N processes — and the original per-host scheme
+(`<hostname>.alive`, pre-#885) had all N pool cores overwriting the same
+file, so `claim_task.py:_is_alive(core_id)` (which reads `core-<id>.alive`
+per #884's channel-affinity) saw "file missing → dead" for every check.
+Channel-affinity silently fell through to plain race-claim on every task.
 
-Per-host file at `state/cores/<hostname>.alive`:
+Per-slot file at `state/cores/core-<id>.alive`:
   • Each running core writes only its own file (no contention).
-  • Any process can read the directory to see who's alive across the fleet.
+  • Any process can read the directory to see who's alive across the pool.
   • mtime is the authoritative liveness signal (younger than ~90s = alive).
-  • Future lease-based scheduler consumes this to know who can pick up work.
+  • Filename matches what `claim_task.py:_alive_path()` reads — no drift.
 
 This script is intentionally tiny and standalone — startup.sh launches it as
 a background process. SIGTERM/SIGINT clean up the .alive file so a graceful
@@ -58,13 +64,25 @@ CORES_DIR = WORKSPACE / "state" / "cores"
 
 def _hostname() -> str:
     """Short hostname without domain. Mirrors what sync-memory.sh uses for
-    machine-<host>/ dirs, so the .alive file is recognizable across the
-    fleet's other state files."""
+    machine-<host>/ dirs, so the .alive file's payload is recognizable across
+    the fleet's other state files."""
     return socket.gethostname().split(".")[0]
 
 
+def _core_id() -> str:
+    """Resolve the per-slot id used in the .alive filename.
+
+    Reads `$SUTANDO_CORE_ID` (set by the pool launchd plist, see
+    `scripts/install-core-pool.sh`). For the legacy single-core install
+    (startup.sh path, env unset), falls back to `default` — a stable sentinel
+    that won't collide with pool slot numbers (1..N) and keeps the filename
+    parseable. Reject empty/whitespace-only env to avoid `core-.alive`."""
+    raw = os.environ.get("SUTANDO_CORE_ID", "").strip()
+    return raw if raw else "default"
+
+
 def _alive_path() -> Path:
-    return CORES_DIR / f"{_hostname()}.alive"
+    return CORES_DIR / f"core-{_core_id()}.alive"
 
 
 def write_beat(status: str = "running") -> None:
@@ -74,6 +92,7 @@ def write_beat(status: str = "running") -> None:
     target = _alive_path()
     payload = {
         "host": _hostname(),
+        "core_id": _core_id(),
         "pid": os.getpid(),
         "started_at": _STARTED_AT,
         "last_beat_at": time.time(),

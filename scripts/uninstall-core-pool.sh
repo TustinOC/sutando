@@ -1,8 +1,12 @@
 #!/bin/bash
-# Uninstall the multi-core agent pool — stops every com.sutando.core-<N>.plist
-# (where <N> is purely numeric) and removes the plist files. Logs under
-# $SUTANDO_WORKSPACE/logs/core-*.log are kept (not deleted) so post-mortem of
-# any pool incident remains possible.
+# Uninstall the multi-core agent pool — stops every pool plist and removes
+# the files. Two flavors are installed per slot and both are torn down here:
+#   com.sutando.core-<N>.plist            — the claude session
+#   com.sutando.core-<N>-heartbeat.plist  — the .alive heartbeat sidecar
+# The glob `com.sutando.core-[0-9]*.plist` catches both because the heartbeat
+# label starts with a digit immediately after `core-`. Logs under
+# $SUTANDO_WORKSPACE/logs/core-*.log{,err} are kept (not deleted) so
+# post-mortem of any pool incident remains possible.
 #
 # CRITICAL: the glob pattern is `com.sutando.core-[0-9]*.plist`, NOT
 # `com.sutando.core-*.plist`. The narrower pattern is intentional — the
