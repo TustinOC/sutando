@@ -1299,7 +1299,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {}
         }
 
-        // 4. Try to get selected text via Accessibility API
+        // 4. Try ax-read subprocess (voice agent's read_selection primitive).
+        //
+        // Why prefer this over the in-process AX + Cmd+C path:
+        //   - ax-read uses NSPasteboard.changeCount to distinguish "Cmd+C fired"
+        //     from "clipboard was already populated" — catches the Discord-input
+        //     contenteditable bug where in-process fallback silently dropped
+        //     stale clipboard contents.
+        //   - ax-read RESTORES the prior pasteboard string after its Cmd+C
+        //     probe, so a failed-copy attempt doesn't corrupt the clipboard
+        //     for the user's next try.
+        //   - Returns JSON with {app, window_title, url, selected, screenshot_path,
+        //     path} so the dropped task includes situational metadata, not just
+        //     the bare text.
+        //
+        // Lives in the private memory-sync repo so the binary itself isn't
+        // distributed via the public sutando repo. Fall back to legacy
+        // in-process logic when the binary is unavailable (fresh install
+        // without personal-deictic, or non-standard memory-dir layout).
+        if let axRead = invokeAxRead() {
+            let selected = (axRead["selected"] as? String) ?? ""
+            if !selected.isEmpty {
+                let app = (axRead["app"] as? String) ?? ""
+                let windowTitle = (axRead["window_title"] as? String) ?? ""
+                let url = (axRead["url"] as? String) ?? ""
+                let path = (axRead["path"] as? String) ?? ""
+                var meta: [String] = []
+                if !app.isEmpty { meta.append("app: \(app)") }
+                if !windowTitle.isEmpty { meta.append("window: \(windowTitle)") }
+                if !url.isEmpty { meta.append("url: \(url)") }
+                if !path.isEmpty { meta.append("ax_path: \(path)") }
+                let metaBlock = meta.isEmpty ? "" : meta.joined(separator: "\n") + "\n"
+                let content = """
+                timestamp: \(timestamp)
+                type: text
+                \(metaBlock)\(ctxHeader)---
+                \(selected)
+                """
+                appendLog(logFile, "[\(timestamp)] Dropped: \(selected.count) chars (ax-read, path=\(path), app=\(app))")
+                writeTask(tasksDir, timestamp: timestamp, content: content)
+                let snippet = String(selected.prefix(80)).replacingOccurrences(of: "\n", with: " ")
+                notify("Sutando", "Dropped: \(snippet)\(selected.count > 80 ? "…" : "")")
+            } else {
+                notify("Sutando", "Nothing selected — highlight text first")
+                appendLog(logFile, "[\(timestamp)] Nothing selected (ax-read path=none)")
+            }
+            return
+        }
+
+        // 5. Legacy fallback when ax-read binary isn't available (fresh install,
+        //    non-standard memory-dir). Same flow as before — AX read in-process,
+        //    then simulate Cmd+C with the changeCount check to avoid dropping
+        //    stale clipboard contents.
         if let selected = getSelectedText(), !selected.isEmpty {
             let content = """
             timestamp: \(timestamp)
@@ -1307,32 +1358,93 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             \(ctxHeader)---
             \(selected)
             """
-            appendLog(logFile, "[\(timestamp)] Dropped: \(selected.count) chars")
+            appendLog(logFile, "[\(timestamp)] Dropped: \(selected.count) chars (legacy AX)")
             writeTask(tasksDir, timestamp: timestamp, content: content)
             let snippet = String(selected.prefix(80)).replacingOccurrences(of: "\n", with: " ")
             notify("Sutando", "Dropped: \(snippet)\(selected.count > 80 ? "…" : "")")
             return
         }
 
-        // 5. Fallback: simulate Cmd+C, read clipboard
+        let pb = NSPasteboard.general
+        let priorChangeCount = pb.changeCount
         simulateCopy()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
-            if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
+            if pb.changeCount > priorChangeCount,
+               let text = pb.string(forType: .string), !text.isEmpty {
                 let content = """
                 timestamp: \(timestamp)
                 type: text
                 \(ctxHeader)---
                 \(text)
                 """
-                appendLog(logFile, "[\(timestamp)] Dropped: \(text.count) chars")
+                appendLog(logFile, "[\(timestamp)] Dropped: \(text.count) chars (legacy fallback)")
                 writeTask(tasksDir, timestamp: timestamp, content: content)
                 let snippet = String(text.prefix(80)).replacingOccurrences(of: "\n", with: " ")
                 notify("Sutando", "Dropped: \(snippet)\(text.count > 80 ? "…" : "")")
             } else {
-                notify("Sutando", "Nothing selected — select text first")
-                appendLog(logFile, "[\(timestamp)] Nothing selected")
+                notify("Sutando", "Nothing selected — highlight text first")
+                appendLog(logFile, "[\(timestamp)] Nothing selected (legacy, changeCount unchanged)")
             }
         }
+    }
+
+    // MARK: - ax-read subprocess (voice agent's read_selection primitive)
+    //
+    // Resolution order for the binary path:
+    //   1. $SUTANDO_MEMORY_DIR/skills/personal-deictic/ax-read  (current canonical)
+    //   2. $SUTANDO_PRIVATE_DIR/skills/personal-deictic/ax-read (legacy alias, PR #876)
+    //   3. ~/.sutando/memory-sync/skills/personal-deictic/ax-read (default)
+    //
+    // Returns nil when the binary is missing, doesn't execute cleanly, or
+    // returns malformed JSON — callers fall back to the legacy in-process path.
+
+    func resolveAxReadPath() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        let suffix = "/skills/personal-deictic/ax-read"
+        let candidates = [
+            env["SUTANDO_MEMORY_DIR"].map { $0 + suffix },
+            env["SUTANDO_PRIVATE_DIR"].map { $0 + suffix },
+            NSString(string: "~/.sutando/memory-sync" + suffix).expandingTildeInPath,
+        ].compactMap { $0 }
+        let fm = FileManager.default
+        for path in candidates {
+            if fm.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return nil
+    }
+
+    func invokeAxRead() -> [String: Any]? {
+        guard let binPath = resolveAxReadPath() else { return nil }
+        let task = Process()
+        task.launchPath = binPath
+        task.arguments = []
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = errPipe
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+        // 3s deadline matches ax-read's max screencapture timeout (1s) plus
+        // headroom for Cmd+C fallback wait (120ms). Anything longer means the
+        // subprocess is stuck — fall back to legacy.
+        let deadline = Date().addingTimeInterval(3.0)
+        while task.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if task.isRunning {
+            task.terminate()
+            return nil
+        }
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
     }
 
     // MARK: - Screenshot Drop (⌥C)
