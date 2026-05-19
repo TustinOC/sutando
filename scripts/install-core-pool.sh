@@ -152,9 +152,13 @@ for i in $(seq 1 "$N"); do
   <key>ProgramArguments</key>
   <array>
     <string>$CLAUDE_BIN</string>
+    <string>--dangerously-skip-permissions</string>
+    <string>--add-dir</string><string>$WORKSPACE</string>
     <string>--print</string>
     <string>/proactive-loop-pool</string>
   </array>
+  <key>WorkingDirectory</key>
+  <string>$REPO_DIR</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SUTANDO_CORE_ID</key><string>$i</string>
