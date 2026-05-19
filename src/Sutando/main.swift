@@ -1315,9 +1315,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 5. Fallback: simulate Cmd+C, read clipboard
+        //
+        // Detect a real copy via NSPasteboard.changeCount (mirrors ax-read.swift in
+        // skills/personal-deictic). Without this, contenteditable surfaces (Discord
+        // input box, Notion, Slack, Linear, etc.) silently fall through: AX returns
+        // empty, simulated Cmd+C produces no copy when there's no highlighted range,
+        // and the read just picks up whatever was already on the clipboard — the
+        // drop then writes stale content. The changeCount check distinguishes
+        // "copy fired" from "clipboard was already populated" cleanly.
+        let pb = NSPasteboard.general
+        let priorChangeCount = pb.changeCount
         simulateCopy()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
-            if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
+            if pb.changeCount > priorChangeCount,
+               let text = pb.string(forType: .string), !text.isEmpty {
                 let content = """
                 timestamp: \(timestamp)
                 type: text
@@ -1329,8 +1340,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let snippet = String(text.prefix(80)).replacingOccurrences(of: "\n", with: " ")
                 notify("Sutando", "Dropped: \(snippet)\(text.count > 80 ? "…" : "")")
             } else {
-                notify("Sutando", "Nothing selected — select text first")
-                appendLog(logFile, "[\(timestamp)] Nothing selected")
+                notify("Sutando", "Nothing selected — highlight text first")
+                appendLog(logFile, "[\(timestamp)] Nothing selected (changeCount unchanged after Cmd+C)")
             }
         }
     }
