@@ -34,18 +34,39 @@ Identical to `/proactive-loop` — `/schedule-crons` and the streaming task watc
 
 ## The claim step (what's different from /proactive-loop)
 
-When the task watcher emits `TASK_FILE: <basename>` for a new task, **before** reading the file:
+When the task watcher emits `TASK_FILE: <basename>` for a new task, **before** reading the task body, run the claim step. There are two flavors:
+
+### Plain claim (no channel affinity)
+
+For voice / phone / un-channeled tasks, or as a fallback when the task body has no `channel_id:` field:
 
 1. Extract the task ID from the filename (`task-<id>.txt` → `<id>`).
 2. Run: `python3 src/claim_task.py <id> $SUTANDO_CORE_ID`
-3. Outcomes:
-   - **Exit 0** → claim won. The script prints the renamed path (`tasks/task-<id>.claimed-core-<n>.txt`). Read THIS path, not the original.
-   - **Exit 1** → claim lost (another pool session won). Skip this task entirely — no Read, no processing, no result file.
-   - **Exit 2** → usage / validation error. Log and skip.
+3. Exit 0 → claim won, read the printed path; Exit 1 → skip; Exit 2 → log and skip.
+
+### Channel-affinity claim (Discord / Telegram / Slack)
+
+For tasks with a `channel_id:` field in the body (`#884`):
+
+1. Extract the task ID from the filename.
+2. Peek at the task body (without claiming yet) to read the `channel_id:` line. (Use `head` / `grep` — don't run a full Read tool yet since other cores may grab the task first.)
+3. Run: `python3 src/claim_task.py <id> $SUTANDO_CORE_ID <channel_id>`
+4. Outcomes:
+   - **Exit 0** → claim won. Script prints the renamed path (`tasks/task-<id>.claimed-core-<n>.txt`). Read THIS path. Your core is now the channel's handler for the next 30 min (default `SUTANDO_CORE_IDLE_THRESHOLD_SEC`).
+   - **Exit 1** → respect-handler OR lost-race. Either another core is the channel's active handler, or another core won the race-claim. Skip this task entirely.
+   - **Exit 2** → validation error. Log and skip.
+
+The affinity machinery is **inside** `claim_task.py` — your only responsibility is to pass `channel_id` when present. The script reads `state/cores/channel-<id>.handler` and `state/cores/core-<n>.alive` to decide whether you're allowed to claim.
 
 Use the renamed `task-<id>.claimed-core-<n>.txt` path for all subsequent reads + result writes. The bridges look for results by task ID, so writing to `results/task-<id>.txt` (without the `claimed-core-<n>` suffix) still routes correctly.
 
 **Initial sweep on session start**: the watcher's initial sweep emits TASK_FILE events for any pre-existing files. Run the claim step on each; expect to win some and lose others depending on which sibling session got there first.
+
+### Why channel affinity matters
+
+Without it, three follow-up Discord messages on the same topic would scatter across the 3 cores. Each core would run a partial proactive-loop pass and write a partial result; the latest task's result would carry the consolidated reply via `[deduped:]` marker. That's wasteful — 3× quota burn for 1× user-visible reply.
+
+With affinity, all 3 tasks land on the same core; that core has the conversational context in its session memory and produces one coherent reply. Quota burn matches what a single-core setup would have done.
 
 ## The rest of the loop
 

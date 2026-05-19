@@ -16,6 +16,7 @@ import multiprocessing as mp
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -134,6 +135,148 @@ class ClaimTaskTests(unittest.TestCase):
     def test_validation_allows_realistic_ids(self):
         self._write_task("1779170589673")
         result = claim("1779170589673", "1", workspace=self.ws)
+        self.assertIsNotNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Channel-affinity tests (#884)
+# ---------------------------------------------------------------------------
+
+from claim_task import claim_with_affinity, ALIVE_THRESHOLD_SEC  # noqa: E402
+
+
+class ChannelAffinityTests(unittest.TestCase):
+    """Sticky-handler semantics: same channel → same core within IDLE_THRESHOLD;
+    dead handler → auto-rebalance within ALIVE_THRESHOLD; idle channel →
+    race-claim."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmp.name)
+        (self.ws / "tasks").mkdir()
+        (self.ws / "state" / "cores").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_task(self, task_id: str) -> Path:
+        p = self.ws / "tasks" / f"task-{task_id}.txt"
+        p.write_text("body\n")
+        return p
+
+    def _touch_alive(self, core_id: str, age_sec: float = 0) -> None:
+        """Write a fresh heartbeat for core <core_id>. age_sec lets the test
+        backdate the mtime to simulate a dead heartbeat."""
+        p = self.ws / "state" / "cores" / f"core-{core_id}.alive"
+        p.write_text(f'{{"core_id": "{core_id}"}}')
+        if age_sec > 0:
+            past = os.path.getmtime(p) - age_sec
+            os.utime(p, (past, past))
+
+    def test_first_task_claims_and_writes_handler(self):
+        self._write_task("a")
+        self._touch_alive("1")
+        result = claim_with_affinity("a", "1", "ch-X", workspace=self.ws)
+        self.assertIsNotNone(result)
+        # Handler should now point to core-1
+        handler_p = self.ws / "state" / "cores" / "channel-ch-X.handler"
+        self.assertTrue(handler_p.exists())
+        import json as _json
+        data = _json.loads(handler_p.read_text())
+        self.assertEqual(data["core_id"], "1")
+        self.assertIn("last_handled_at", data)
+
+    def test_subsequent_task_same_channel_sticks_to_handler(self):
+        # core-1 handles first task in channel ch-X.
+        self._write_task("a")
+        self._touch_alive("1")
+        self._touch_alive("2")
+        claim_with_affinity("a", "1", "ch-X", workspace=self.ws)
+        # Now task-b arrives in same channel. core-2 attempts → should be
+        # refused (handler-respect); core-1 should win.
+        self._write_task("b")
+        c2_attempt = claim_with_affinity("b", "2", "ch-X", workspace=self.ws)
+        self.assertIsNone(c2_attempt, "core-2 should not claim while core-1 is fresh handler")
+        c1_attempt = claim_with_affinity("b", "1", "ch-X", workspace=self.ws)
+        self.assertIsNotNone(c1_attempt, "core-1 should win as fresh handler")
+
+    def test_different_channel_does_not_steal_handler(self):
+        # core-1 handles ch-X. New task in ch-Y → core-2 should be free
+        # to claim it (different channel).
+        self._write_task("a")
+        self._touch_alive("1")
+        self._touch_alive("2")
+        claim_with_affinity("a", "1", "ch-X", workspace=self.ws)
+        self._write_task("b")
+        result = claim_with_affinity("b", "2", "ch-Y", workspace=self.ws)
+        self.assertIsNotNone(result, "core-2 should claim ch-Y (different channel)")
+        # ch-Y handler now points to core-2
+        handler_p = self.ws / "state" / "cores" / "channel-ch-Y.handler"
+        import json as _json
+        self.assertEqual(_json.loads(handler_p.read_text())["core_id"], "2")
+
+    def test_dead_handler_releases_to_other_core(self):
+        # core-1 handles ch-X, then dies. core-2 should be able to claim
+        # the next ch-X task once core-1's heartbeat goes stale.
+        self._write_task("a")
+        self._touch_alive("1")
+        self._touch_alive("2")
+        claim_with_affinity("a", "1", "ch-X", workspace=self.ws)
+        # Backdate core-1's heartbeat — simulate crash.
+        self._touch_alive("1", age_sec=ALIVE_THRESHOLD_SEC + 30)
+        self._touch_alive("2")  # core-2 still fresh
+        self._write_task("b")
+        result = claim_with_affinity("b", "2", "ch-X", workspace=self.ws)
+        self.assertIsNotNone(result, "core-2 should claim ch-X after handler dies")
+        # Handler now points to core-2
+        handler_p = self.ws / "state" / "cores" / "channel-ch-X.handler"
+        import json as _json
+        self.assertEqual(_json.loads(handler_p.read_text())["core_id"], "2")
+
+    def test_idle_channel_releases_for_race(self):
+        # core-1 handles ch-X, then the channel goes idle past IDLE_THRESHOLD.
+        # Next task → race-claim, any core can win.
+        import json as _json
+        self._write_task("a")
+        self._touch_alive("1")
+        self._touch_alive("2")
+        claim_with_affinity("a", "1", "ch-X", workspace=self.ws)
+        # Manually age the handler beyond IDLE_THRESHOLD.
+        handler_p = self.ws / "state" / "cores" / "channel-ch-X.handler"
+        data = _json.loads(handler_p.read_text())
+        data["last_handled_at"] = time.time() - (31 * 60)  # 31 min ago
+        handler_p.write_text(_json.dumps(data))
+        # Now core-2 should be able to claim (race-claim path).
+        self._write_task("b")
+        result = claim_with_affinity("b", "2", "ch-X", workspace=self.ws)
+        self.assertIsNotNone(result, "core-2 should claim after channel idle expires")
+
+    def test_no_channel_id_falls_back_to_plain_claim(self):
+        # channel_id=None: voice tasks etc. Plain race-claim, no handler tracking.
+        self._write_task("a")
+        result = claim_with_affinity("a", "1", None, workspace=self.ws)
+        self.assertIsNotNone(result)
+        # No handler file should be created
+        handlers = list((self.ws / "state" / "cores").glob("channel-*.handler"))
+        self.assertEqual(handlers, [], "no handler file for channel-less task")
+
+    def test_channel_id_validation_rejects_traversal(self):
+        self._write_task("a")
+        self._touch_alive("1")
+        for bad in ["../etc", "a/b", "..", ".", "", ".dotfile"]:
+            with self.assertRaises(ValueError, msg=f"should reject channel_id {bad!r}"):
+                claim_with_affinity("a", "1", bad, workspace=self.ws)
+
+    def test_malformed_handler_falls_back_to_race(self):
+        # If handler file is corrupted (not valid JSON), treat as no handler.
+        self._write_task("a")
+        self._touch_alive("1")
+        self._touch_alive("2")
+        handler_p = self.ws / "state" / "cores" / "channel-ch-X.handler"
+        handler_p.parent.mkdir(parents=True, exist_ok=True)
+        handler_p.write_text("not valid json {{{")
+        # core-2 should be able to claim despite the malformed handler
+        result = claim_with_affinity("a", "2", "ch-X", workspace=self.ws)
         self.assertIsNotNone(result)
 
 
