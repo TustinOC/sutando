@@ -59,6 +59,21 @@ mkdir -p "$LAUNCH_AGENTS"
 UID_VAL="$(id -u)"
 DOMAIN="gui/$UID_VAL"
 
+# launchctl bootout is async — the service can still be in the "unloading"
+# state when bootstrap fires, surfacing as "Bootstrap failed: 5: Input/output
+# error". Retry bootstrap a few times with backoff before giving up. Observed
+# 2026-05-19 on a 3-core re-install after the first slot's bootout.
+bootstrap_with_retry() {
+  local plist="$1"
+  local i
+  for i in 1 2 3 4 5; do
+    if launchctl bootstrap "$DOMAIN" "$plist" 2>/dev/null; then return 0; fi
+    sleep 0.5
+  done
+  # Final attempt with stderr visible so the script aborts with diagnostic.
+  launchctl bootstrap "$DOMAIN" "$plist"
+}
+
 # Regression guard: Phase 2a ships the launchd plumbing + claim primitive,
 # but NOT the `/proactive-loop-pool` skill. If we install plists that invoke
 # a non-existent skill, launchd's KeepAlive will restart the failing claude
@@ -159,7 +174,7 @@ for i in $(seq 1 "$N"); do
 PLIST_EOF
   # bootout first (idempotent — succeeds if not loaded) then bootstrap.
   launchctl bootout "$DOMAIN/com.sutando.core-$i" 2>/dev/null || true
-  launchctl bootstrap "$DOMAIN" "$PLIST"
+  bootstrap_with_retry "$PLIST"
   echo "installed: com.sutando.core-$i (workspace=$WORKSPACE)"
 
   # Heartbeat sidecar — always-on writer of `state/cores/core-$i.alive`.
@@ -198,7 +213,7 @@ PLIST_EOF
 </plist>
 HEART_EOF
   launchctl bootout "$DOMAIN/com.sutando.core-$i-heartbeat" 2>/dev/null || true
-  launchctl bootstrap "$DOMAIN" "$HEART_PLIST"
+  bootstrap_with_retry "$HEART_PLIST"
   echo "installed: com.sutando.core-$i-heartbeat"
 done
 
