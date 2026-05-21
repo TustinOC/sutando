@@ -18,7 +18,9 @@ from pathlib import Path
 # leftover quota-state.json under skills/quota-tracker/ silently shadowed the
 # fresh file and froze the dashboard for ~12h (2026-05-21). One path, one
 # source of truth — if it's missing, say so rather than read a stale copy.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# scripts → quota-tracker → skills → repo : four parents. `.resolve()` first so
+# this holds when the skill is reached through the ~/.claude/skills/ symlink.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 try:
     from workspace_default import status_read_path  # noqa: E402
