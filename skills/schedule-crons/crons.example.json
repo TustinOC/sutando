@@ -23,5 +23,10 @@
     "name": "sync-memory",
     "cron": "*/30 * * * *",
     "prompt": "Run bash scripts/sync-memory.sh to sync memory and notes to the private memory repo (requires SUTANDO_MEMORY_REPO in .env)."
+  },
+  {
+    "name": "proactive-notify-runner",
+    "cron": "*/3 * * * *",
+    "prompt": "Run python3 skills/proactive-notify/scripts/runner.py --once to fire any due Pings to the owner. Default is dry-run; pass --live to deliver."
   }
 ]
