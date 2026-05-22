@@ -32,6 +32,7 @@
 import { config as _dotenvConfig } from 'dotenv';
 import { mkdirSync, writeFileSync, copyFileSync, appendFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { createServer, type Server, type IncomingMessage } from 'node:http';
 import { resolveWorkspace } from '../../../src/workspace_default.js';
 import { recordConversation, recordSession } from '../../../src/conversation-store.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed } from './access-tier.js';
@@ -915,6 +916,102 @@ function cleanupSession(s: DiscordVoiceSession): void {
 	console.log(`${ts()} [Voice] session finalized: ${s.sessionId} (${durationMs}ms, ${s.transcript.length} turns)`);
 }
 
+// --- Text control server ----------------------------------------------------
+// Tiny localhost-only HTTP server so out-of-process callers — chiefly the
+// Discord bridge (src/discord-bridge.py) — can push text into the live voice
+// session. discord-voice-server has no `messageCreate` handler, so text posted
+// in its voice channel never reaches the voice agent; this server is how the
+// bridge closes that gap.
+//
+// Mirrors src/vision-tools.ts's startVisionControlServer: localhost-bound,
+// JSON, fail-soft on EADDRINUSE (another discord-voice-server owns the port).
+// The transport — `transport.sendContent([{role:'user', text}], false)` — is
+// the SAME mechanism vision-tools uses to inject hidden context turns and the
+// resultQueue drain uses to inject task results. turnComplete=false so the
+// text lands as conversation context without forcing a generation.
+//
+//   GET  /voice/state   → {channelId, sessionReady}
+//   POST /voice/text    {text, source}  → inject one user-role text turn
+//
+// 7845 screen-capture, 7846 credential-proxy, 7847 vision-control — 7848 free.
+const VOICE_CONTROL_PORT = Number(process.env.DISCORD_VOICE_CONTROL_PORT) || 7848;
+let voiceControlServer: Server | null = null;
+
+function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+	return new Promise((resolve) => {
+		const chunks: Buffer[] = [];
+		req.on('data', (c: Buffer) => chunks.push(c));
+		req.on('end', () => {
+			if (chunks.length === 0) return resolve({});
+			try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>); }
+			catch { resolve({}); }
+		});
+		req.on('error', () => resolve({}));
+	});
+}
+
+/** Inject a text turn into the active session. Returns false (no throw) when
+ *  there's no live session or the transport rejects — callers must not break. */
+function injectVoiceText(text: string): boolean {
+	const s = active;
+	if (!s || s.closing) return false;
+	const transport = (s.voiceSession as any)?.transport;
+	if (!transport || typeof transport.sendContent !== 'function') return false;
+	if (transport.isConnected === false) return false;
+	try {
+		// turnComplete=false → context-only, no generation forced. Same call
+		// shape as vision-tools' screen-share context hints.
+		transport.sendContent([{ role: 'user', text }], false);
+		return true;
+	} catch (err) {
+		console.warn(`${ts()} [VoiceText] inject failed: ${(err as Error)?.message ?? err}`);
+		return false;
+	}
+}
+
+function startVoiceControlServer(port: number = VOICE_CONTROL_PORT): void {
+	if (voiceControlServer) return;
+	const srv = createServer(async (req, res) => {
+		const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+		const respond = (status: number, body: unknown) => {
+			res.writeHead(status, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify(body));
+		};
+		if (url.pathname === '/voice/state' && req.method === 'GET') {
+			const s = active;
+			return respond(200, {
+				channelId: s && !s.closing ? s.channelId : null,
+				sessionReady: !!(s && !s.closing && (s.voiceSession as any)?.transport),
+			});
+		}
+		if (url.pathname === '/voice/text' && req.method === 'POST') {
+			const body = await readJsonBody(req);
+			const text = typeof body.text === 'string' ? body.text.trim() : '';
+			const source = typeof body.source === 'string' ? body.source : 'external';
+			if (!text) return respond(400, { status: 'failed', error: 'empty text' });
+			const ok = injectVoiceText(`[${source}] ${text}`);
+			if (ok) console.log(`${ts()} [VoiceText] injected (${source}): ${text.slice(0, 120)}`);
+			return respond(ok ? 200 : 409, ok ? { status: 'injected' } : { status: 'failed', error: 'no active session' });
+		}
+		respond(404, { error: 'not found' });
+	});
+	srv.on('error', (err: NodeJS.ErrnoException) => {
+		// EADDRINUSE — another discord-voice-server already owns the port.
+		// Don't crash and don't claim it; leave voiceControlServer null so
+		// our shutdown is a no-op (we never want to close someone else's).
+		if (err.code === 'EADDRINUSE') {
+			console.warn(`${ts()} [VoiceText] control port ${port} in use; skipping (another discord-voice-server?)`);
+			voiceControlServer = null;
+			return;
+		}
+		console.error(`${ts()} [VoiceText] control server error: ${err.message}`);
+	});
+	srv.listen(port, '127.0.0.1', () => {
+		console.log(`${ts()} [VoiceText] text control server listening on 127.0.0.1:${port}`);
+	});
+	voiceControlServer = srv;
+}
+
 // --- Bootstrap --------------------------------------------------------------
 
 async function start(): Promise<void> {
@@ -961,6 +1058,9 @@ async function start(): Promise<void> {
 
 	const session = await createVoiceSession(connection);
 	active = session;
+	// Text control server — lets the Discord bridge push channel text into
+	// this live session (discord-voice-server has no messageCreate handler).
+	startVoiceControlServer();
 	console.log(`${ts()} [Setup] audio bridge live — speak in the channel`);
 
 	connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -982,6 +1082,7 @@ async function start(): Promise<void> {
 // its own heartbeat timeout (~60-90s).
 function shutdownAfterFlush(code: number): void {
 	if (active) { try { cleanupSession(active); } catch {} }
+	if (voiceControlServer) { try { voiceControlServer.close(); } catch {} voiceControlServer = null; }
 	setTimeout(() => process.exit(code), 1500);
 }
 process.on('SIGINT', () => shutdownAfterFlush(0));

@@ -66,6 +66,17 @@ except Exception:  # pragma: no cover
     def _push_vision_image(path: str, source: str = "discord") -> bool:  # type: ignore
         return False
 
+# Voice-text helper — pushes bridge-delivered channel text into an active
+# discord-voice session so the voice agent ingests it as conversation context
+# (discord-voice-server has no messageCreate handler). Mirrors _push_vision_image:
+# best-effort, import failure or unreachable voice server leaves delivery
+# unchanged.
+try:
+    from voice_text_push import push_text as _push_voice_text  # noqa: E402
+except Exception:  # pragma: no cover
+    def _push_voice_text(text: str, channel_id, source: str = "discord-bridge") -> bool:  # type: ignore
+        return False
+
 # Load token from channels config
 TOKEN = ""
 channels_env = Path.home() / ".claude" / "channels" / "discord" / ".env"
@@ -2936,6 +2947,15 @@ async def poll_results():
                             )
                         except Exception:
                             pass
+                        # If a discord-voice session is live in this channel,
+                        # also push the text into it — discord-voice-server
+                        # has no messageCreate handler, so otherwise the voice
+                        # agent never sees what the bridge posted. Fail-soft:
+                        # no-op when no session is active for this channel.
+                        try:
+                            _push_voice_text(clean_text, channel.id, source="discord-bridge")
+                        except Exception:
+                            pass
 
                     # Send files (allowlist-gated; see _is_path_sendable)
                     for fpath in files:
@@ -3240,6 +3260,16 @@ async def poll_dm_fallback():
                                         body=text_only,
                                         task_id=_task_id,
                                     )
+                                except Exception:
+                                    pass
+                                # Mirror poll_results: push the redirected text
+                                # into a discord-voice session if one is live in
+                                # the target channel. This is the trigger case —
+                                # a result routed via [channel: <voice-channel>]
+                                # to a channel where discord-voice is running.
+                                # Fail-soft: no-op without an active session.
+                                try:
+                                    _push_voice_text(text_only, target_channel_id, source="discord-bridge")
                                 except Exception:
                                     pass
                             for fpath in file_list:
