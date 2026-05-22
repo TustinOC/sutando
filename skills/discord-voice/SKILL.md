@@ -61,7 +61,7 @@ DISCORD_VOICE_SERVER=1 \
 Optional env:
 - `VOICE_MODEL` / `VOICE_NATIVE_AUDIO_MODEL` — mirrors `voice-agent.ts`.
 - `SUTANDO_WORKSPACE` — workspace root for tasks/results/data/logs.
-- `DISCORD_VOICE_OWNER` — legacy fallback (see **Trust boundary**). `=true` treats every speaker as owner; default `false`.
+- `DISCORD_VOICE_OWNER` — legacy fallback (see **Trust boundary**). `=true` treats every speaker as owner; default `false`. **Strict parse** (per PR #973): only the literal string `true` enables owner mode; `=1`, `=TRUE`, `=yes` all fall through to the safe surface.
 
 `DISCORD_VOICE_SERVER=1` flips the polymorphic `dismiss` tool (`src/meeting-tools.ts`) into "SIGTERM self" mode instead of its default Zoom AppleScript path. Without it, asking Sutando to "leave"/"dismiss" in the channel would try to leave a (non-existent) Zoom meeting.
 
