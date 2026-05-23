@@ -2,25 +2,30 @@
 # loop-watchdog.sh — read-only durability watchdog
 #
 # Run by launchd or cron every ~15 min. Checks whether the proactive-loop is
-# still firing by inspecting core-status.json mtime. Logs a warning if stale.
+# still firing by inspecting <workspace>/state/core-status.json mtime. Logs
+# a warning + appends a pending question if stale.
 #
 # Does NOT auto-spawn Claude. Recovery is still manual (Chi runs /proactive-loop).
 # This script's job is observability — turning silent death into a visible signal.
 #
-# Install (manual, by Chi):
-#   launchctl load ~/Library/LaunchAgents/com.sutando.loop-watchdog.plist
+# Install (manual): see src/install-loop-watchdog.sh for the launchd path.
 # Or via crontab:
-#   */15 * * * * bash /Users/wangchi/Desktop/sutando/src/loop-watchdog.sh
+#   */15 * * * * bash $SUTANDO_REPO_DIR/src/loop-watchdog.sh
 
 set -euo pipefail
 
-ROOT="${SUTANDO_ROOT:-/Users/wangchi/Desktop/sutando}"
-STATUS_FILE="$ROOT/core-status.json"
-LOG_FILE="$ROOT/logs/watchdog.log"
-PENDING_FILE="$ROOT/pending-questions.md"
+# Workspace resolution: matches src/workspace_default.py contract — env override
+# wins, else default to ~/.sutando/workspace. Per #940, state files (incl.
+# core-status.json) live under <workspace>/state/, NOT in the repo root.
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+WORKSPACE="${WORKSPACE/#\~/$HOME}"  # expand ~ if env value used it literally
+
+STATUS_FILE="$WORKSPACE/state/core-status.json"
+LOG_FILE="$WORKSPACE/logs/watchdog.log"
+PENDING_FILE="$WORKSPACE/pending-questions.md"
 STALE_THRESHOLD_SEC=900   # 15 min
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$WORKSPACE/logs"
 
 NOW=$(date +%s)
 ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
