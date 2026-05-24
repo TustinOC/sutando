@@ -224,19 +224,18 @@ for pair in "notes:notes"; do
             echo "sync-memory: WARN — $src points at $actual not $tgt; investigate." >&2
         fi
     elif [ -d "$src" ]; then
-        log "WARN: $src is a real dir not a symlink — manual reconcile needed"
-        echo "sync-memory: WARN — $src is a real dir, not a symlink to $tgt." >&2
-        echo "  Manual reconcile (preserves data; excludes build noise): " >&2
-        echo "    rsync -au \\" >&2
-        echo "      --exclude='**/node_modules/' --exclude='**/.cache/' \\" >&2
-        echo "      --exclude='**/.remotion/'    --exclude='**/dist/' \\" >&2
-        echo "      --exclude='*.mp4.bak'        --exclude='*-rerun*.mp4' \\" >&2
-        echo "      --exclude='*-rerun*.mov'     --exclude='*-v[0-9][0-9]-[0-9]*.mp4' \\" >&2
-        echo "      --exclude='*-v[0-9][0-9]-[0-9]*.mov' --exclude='*-v[0-9]-v[0-9]*.mp4' \\" >&2
-        echo "      --exclude='*-v[0-9]-v[0-9]*.mov'     --exclude='*_v[0-9]*.mp4' \\" >&2
-        echo "      --exclude='*_v[0-9]*.mov'    --exclude='ep[0-9]*-v[0-9]*.mp4' \\" >&2
-        echo "      --exclude='sutando-wire-*-v[0-9]*.mp4' \\" >&2
-        echo "      $src/ $tgt/ && rm -rf $src && ln -s $tgt $src" >&2
+        log "WARN: $src is a real dir not a symlink — auto-rsyncing to keep notes in sync"
+        echo "sync-memory: WARN — $src is a real dir (not a symlink to $tgt); auto-rsyncing." >&2
+        echo "  To fix permanently: rm -rf $src && ln -s $tgt $src" >&2
+        # Auto-rsync: push workspace notes → sync dir (one-way, update-only so
+        # newer content in the sync clone is never overwritten). This prevents
+        # silent note loss on hosts where workspace/notes/ is a real dir.
+        mkdir -p "$tgt"
+        if rsync -au --include='*.md' --exclude='*' "$src/" "$tgt/" 2>/dev/null; then
+            log "auto-rsynced $src/ → $tgt/ (real-dir fallback)"
+        else
+            log "WARN: rsync $src/ → $tgt/ failed (exit $?)"
+        fi
     elif [ ! -e "$src" ]; then
         mkdir -p "$(dirname "$src")"
         if ln -s "$tgt" "$src"; then
@@ -246,6 +245,20 @@ for pair in "notes:notes"; do
     fi
 done
 fi  # WS_DIR symlink-bootstrap guard
+
+# --- Fallback: if SUTANDO_WORKSPACE is itself a git repo (e.g. sutando-workspace-001),
+# the guard above clears WS_DIR and skips symlink bootstrap. In that case the
+# workspace/notes/ dir is a real dir that never gets auto-linked. Rsync it here
+# so new notes reach the sync clone on every run. One-way (-u: never overwrites
+# newer content in the sync clone). Notes are .md only — no media noise.
+_RAW_WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+if [ -n "$WS_DIR" ] && [ "$WS_DIR" = "$_RAW_WS" ]; then
+    : # symlink-bootstrap handled it above
+elif [ -d "$_RAW_WS/notes" ] && [ ! -L "$_RAW_WS/notes" ]; then
+    mkdir -p "$SYNC_DIR/notes"
+    rsync -au --include='*.md' --exclude='*' "$_RAW_WS/notes/" "$SYNC_DIR/notes/" 2>/dev/null \
+        && log "auto-rsynced $_RAW_WS/notes/ → $SYNC_DIR/notes/ (git-workspace fallback)"
+fi
 
 cd "$SYNC_DIR" || { log "Failed to cd $SYNC_DIR"; exit 1; }
 
