@@ -6,10 +6,21 @@ Usage:
   python3 read-quota.py              # human readable
   python3 read-quota.py --json       # machine readable
   python3 read-quota.py --gate       # exit 1 if exhausted
+  python3 read-quota.py --budget     # print budget tier + per-pass budget
+  python3 read-quota.py --budget-json  # machine-readable budget tier
+
+Budget tiers (--budget / --budget-json):
+  FULL   = >3% per pass  — subagents, heavy research, code all fair game
+  MEDIUM = 1-3% per pass — code fixes, monitoring, no subagents
+  LIGHT  = <1% per pass  — task processing + health checks only
+  MINIMAL = 0% remaining — process owner tasks + health + update log
+
+Budget per pass = remaining_5h_pct / (minutes_to_reset / 5)
 """
 
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -69,6 +80,18 @@ def main():
     if "--gate" in sys.argv:
         sys.exit(0 if result["available"] else 1)
 
+    if "--budget" in sys.argv or "--budget-json" in sys.argv:
+        budget = _compute_budget(result, reset_5h)
+        if "--budget-json" in sys.argv:
+            print(json.dumps(budget, indent=2))
+        else:
+            tier = budget["tier"]
+            bpp = budget["budget_per_pass"]
+            mins = budget["minutes_to_reset"]
+            rem = result["remaining_5h_pct"]
+            print(f"{tier} ({rem}% remaining, {bpp:.1f}%/pass, reset in {mins:.0f}min)")
+        return
+
     # Human readable
     print(f"Status: {status}")
     print(f"5h window: {int(util_5h * 100)}% used, {result['remaining_5h_pct']}% remaining")
@@ -77,6 +100,34 @@ def main():
     print(f"7d window: {int(util_7d * 100)}% used, {result['remaining_7d_pct']}% remaining")
     if reset_7d:
         print(f"  Resets: {datetime.fromtimestamp(int(reset_7d)).strftime('%H:%M %b %d')}")
+
+
+def _compute_budget(result: dict, reset_5h: str) -> dict:
+    """Compute budget tier and per-pass budget from quota state."""
+    remaining = result["remaining_5h_pct"]
+    if remaining == 0:
+        return {"tier": "MINIMAL", "budget_per_pass": 0.0, "minutes_to_reset": 0}
+
+    now = time.time()
+    reset_ts = int(reset_5h) if reset_5h else (now + 300 * 60)
+    minutes_to_reset = max(5, (reset_ts - now) / 60)
+    passes_to_reset = minutes_to_reset / 5
+    budget_per_pass = remaining / passes_to_reset
+
+    if budget_per_pass > 3:
+        tier = "FULL"
+    elif budget_per_pass >= 1:
+        tier = "MEDIUM"
+    else:
+        tier = "LIGHT"
+
+    return {
+        "tier": tier,
+        "budget_per_pass": round(budget_per_pass, 2),
+        "remaining_pct": remaining,
+        "minutes_to_reset": round(minutes_to_reset),
+        "passes_to_reset": round(passes_to_reset, 1),
+    }
 
 
 if __name__ == "__main__":
