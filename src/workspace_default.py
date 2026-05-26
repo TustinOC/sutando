@@ -166,6 +166,24 @@ def _migrate_inrepo_notes(workspace: Path) -> bool:
     inrepo_notes = repo_root / "notes"
     if not inrepo_notes.is_dir():
         return False
+    # #1149: if `notes/` is a symlink (e.g. the canonical memory-sync setup
+    # where `<repo>/notes` -> `~/.sutando/memory-sync/notes/`), skip migration
+    # entirely. The "in-repo notes" semantic doesn't apply — the files live
+    # in the link target, not in the repo. shutil.move on a symlinked dir's
+    # contents would MOVE the link target's files into the workspace, which
+    # is destructive (the symlink target loses the files). Caught the hard
+    # way 2026-05-25 when `tests/discord_config.test.py` set
+    # SUTANDO_WORKSPACE to a tmpdir; this migration moved 38 memory-sync
+    # files into the tmpdir; `tempfile.TemporaryDirectory` cleanup deleted
+    # them. 37 git-recovered; 1 uncommitted unrecoverable.
+    if inrepo_notes.is_symlink():
+        # Sentinel write still desired so subsequent calls short-circuit.
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            sentinel.touch()
+        except Exception:
+            pass
+        return False
     # Only operate on regular md/txt files at the top level of in-repo notes/.
     # Subdirectories (e.g. `notes/media/`, `notes/projects/`) and the historic
     # memory-sync symlink convention are left alone — they may have their own
