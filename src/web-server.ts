@@ -11,6 +11,7 @@
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
  *   GET  /voice-mode        — JSON { mode: 'active' | 'meeting' }.
+ *   GET  /presenter         — JSON { active, expiresAt } from state/presenter-mode.sentinel.
  *   GET  /mute-state        — Read/write the browser + tool agent-state tracks.
  *   GET  /toggle, /mute     — Broadcast SSE events (driven by menu-bar hotkeys).
  *   POST /note-viewing      — Write /tmp/sutando-note-viewing.json (consumed by the agent).
@@ -441,6 +442,11 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 	const TASK_DIR = join(WORKSPACE_DIR, 'tasks');
 	const STATE_DIR = join(WORKSPACE_DIR, 'state');
 	const SUBSCRIPTIONS_PATH = join(REPO_ROOT, 'skills/subscription-scanner/state/subscriptions.json');
+	// Presenter-mode sentinel is written by `scripts/presenter-mode.sh` to
+	// REPO/state (the bridges — discord/slack/telegram — all read from the
+	// same path). Mirror that convention here so the React badge reflects
+	// what the bridges actually act on.
+	const PRESENTER_SENTINEL = join(REPO_ROOT, 'state', 'presenter-mode.sentinel');
 
 	const sseClients: import('node:http').ServerResponse[] = [];
 	let _muteState = false;
@@ -597,6 +603,29 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 				state: eff,
 				label,
 			}));
+			return;
+		}
+
+		// Presenter-mode sentinel — written by scripts/presenter-mode.sh and
+		// read by Discord/Slack/Telegram bridges to silence proactive pings.
+		// React badge polls this for visual parity with the legacy UI. The
+		// sentinel body is an ISO-8601 expiry; we treat any unparseable or
+		// past timestamp as inactive (matches the bridges' is_active checks).
+		if (url.pathname === '/presenter') {
+			let active = false;
+			let expiresAt: string | null = null;
+			try {
+				const raw = readFileSync(PRESENTER_SENTINEL, 'utf-8').trim();
+				if (raw) {
+					const expiry = Date.parse(raw);
+					if (!Number.isNaN(expiry) && expiry > Date.now()) {
+						active = true;
+						expiresAt = raw;
+					}
+				}
+			} catch { /* sentinel missing → inactive */ }
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ active, expiresAt }));
 			return;
 		}
 

@@ -1,11 +1,14 @@
 import { useCallback, useMemo, useState } from 'react';
 import AvatarSvgDefault from '@/components/atoms/avatar-svg-default';
+import CapabilityCard from '@/components/atoms/capability-card';
 import QuickStartCard from '@/components/atoms/quick-start-card';
 import VisionPreview from '@/components/atoms/vision-preview';
 import ConversationComposer from '@/components/molecules/conversation-composer';
+import ConversationStatusStrip from '@/components/molecules/conversation-status-strip';
 import ConversationTopBar from '@/components/molecules/conversation-top-bar';
 import ConversationPanels from '@/components/organisms/conversation-panels';
 import ConversationStream from '@/components/organisms/conversation-stream';
+import DynamicContentPanel from '@/components/organisms/dynamic-content-panel';
 import ToastOverlay from '@/components/organisms/toast-overlay';
 import { APP_COPY } from '@/const-values/app-copy';
 import { pickQuickStarts } from '@/const-values/quick-starts';
@@ -112,6 +115,7 @@ export default function ConversationPage() {
 					))}
 				</div>
 			) : null}
+			<CapabilityCard />
 		</div>
 	);
 
@@ -130,9 +134,11 @@ export default function ConversationPage() {
 					onToggleWatch={vision.toggleWatch}
 				/>
 				<ConversationPanels />
+				<ConversationStatusStrip />
 			</div>
 
 			<main className="mx-auto flex w-full max-w-[920px] flex-1 flex-col px-6 pt-2">
+				<DynamicContentPanel />
 				<ConversationStream
 					errorMessage={voice.errorMessage ?? null}
 					emptyState={emptyState}
