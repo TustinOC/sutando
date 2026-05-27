@@ -60,19 +60,36 @@ if [ ! -d node_modules ]; then
   fi
 fi
 
-# Build the React client bundle if missing. voice-agent.ts serves client/dist/
-# at GET /; a fresh checkout without a build returns a 503 with the build hint.
-# Soft step — don't block startup if the build fails (user can rebuild later).
-if [ -d client ] && [ ! -f client/dist/index.html ]; then
-  if command -v pnpm > /dev/null 2>&1; then
-    if pnpm --filter @sutando/client build > "${LOGS_DIR:-/tmp}/client-build.log" 2>&1; then
-      echo "  ✓ React client built (client/dist/)"
-    else
-      echo "  ✗ React client build failed — see ${LOGS_DIR:-/tmp}/client-build.log"
-      echo "    The web UI at http://localhost:8080 will show a 503 until the build succeeds."
-    fi
+# Build the React client bundle when missing or stale. voice-agent.ts serves
+# client/dist/ at GET /; a fresh checkout without a build returns a 503 with
+# the build hint. Stale-detection: if any file under client/src/ (or the
+# workspace's package.json / vite.config.ts) is newer than client/dist/index.html,
+# rebuild. This makes `bash src/startup.sh` after editing the React app pick up
+# the changes without a separate `pnpm build:client` step.
+# Soft step — don't block startup if the build fails.
+if [ -d client ]; then
+  needs_build=0
+  if [ ! -f client/dist/index.html ]; then
+    needs_build=1
   else
-    echo "  ~ pnpm not installed — skipping client build. Install pnpm and run \`pnpm build:client\` for the web UI."
+    # `find -newer` returns matching paths; -print -quit short-circuits at the
+    # first hit. Any TS/TSX/CSS/HTML/asset change under client/src/ + the two
+    # build-config files counts as a reason to rebuild.
+    newer="$(find client/src client/package.json client/vite.config.ts \
+      -type f -newer client/dist/index.html -print -quit 2>/dev/null)"
+    [ -n "$newer" ] && needs_build=1
+  fi
+  if [ "$needs_build" = "1" ]; then
+    if command -v pnpm > /dev/null 2>&1; then
+      if pnpm --filter @sutando/client build > "${LOGS_DIR:-/tmp}/client-build.log" 2>&1; then
+        echo "  ✓ React client built (client/dist/)"
+      else
+        echo "  ✗ React client build failed — see ${LOGS_DIR:-/tmp}/client-build.log"
+        echo "    The web UI at http://localhost:8080 will serve a stale bundle (or 503) until the build succeeds."
+      fi
+    else
+      echo "  ~ pnpm not installed — skipping client build. Install pnpm and run \`pnpm build:client\` for the web UI."
+    fi
   fi
 fi
 

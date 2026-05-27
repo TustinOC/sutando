@@ -28,7 +28,7 @@ export const APP_COPY = {
 	questionAnswered: 'Answered:',
 	questionFailed: 'Answer failed —',
 
-	convGreeting: 'Hey, I’m Sutando2.',
+	convGreeting: 'Hey, I’m Sutando.',
 	convTagline: 'Your AI partner — voice or text, hands-free or hands-on.',
 	convStartVoice: 'Start voice',
 	convConnecting: 'Connecting…',
