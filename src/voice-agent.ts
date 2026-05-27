@@ -42,6 +42,7 @@ import { workTool, startResultWatcher, startContextDropWatcher, startNoteViewing
 import { recordSession, recordToolCall } from './conversation-store.js';
 import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-context.js';
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
+import { startWebServer } from './web-server.js';
 
 import { personalPath, sharedPersonalPath, memoryDirEnv } from './util_paths.js';
 
@@ -96,6 +97,12 @@ if (process.env.GEMINI_VOICE_API_KEY) {
 
 const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
+// HTTP server port for the web client (React bundle + SSE + tool state).
+// voice-agent.ts hosts the HTTP server in the same process as the WS server,
+// replacing the standalone web-client.ts launchd service. 0.0.0.0 keeps
+// remote-browser access (Tailscale / EC2) working without rebuilding.
+const CLIENT_PORT = Number(process.env.CLIENT_PORT) || 8080;
+const CLIENT_HOST = process.env.CLIENT_HOST || '0.0.0.0';
 // Per-user runtime state lives under $SUTANDO_WORKSPACE (default
 // ~/.sutando/workspace/), not the repo checkout. Pre-#762 voice-agent
 // resolved its tasks/results/state against the repo path via the legacy
@@ -1002,6 +1009,14 @@ async function main() {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	setSessionToolUpdater((tools) => (session as any).transport?.updateTools?.(tools), mainAgentTools);
 	startVisionControlServer();
+
+	// Boot the in-process HTTP server that serves the React bundle (client/dist),
+	// SSE, /mute-state, /vision/* proxy, and the legacy /chat + /paidsubscriptions
+	// pages. Replaces the standalone `npx tsx src/web-client.ts &` line that used
+	// to live in src/startup.sh. One Node process now owns both PORT (WS) and
+	// CLIENT_PORT (HTTP); a startup-time port conflict (stale launchd web-client,
+	// second voice-agent instance) fails fast via the EADDRINUSE branch below.
+	startWebServer({ port: CLIENT_PORT, host: CLIENT_HOST, wsPort: PORT });
 
 	// Bumped 5min into the future on every non-retryable transport close
 	// (set inside the classifier IIFE below). Read by the 30s health

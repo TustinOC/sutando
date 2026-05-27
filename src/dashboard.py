@@ -200,7 +200,7 @@ h2{font-size:12px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margi
 <div style="display:flex;align-items:center;gap:14px">
 <img id="stand-avatar" src="/avatar" style="width:56px;height:56px;border-radius:50%;border:2px solid #4ecca3;display:none;object-fit:cover">
 <div><h1 id="stand-name">Sutando</h1>
-<p class="sub" id="stand-sub">Operational view of use cases, health, activity, and quota</p></div></div>
+<p class="sub" id="stand-sub">Operational view of use cases, health, activity, and quota2</p></div></div>
 <script>
 fetch('/stand-identity').then(r=>r.json()).then(s=>{
   if(s.name){document.getElementById('stand-name').textContent='Sutando — '+s.name;

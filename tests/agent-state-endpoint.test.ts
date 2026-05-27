@@ -1,16 +1,22 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, ChildProcess } from 'node:child_process';
+import type { Server } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { setupTempWorkspace } from './_helpers/temp-workspace.js';
+import { startWebServer } from '../src/web-server.js';
 
 // Integration test for PR #418 / #419 agent-state plumbing.
-// Spawns web-client.ts on a random port, exercises /sse-status + /mute-state,
-// asserts the `state` field flows through the 4-value enum + rejects invalid
+// Boots src/web-server.ts in-process, exercises /sse-status + /mute-state,
+// asserts the `state` field flows through the 5-value enum + rejects invalid
 // values. Prevents regression of the avatar-animation chain that shipped
-// 2026-04-17 (web-client step 1 of 3, no test coverage at merge time).
+// 2026-04-17.
+//
+// Pre-migration this spawned `tsx src/web-client.ts` as a subprocess. The
+// React-client migration folded the HTTP server into voice-agent.ts via a
+// `startWebServer()` export, so the test now runs the same code path
+// in-process — faster boot + no subprocess lifecycle / pipe-buffer pitfalls.
 
 const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
 
@@ -22,21 +28,18 @@ const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
 // `expected listening, got working` on the agent-state assertions.
 const { workspace: TEMP_WORKSPACE, cleanup: cleanupTempWorkspace } =
 	setupTempWorkspace('agent-state');
-// Status files live under <workspace>/state/ — the web-client reads them via
+// Status files live under <workspace>/state/ — web-server reads them via
 // statusReadPath. The temp helper doesn't pre-create subdirs, so make state/.
 mkdirSync(join(TEMP_WORKSPACE, 'state'), { recursive: true });
 const CORE_STATUS_PATH = join(TEMP_WORKSPACE, 'state', 'core-status.json');
 
-// voice-state.json is read by web-client's readVoiceState() as the authoritative
-// voiceConnected source (browser POST cache is the fallback). Tests in the
-// voice-state describe block below write/remove this file to exercise both
-// branches. Lives in the same per-test-process TEMP_WORKSPACE as core-status.json
-// — no stash/restore needed, the temp dir didn't exist before this test and
-// gets rm'd on teardown. (Was REPO_ROOT pre-#853 fix; migrated to match the
-// post-#849 web-client reader semantics.)
+// voice-state.json is read by web-server's readVoiceState() as the authoritative
+// voiceConnected source (browser POST cache is the fallback). Lives in the
+// same per-test-process TEMP_WORKSPACE as core-status.json — no stash/restore
+// needed, the temp dir didn't exist before this test and gets rm'd on teardown.
 const VOICE_STATE_PATH = join(TEMP_WORKSPACE, 'state', 'voice-state.json');
 
-let child: ChildProcess;
+let server: Server;
 
 async function fetchJson(path: string): Promise<any> {
 	const res = await fetch(`http://localhost:${PORT}${path}`);
@@ -50,60 +53,29 @@ describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 		// and gets rm'd on teardown.
 		writeFileSync(CORE_STATUS_PATH, JSON.stringify({ status: 'idle', ts: Math.floor(Date.now() / 1000) }) + '\n');
 
-		// voice-state.json lives in TEMP_WORKSPACE post-#853 migration, so no
-		// prod-state leak is possible (the temp dir is fresh). Just ensure the
-		// file is absent before the spawned web-client reads it for the
+		// Ensure absent before the in-process server reads it for the
 		// "missing voice-state.json falls back to cache" subtest baseline.
 		try { unlinkSync(VOICE_STATE_PATH); } catch { /* already gone */ }
 
-		child = spawn(
-			'npx',
-			['tsx', 'src/web-client.ts'],
-			{
-				env: {
-					...process.env,
-					CLIENT_PORT: String(PORT),
-					PORT: '19900',
-					CLIENT_HOST: '127.0.0.1',
-					// Spawned web-client uses TEMP_WORKSPACE for core-status.json,
-					// so concurrent test processes can't race on the file. Same
-					// SUTANDO_WORKSPACE env override the rest of the test suite uses.
-					SUTANDO_WORKSPACE: TEMP_WORKSPACE,
-				},
-				// 'ignore' prevents the pipe buffer from filling in CI (stdout isn't drained),
-				// which would block the child and cause the /sse-status poll to time out.
-				stdio: 'ignore',
-			}
-		);
-		// Wait up to 20s for server to start listening. CI cold-start on `npx tsx`
-		// with fresh node_modules can take significantly longer than a dev machine.
-		const deadline = Date.now() + 20_000;
-		while (Date.now() < deadline) {
-			try {
-				const res = await fetch(`http://localhost:${PORT}/sse-status`);
-				if (res.ok) return;
-			} catch { /* not ready */ }
-			await delay(200);
-		}
-		throw new Error('web-client did not start within 20s');
+		// SUTANDO_WORKSPACE env is read by resolveWorkspace() inside
+		// startWebServer; set it BEFORE startWebServer() so the in-process
+		// reader picks up the temp dir.
+		process.env.SUTANDO_WORKSPACE = TEMP_WORKSPACE;
+
+		server = startWebServer({ port: PORT, host: '127.0.0.1', wsPort: 19900 });
+		await new Promise<void>((resolve, reject) => {
+			if (server.listening) return resolve();
+			server.once('listening', () => resolve());
+			server.once('error', reject);
+		});
 	});
 
 	after(async () => {
-		// Hang-safe teardown: SIGTERM, wait up to 2s, SIGKILL fallback. Without
-		// awaiting exit, the live child-process handle keeps node --test alive
-		// past the CI job timeout (observed: 9m43s hangs after #423 merged).
-		if (child && !child.killed) {
-			await new Promise<void>((resolve) => {
-				const hardKill = setTimeout(() => {
-					try { child.kill('SIGKILL'); } catch { /* already dead */ }
-					resolve();
-				}, 2_000);
-				child.once('exit', () => { clearTimeout(hardKill); resolve(); });
-				child.kill('SIGTERM');
-			});
-		}
+		await new Promise<void>((resolve) => {
+			if (!server || !server.listening) return resolve();
+			server.close(() => resolve());
+		});
 		// Remove the per-test-process workspace temp dir wholesale.
-		// This now also covers voice-state.json (in the same temp dir).
 		cleanupTempWorkspace();
 	});
 

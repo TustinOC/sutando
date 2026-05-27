@@ -46,17 +46,33 @@ bash "$REPO/src/init.sh" --preflight | tail -1
 
 # Install dependencies if needed
 if [ ! -d node_modules ]; then
-  if command -v npm > /dev/null 2>&1 && npm install 2>/dev/null; then
-    echo "  ✓ Dependencies installed (npm)"
-  elif command -v pnpm > /dev/null 2>&1 && pnpm install 2>/dev/null; then
+  if command -v pnpm > /dev/null 2>&1 && pnpm install 2>/dev/null; then
     echo "  ✓ Dependencies installed (pnpm)"
+  elif command -v npm > /dev/null 2>&1 && npm install 2>/dev/null; then
+    echo "  ✓ Dependencies installed (npm)"
   elif command -v yarn > /dev/null 2>&1 && yarn install 2>/dev/null; then
     echo "  ✓ Dependencies installed (yarn)"
   else
     echo "  ✗ Could not install dependencies."
     echo "    Try: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash"
-    echo "    Then: nvm install 24 && npm install"
+    echo "    Then: nvm install 24 && npm install -g pnpm && pnpm install"
     exit 1
+  fi
+fi
+
+# Build the React client bundle if missing. voice-agent.ts serves client/dist/
+# at GET /; a fresh checkout without a build returns a 503 with the build hint.
+# Soft step — don't block startup if the build fails (user can rebuild later).
+if [ -d client ] && [ ! -f client/dist/index.html ]; then
+  if command -v pnpm > /dev/null 2>&1; then
+    if pnpm --filter @sutando/client build > "${LOGS_DIR:-/tmp}/client-build.log" 2>&1; then
+      echo "  ✓ React client built (client/dist/)"
+    else
+      echo "  ✗ React client build failed — see ${LOGS_DIR:-/tmp}/client-build.log"
+      echo "    The web UI at http://localhost:8080 will show a 503 until the build succeeds."
+    fi
+  else
+    echo "  ~ pnpm not installed — skipping client build. Install pnpm and run \`pnpm build:client\` for the web UI."
   fi
 fi
 
@@ -209,25 +225,18 @@ else
   export ANTHROPIC_BASE_URL=http://localhost:7846
 fi
 
-# 1. Voice agent (Gemini Live on port 9900)
+# 1. Voice agent (Gemini Live on port 9900 + HTTP web server on port 8080)
+# Voice agent now hosts both the WebSocket (9900) and the HTTP server (8080)
+# in the same process — replaces the standalone web-client.ts launchd service.
 if ! lsof -i :9900 > /dev/null 2>&1; then
-  echo "  Starting voice agent (port 9900)..."
+  echo "  Starting voice agent (ports 9900 + 8080)..."
   npx tsx src/voice-agent.ts > "$LOGS_DIR/voice-agent.log" 2>&1 &
   echo "  ✓ voice agent"
 else
   echo "  ✓ voice agent (already running)"
 fi
 
-# 2. Web client (port 8080)
-if ! lsof -i :8080 > /dev/null 2>&1; then
-  echo "  Starting web client (port 8080)..."
-  npx tsx src/web-client.ts > "$LOGS_DIR/web-client.log" 2>&1 &
-  echo "  ✓ web client"
-else
-  echo "  ✓ web client (already running)"
-fi
-
-# 3. Dashboard (port 7844)
+# 2. Dashboard (port 7844)
 if ! lsof -i :7844 > /dev/null 2>&1; then
   echo "  Starting dashboard (port 7844)..."
   python3 src/dashboard.py > "$LOGS_DIR/dashboard.log" 2>&1 &
@@ -236,7 +245,7 @@ else
   echo "  ✓ dashboard (already running)"
 fi
 
-# 4. Agent API (port 7843)
+# 3. Agent API (port 7843)
 if ! lsof -i :7843 > /dev/null 2>&1; then
   echo "  Starting agent API (port 7843)..."
   python3 src/agent-api.py > "$LOGS_DIR/agent-api.log" 2>&1 &
@@ -245,7 +254,7 @@ else
   echo "  ✓ agent API (already running)"
 fi
 
-# 5. Screen capture server (port 7845)
+# 4. Screen capture server (port 7845)
 # Skip when Screen Recording perm is missing — otherwise we'd start a server
 # that returns black-PNG denials, which is exactly the stale-7845 state the
 # permcheck above warns about.
@@ -360,7 +369,7 @@ fi
 
 echo ""
 
-# 6. Telegram bridge (optional — needs TELEGRAM_BOT_TOKEN, skip with SKIP_TELEGRAM=1)
+# 5. Telegram bridge (optional — needs TELEGRAM_BOT_TOKEN, skip with SKIP_TELEGRAM=1)
 if [ "${SKIP_TELEGRAM:-}" = "1" ]; then
   echo "  ~ telegram bridge (skipped via SKIP_TELEGRAM)"
 elif [ -f "$HOME/.claude/channels/telegram/.env" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$HOME/.claude/channels/telegram/.env" 2>/dev/null; then
@@ -375,7 +384,7 @@ else
   echo "  ~ telegram bridge (no token — optional)"
 fi
 
-# 7. Discord bridge (optional — needs DISCORD_BOT_TOKEN + discord.py)
+# 6. Discord bridge (optional — needs DISCORD_BOT_TOKEN + discord.py)
 #
 # `python3` on $PATH is unpredictable across installs (miniconda, system,
 # Homebrew). The bridge itself self-rescues by re-execing under a known-good
@@ -430,7 +439,7 @@ else
   echo "  ~ slack bridge (no token — optional)"
 fi
 
-# 8. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
+# 7. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
 if [ "${SKIP_PHONE:-}" = "1" ]; then
   echo "  ~ conversation server (skipped via SKIP_PHONE)"
 elif grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
@@ -486,7 +495,7 @@ echo ""
 # Verify services actually started (wait a moment, then check ports)
 sleep 3
 echo "Verifying services..."
-VERIFY_PORTS="9900:voice-agent 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+VERIFY_PORTS="9900:voice-agent 8080:voice-agent-http 7844:dashboard 7843:agent-api 7845:screen-capture"
 if [ "${SKIP_PHONE:-}" != "1" ] && grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
   VERIFY_PORTS="$VERIFY_PORTS 3100:conversation-server"
 fi

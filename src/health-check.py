@@ -192,7 +192,6 @@ def fix_launchd(label: str) -> str:
     """Try to reload a launchd job."""
     plist_map = {
         "com.sutando.voice-agent": Path.home() / "Library/LaunchAgents/com.sutando.voice-agent.plist",
-        "com.sutando.web-client": Path.home() / "Library/LaunchAgents/com.sutando.web-client.plist",
     }
     plist = plist_map.get(label)
     if not plist or not plist.exists():
@@ -748,9 +747,13 @@ def run_all_checks() -> list[dict]:
     checks.append(check_voice_transport(voice_check))
     checks.append(check_bodhi_dist())
 
-    web_check = check_port(8080, "web-client")
+    # Port 8080 is now hosted in-process by voice-agent.ts (the standalone
+    # web-client.ts was retired with the React-client migration). Probe the
+    # HTTP listener separately so the health page still flags 8080 going
+    # silent without conflating it with the WS-only failure mode on 9900.
+    web_check = check_port(8080, "voice-agent-http")
     if web_check["status"] == "ok":
-        mark_stale_if_outdated(web_check, REPO_DIR / "src" / "web-client.ts", "web-client.ts")
+        mark_stale_if_outdated(web_check, REPO_DIR / "src" / "web-server.ts", "web-server.ts")
     checks.append(web_check)
 
     # Optional services (downgrade missing to warning, not failure)
