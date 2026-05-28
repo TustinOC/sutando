@@ -163,6 +163,10 @@ function getArg(name: string): string | undefined {
 }
 const GUILD_ID = getArg('guild');
 const CHANNEL_ID = getArg('channel');
+// Originating text channel + user — used to route Layer-1 refusals back to
+// the channel where the bot was invited, not the owner's DMs (#1120).
+const REPLY_CHANNEL_ID = getArg('reply-channel');
+const REPLY_USER_ID = getArg('reply-user');
 
 // Owner-mode (issue #1016) — resolved from the workspace config
 // ($SUTANDO_WORKSPACE/config/discord-voice.json), NOT an env var and NOT a
@@ -1177,22 +1181,32 @@ async function start(): Promise<void> {
 		}
 		if (presentPeers.length > 0) {
 			console.error(`${ts()} [Setup] #1089 refusing to join: sutando peer(s) already present: ${presentPeers.join(', ')}`);
-			// Surface the refusal to the operator — without this they just see
-			// "nothing happens" when inviting a second bot to a channel that
-			// already has one. Drop a proactive result; the discord-bridge
-			// polls results/ and DMs proactive-*.txt to the owner. Best-effort:
-			// if the write fails the process still exits cleanly and
-			// Sutando.app's checkWatcher will retry once the peer leaves.
-			try {
-				const proactivePath = join(WORKSPACE_DIR, 'results', `proactive-${Date.now()}.txt`);
-				const channelName = (channel as any).name ?? CHANNEL_ID;
-				writeFileSync(
-					proactivePath,
-					`Skipping voice join in #${channelName} — peer already present: ${presentPeers.join(', ')}. ` +
-					`Single-bot enforcement (#1089); reinvite once they leave.\n`,
-				);
-			} catch (e) {
-				console.error(`${ts()} [Setup] #1089 couldn't surface refusal to operator:`, e);
+			const channelName = (channel as any).name ?? CHANNEL_ID;
+			const refusalText =
+				`Skipping voice join in #${channelName} — peer already present: ${presentPeers.join(', ')}. ` +
+				`Single-bot enforcement (#1089); reinvite once they leave.`;
+			// Route refusal to the originating text channel when available (#1120),
+			// falling back to proactive-*.txt → owner-DM if not supplied.
+			let replied = false;
+			if (REPLY_CHANNEL_ID) {
+				try {
+					const replyCh = await client.channels.fetch(REPLY_CHANNEL_ID);
+					if (replyCh && 'send' in replyCh) {
+						const mention = REPLY_USER_ID ? `<@${REPLY_USER_ID}> ` : '';
+						await (replyCh as any).send(`${mention}${refusalText}`);
+						replied = true;
+					}
+				} catch (e) {
+					console.error(`${ts()} [Setup] #1089 channel-reply failed, falling back:`, e);
+				}
+			}
+			if (!replied) {
+				try {
+					const proactivePath = join(WORKSPACE_DIR, 'results', `proactive-${Date.now()}.txt`);
+					writeFileSync(proactivePath, `${refusalText}\n`);
+				} catch (e) {
+					console.error(`${ts()} [Setup] #1089 couldn't surface refusal to operator:`, e);
+				}
 			}
 			process.exit(0); // clean exit — operator (Sutando.app checkWatcher) will retry later when peer leaves
 		}
