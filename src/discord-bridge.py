@@ -54,7 +54,7 @@ except ModuleNotFoundError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 import discord_config  # noqa: E402  — Sutando workspace-local discord config (#1147)
-from util_paths import shared_personal_path  # noqa: E402
+from util_paths import shared_personal_path, claude_home_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
 REPO = resolve_workspace()
 
@@ -92,7 +92,7 @@ except Exception:  # pragma: no cover
 # Load token — env var takes precedence (allows test injection without a real .env file)
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 if not TOKEN:
-    channels_env = Path.home() / ".claude" / "channels" / "discord" / ".env"
+    channels_env = Path(claude_home_path("channels", "discord", ".env"))
     if channels_env.exists():
         for line in channels_env.read_text().splitlines():
             if line.startswith("DISCORD_BOT_TOKEN="):
@@ -501,7 +501,7 @@ seen_message_ids = set()  # Discord message IDs already processed
 
 
 # Load access config
-ACCESS_FILE = Path.home() / ".claude" / "channels" / "discord" / "access.json"
+ACCESS_FILE = Path(claude_home_path("channels", "discord", "access.json"))
 def load_allowed():
     try:
         data = json.loads(ACCESS_FILE.read_text())

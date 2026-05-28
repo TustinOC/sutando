@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
+from util_paths import claude_home_path  # noqa: E402
 
 try:
     from slack_bolt import App
@@ -167,7 +168,7 @@ def presenter_mode_active() -> bool:
         return False
 
 
-ACCESS_FILE = Path.home() / ".claude" / "channels" / "slack" / "access.json"
+ACCESS_FILE = Path(claude_home_path("channels", "slack", "access.json"))
 
 
 def load_allowed():

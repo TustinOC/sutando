@@ -34,6 +34,7 @@ from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 
 from workspace_default import resolve_workspace  # noqa: E402
+from util_paths import claude_home_path  # noqa: E402
 REPO = resolve_workspace()
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
@@ -83,7 +84,7 @@ except ImportError:
 # `setdefault` previously let a stale TELEGRAM_BOT_TOKEN from a prior shell
 # session silently override the freshly-rotated value, same bug class as
 # skills/x-twitter/x-post.py (see PR #416 commit message for full context).
-channels_env = Path.home() / ".claude" / "channels" / "telegram" / ".env"
+channels_env = Path(claude_home_path("channels", "telegram", ".env"))
 if channels_env.exists():
     for line in channels_env.read_text().splitlines():
         if "=" in line and not line.startswith("#"):
@@ -210,7 +211,7 @@ def presenter_mode_active():
         return False
 
 # Load access config
-ACCESS_FILE = Path.home() / ".claude" / "channels" / "telegram" / "access.json"
+ACCESS_FILE = Path(claude_home_path("channels", "telegram", "access.json"))
 def load_allowed():
     """Return the set of allowed sender IDs, OR None if access.json doesn't exist.
 

@@ -29,7 +29,7 @@ from typing import Optional
 
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import shared_personal_path  # noqa: E402
+from util_paths import shared_personal_path, claude_home_path  # noqa: E402
 from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 
 # Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
@@ -46,7 +46,7 @@ def _default_memory_dir() -> str:
     """Auto-detect Claude Code memory dir from repo path."""
     repo = Path(__file__).parent.parent.resolve()
     slug = str(repo).replace("/", "-")
-    return str(Path.home() / ".claude" / "projects" / slug / "memory")
+    return str(claude_home_path("projects", slug, "memory"))
 
 MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
 
@@ -848,7 +848,7 @@ def run_all_checks() -> list[dict]:
 
     # Messaging bridges (optional — only check if configured and not skipped)
     skip_telegram = (env_path.exists() and "SKIP_TELEGRAM=1" in env_path.read_text()) or os.environ.get("SKIP_TELEGRAM") == "1"
-    channels_dir = Path.home() / ".claude" / "channels"
+    channels_dir = Path(claude_home_path("channels"))
     for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge")]:
         channel_name = name.replace("-bridge", "")
         if channel_name == "telegram" and skip_telegram:
