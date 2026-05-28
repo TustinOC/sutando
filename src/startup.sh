@@ -182,6 +182,17 @@ mkdir -p tasks results data
 # notes/post-mortem-dm-flood-2026-04-15.md.
 python3 "$REPO/src/archive-stale-results.py" || true
 
+# Workspace migrations — run pending NNNN-*.{sh,py} scripts from migrations/.
+# Single writer by construction (startup is single-process at this point).
+# Non-zero exit aborts startup — a failed migration means the workspace state
+# is unknown and running services on top of it is unsound. See RFC #906 §2.8.
+if python3 "$REPO/src/run_migrations.py" --workspace "$WORKSPACE"; then
+  true  # silent on no-op (no pending migrations)
+else
+  echo "  ✗ Migration failed — startup aborted. Fix migrations/ and re-run."
+  exit 1
+fi
+
 # Core heartbeat — per-host alive signal under state/cores/<hostname>.alive.
 # Foundation for multi-core / cross-machine "who's running?" checks. Single
 # instance per host; gracefully cleans up its .alive file on SIGTERM.
