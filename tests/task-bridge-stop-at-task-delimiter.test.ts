@@ -17,7 +17,7 @@ const TMP = mkdtempSync(join(tmpdir(), 'sutando-isvoice-test-'));
 process.env.SUTANDO_WORKSPACE = TMP;
 mkdirSync(join(TMP, 'tasks'), { recursive: true });
 
-const { _isVoiceTask } = await import('../src/task-bridge.js');
+const { _isVoiceTask, _taskSource } = await import('../src/task-bridge.js');
 
 // Closes the residual half of PR #982 that @qingyun-wu flagged on the
 // post-merge review:
@@ -106,5 +106,77 @@ describe('_isVoiceTask honors task: delimiter', () => {
 			'task: hello',
 		].join('\n'));
 		assert.equal(_isVoiceTask('task-defensive'), true);
+	});
+});
+
+describe('_taskSource reads source: header from task file', () => {
+	it('returns "context-drop" for a context-drop task', () => {
+		writeTask('task-ctxdrop', [
+			'id: task-ctxdrop',
+			'timestamp: 2026-05-28T06:00:00Z',
+			'source: context-drop',
+			'task: User dropped context via hotkey.',
+		].join('\n'));
+		assert.equal(_taskSource('task-ctxdrop'), 'context-drop');
+	});
+
+	it('returns "voice" for a voice-originated task', () => {
+		writeTask('task-src-voice', [
+			'id: task-src-voice',
+			'source: voice',
+			'task: say hello',
+		].join('\n'));
+		assert.equal(_taskSource('task-src-voice'), 'voice');
+	});
+
+	it('returns "chat" for a chat-path task', () => {
+		writeTask('task-chat-9999', [
+			'id: task-chat-9999',
+			'source: chat',
+			'task: research X',
+		].join('\n'));
+		assert.equal(_taskSource('task-chat-9999'), 'chat');
+	});
+
+	it('returns null when no source: header is present', () => {
+		writeTask('task-nosrc', [
+			'id: task-nosrc',
+			'task: anonymous task',
+		].join('\n'));
+		assert.equal(_taskSource('task-nosrc'), null);
+	});
+
+	it('returns null when the task file does not exist', () => {
+		assert.equal(_taskSource('task-nonexistent-src'), null);
+	});
+
+	it('stops at task: delimiter — ignores source: lines in the body', () => {
+		writeTask('task-body-inject', [
+			'id: task-body-inject',
+			'source: api',
+			'task: do something',
+			'source: context-drop',  // in body, after task: — must be ignored
+		].join('\n'));
+		assert.equal(_taskSource('task-body-inject'), 'api');
+	});
+
+	it('finds source in tasks/processed/ subdir', () => {
+		mkdirSync(join(TMP, 'tasks', 'processed'), { recursive: true });
+		writeFileSync(join(TMP, 'tasks', 'processed', 'task-proc-src.txt'), [
+			'id: task-proc-src',
+			'source: discord',
+			'task: reply',
+		].join('\n'));
+		assert.equal(_taskSource('task-proc-src'), 'discord');
+	});
+
+	it('finds source in tasks/archive/ subdir', () => {
+		mkdirSync(join(TMP, 'tasks', 'archive'), { recursive: true });
+		writeFileSync(join(TMP, 'tasks', 'archive', 'task-arch-src.txt'), [
+			'id: task-arch-src',
+			'source: telegram',
+			'task: forward',
+		].join('\n'));
+		assert.equal(_taskSource('task-arch-src'), 'telegram');
 	});
 });
