@@ -431,7 +431,7 @@ class TestInRepoBuildLogMigration(unittest.TestCase):
 
 class TestStatusPathHelpers(unittest.TestCase):
     """Tests for `status_path` (write location) and `status_read_path`
-    (read location with one-release legacy-root fallback)."""
+    (read location — always `state/<name>` after legacy fallback was removed)."""
 
     def setUp(self):
         self.workspace = Path(tempfile.mkdtemp(prefix="ws-status-"))
@@ -443,20 +443,21 @@ class TestStatusPathHelpers(unittest.TestCase):
         p = status_path("core-status.json", self.workspace)
         self.assertEqual(p, self.workspace / "state" / "core-status.json")
 
-    def test_read_path_prefers_state(self):
+    def test_read_path_returns_state_when_file_exists(self):
         (self.workspace / "state").mkdir(parents=True)
         (self.workspace / "state" / "core-status.json").write_text("{}")
-        (self.workspace / "core-status.json").write_text("{}")  # legacy too
         self.assertEqual(
             status_read_path("core-status.json", self.workspace),
             self.workspace / "state" / "core-status.json",
         )
 
-    def test_read_path_falls_back_to_legacy_root(self):
+    def test_read_path_ignores_legacy_root_file(self):
+        # Legacy fallback removed: state/ path is always returned even when
+        # a bare workspace-root file exists. _migrate_root_status handles moves.
         (self.workspace / "core-status.json").write_text("{}")
         self.assertEqual(
             status_read_path("core-status.json", self.workspace),
-            self.workspace / "core-status.json",
+            self.workspace / "state" / "core-status.json",
         )
 
     def test_read_path_returns_state_path_when_neither_exists(self):
