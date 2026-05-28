@@ -442,11 +442,7 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 	const TASK_DIR = join(WORKSPACE_DIR, 'tasks');
 	const STATE_DIR = join(WORKSPACE_DIR, 'state');
 	const SUBSCRIPTIONS_PATH = join(REPO_ROOT, 'skills/subscription-scanner/state/subscriptions.json');
-	// Presenter-mode sentinel is written by `scripts/presenter-mode.sh` to
-	// REPO/state (the bridges — discord/slack/telegram — all read from the
-	// same path). Mirror that convention here so the React badge reflects
-	// what the bridges actually act on.
-	const PRESENTER_SENTINEL = join(REPO_ROOT, 'state', 'presenter-mode.sentinel');
+	const PRESENTER_SENTINEL = join(WORKSPACE_DIR, 'state', 'presenter-mode.sentinel');
 
 	const sseClients: import('node:http').ServerResponse[] = [];
 	let _muteState = false;
