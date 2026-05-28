@@ -96,10 +96,14 @@ def main() -> int:
                     "(fail-closed access gate)", write_block)
 
     # 4. ACCESS_FILE path is ~/.claude/channels/slack/
-    if not re.search(
-        r"ACCESS_FILE\s*=\s*Path\.home\(\)\s*/\s*['\"]\.claude['\"]\s*/\s*['\"]channels['\"]\s*/\s*['\"]slack['\"]\s*/\s*['\"]access\.json['\"]",
-        src,
-    ):
+    # Accept both the legacy Path.home()/".claude"/... form and the canonical
+    # claude_home_path("channels","slack","access.json") form introduced in #1325.
+    legacy_pattern = (
+        r"ACCESS_FILE\s*=\s*Path\.home\(\)\s*/\s*['\"]\.claude['\"]\s*/\s*"
+        r"['\"]channels['\"]\s*/\s*['\"]slack['\"]\s*/\s*['\"]access\.json['\"]"
+    )
+    canonical_pattern = r"ACCESS_FILE\s*=\s*Path\(\s*claude_home_path\(['\"]channels['\"]"
+    if not (re.search(legacy_pattern, src) or re.search(canonical_pattern, src)):
         return fail("ACCESS_FILE must be ~/.claude/channels/slack/access.json "
                     "for parity with telegram + discord bridges")
 
