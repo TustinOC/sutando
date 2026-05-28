@@ -469,6 +469,14 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			DISCORD_VOICE_GOOGLE_SEARCH
 				? 'NEVER fabricate specific details. If you don\'t know it, use your built-in Web search to look it up — it\'s faster than delegating, and the answer stays in the conversation. If your built-in search returns nothing useful, OR the question needs deeper-than-one-lookup research (multi-step, multiple sources, file reading), call the work tool — it routes to the core agent which can do extensive research.'
 				: 'NEVER fabricate specific details. If you don\'t know it, use the work tool to look it up.',
+			// Action-grounding: prevent the model from narrating tool calls it
+			// didn't make. Observed on 2026-05-25 (Susan): voice said "Opening
+			// the Sutando repository" with no tool_call in sqlite. Guard forces
+			// the action-before-announcement contract. Per issue #1102.
+			'ACTION GROUNDING: If you say you are doing something (opening, searching, sending, checking), you MUST call the corresponding tool first. Never announce an action you have not actually taken.',
+			// Capability inventory: prevent feature invention (voice hallucinated
+			// "co-presentation mode" for "za warudo", which has no such meaning).
+			'CAPABILITY GROUNDING: When asked what you can do, list ONLY capabilities described in this prompt. If asked about a feature you don\'t recognise, say "I\'m not sure about that one" rather than guessing.',
 			repoUrl ? `\n## Known info\nSutando GitHub repo: ${repoUrl}` : '',
 		].filter(Boolean).join('\n');
 	} else {
