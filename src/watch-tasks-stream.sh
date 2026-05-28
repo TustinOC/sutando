@@ -67,13 +67,15 @@ echo "$$" > "$PID_FILE"
 # Cleanup on any exit path (SIGINT, SIGTERM, normal exit) so the file
 # doesn't outlive the process on a clean shutdown. Dirty exits (SIGKILL,
 # panic) skip the trap — the Stop hook + startup reaper cover those.
+# Note: the trap is updated below once FSWATCH_PID and FIFO are known.
 trap 'rm -f "$PID_FILE"' EXIT
 
 # Initial sweep — surface any pre-existing tasks that arrived during a
-# restart gap.
+# restart gap. Use printf (not echo) so a dead consumer triggers EPIPE
+# immediately rather than buffering silently (Mode A fix, #1088).
 shopt -s nullglob
 for f in "$TASKS_DIR"/*.txt; do
-  echo "TASK_FILE: $(basename "$f")"
+  printf 'TASK_FILE: %s\n' "$(basename "$f")" || exit 0
 done
 shopt -u nullglob
 
@@ -97,18 +99,35 @@ shopt -u nullglob
 #    rename — including the source path AFTER the file has moved out.
 #    `[ -f "$path" ]` filters those rename-OUT-of-watched-dir events.
 #    Caught 2026-05-03 #1 (PR #572).
+#
+# Mode A fix (#1088): `printf ... || exit 0` makes EPIPE from a dead reader
+# propagate immediately (pipe buffer fills to ~64KB on macOS before a plain
+# `echo` would fail — at typical DM traffic that's days, not seconds).
+#
+# Mode B fix (#1088): fswatch runs as a background job writing to a temp FIFO
+# so we have its PID. The EXIT/INT/TERM trap kills it, preventing the
+# PPID=1 orphan that appeared in the 2026-05-23 4h event-loss incident.
+FIFO="$(mktemp -t watch-fifo-XXXXXX)"
+rm -f "$FIFO"
+mkfifo "$FIFO" || { rm -f "$PID_FILE"; exit 1; }
+
 fswatch \
   -l 0.5 \
   --event Created \
   --event Renamed \
-  "$TASKS_DIR" 2>/dev/null \
-| while IFS= read -r path; do
+  "$TASKS_DIR" 2>/dev/null > "$FIFO" &
+FSWATCH_PID=$!
+
+# Update trap now that we have both FSWATCH_PID and FIFO.
+trap 'kill "$FSWATCH_PID" 2>/dev/null; rm -f "$FIFO" "$PID_FILE"' EXIT INT TERM
+
+while IFS= read -r path; do
   case "$path" in
     *.txt)
       parent="$(dirname "$path")"
       if [ "$parent" = "$TASKS_DIR_ABS" ] && [ -f "$path" ]; then
-        echo "TASK_FILE: $(basename "$path")"
+        printf 'TASK_FILE: %s\n' "$(basename "$path")" || exit 0
       fi
       ;;
   esac
-done
+done < "$FIFO"
