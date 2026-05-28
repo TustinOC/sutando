@@ -56,6 +56,7 @@ from workspace_default import resolve_workspace  # noqa: E402
 import discord_config  # noqa: E402  — Sutando workspace-local discord config (#1147)
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
+from single_instance import acquire  # noqa: E402
 REPO = resolve_workspace()
 
 # discord-voice "magic word" join trigger (issue: za-warudo summon). The
@@ -3770,4 +3771,5 @@ if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "send":
         _send_via_rest(sys.argv[2], " ".join(sys.argv[3:]))
     else:
+        acquire("discord-bridge")  # exits cleanly if another instance is running (#1257)
         client.run(TOKEN, log_handler=None)
