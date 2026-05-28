@@ -10,6 +10,7 @@ Usage:
 
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,45 @@ else:
     sys.exit(1)
 
 
+def _burn_info(util_frac: float, reset_ts_str: str, window_seconds: int) -> dict:
+    """Compute burn rate, budget-per-pass, and time-until-exhausted from utilization data."""
+    if not reset_ts_str:
+        return {}
+    reset_ts = int(reset_ts_str)
+    now = time.time()
+    mins_until_reset = max(0.0, (reset_ts - now) / 60)
+    time_elapsed = window_seconds - (reset_ts - now)
+    util_pct = util_frac * 100
+    remaining_pct = (1 - util_frac) * 100
+    info: dict = {"mins_until_reset": round(mins_until_reset)}
+    if time_elapsed > 60:
+        burn_pct_per_hr = util_pct / (time_elapsed / 3600)
+        info["burn_pct_per_hr"] = round(burn_pct_per_hr, 1)
+        info["hrs_until_exhausted"] = (
+            round(remaining_pct / burn_pct_per_hr, 1) if burn_pct_per_hr > 0 else None
+        )
+    else:
+        info["burn_pct_per_hr"] = None
+        info["hrs_until_exhausted"] = None
+    if mins_until_reset > 0:
+        info["budget_pct_per_pass"] = round(remaining_pct / (mins_until_reset / 5), 1)
+    else:
+        info["budget_pct_per_pass"] = 0.0
+    return info
+
+
+def _budget_tier(budget: float | None) -> str:
+    if budget is None:
+        return ""
+    if budget >= 3.0:
+        return "full"
+    if budget >= 1.0:
+        return "medium"
+    if budget >= 0.25:
+        return "light"
+    return "minimal"
+
+
 def main():
     data = json.loads(QUOTA_FILE.read_text())
     headers = data.get("headers", {})
@@ -47,6 +87,8 @@ def main():
     util_7d = float(headers.get("anthropic-ratelimit-unified-7d-utilization", 0))
     reset_5h = headers.get("anthropic-ratelimit-unified-5h-reset", "")
     reset_7d = headers.get("anthropic-ratelimit-unified-7d-reset", "")
+
+    burn = _burn_info(util_5h, reset_5h, 18000)
 
     result = {
         "status": status,
@@ -62,6 +104,14 @@ def main():
     if reset_7d:
         result["reset_7d"] = datetime.fromtimestamp(int(reset_7d)).isoformat()
 
+    result.update({
+        "mins_until_reset_5h": burn.get("mins_until_reset"),
+        "burn_pct_per_hr_5h": burn.get("burn_pct_per_hr"),
+        "hrs_until_exhausted_5h": burn.get("hrs_until_exhausted"),
+        "budget_pct_per_pass": burn.get("budget_pct_per_pass"),
+        "budget_tier": _budget_tier(burn.get("budget_pct_per_pass")),
+    })
+
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))
         return
@@ -73,7 +123,13 @@ def main():
     print(f"Status: {status}")
     print(f"5h window: {int(util_5h * 100)}% used, {result['remaining_5h_pct']}% remaining")
     if reset_5h:
-        print(f"  Resets: {datetime.fromtimestamp(int(reset_5h)).strftime('%H:%M %b %d')}")
+        mins = burn.get("mins_until_reset", 0)
+        print(f"  Resets: {datetime.fromtimestamp(int(reset_5h)).strftime('%H:%M %b %d')} (in {mins} min)")
+    budget = burn.get("budget_pct_per_pass")
+    burn_hr = burn.get("burn_pct_per_hr")
+    if budget is not None and burn_hr is not None:
+        tier = _budget_tier(budget)
+        print(f"  Budget: {budget}%/pass · {burn_hr}%/hr burn · {tier}")
     print(f"7d window: {int(util_7d * 100)}% used, {result['remaining_7d_pct']}% remaining")
     if reset_7d:
         print(f"  Resets: {datetime.fromtimestamp(int(reset_7d)).strftime('%H:%M %b %d')}")
