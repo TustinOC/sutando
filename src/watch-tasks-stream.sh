@@ -64,22 +64,41 @@ fi
 mkdir -p "$STATE_DIR"
 PID_FILE="$STATE_DIR/watch-tasks-stream.pid"
 echo "$$" > "$PID_FILE"
-# Cleanup on any exit path (SIGINT, SIGTERM, normal exit) so the file
-# doesn't outlive the process on a clean shutdown. Dirty exits (SIGKILL,
-# panic) skip the trap — the Stop hook + startup reaper cover those.
-trap 'rm -f "$PID_FILE"' EXIT
+
+# FIFO for decoupled fswatch → reader communication (fixes Mode B orphan).
+# Running fswatch in a background job and piping via a FIFO means:
+# 1. We have fswatch's PID so the EXIT trap can kill it explicitly.
+# 2. When this script exits for any reason (including SIGKILL → reader end
+#    of FIFO closes), fswatch's next write to the FIFO receives SIGPIPE and
+#    it exits naturally — no PPID=1 orphan.
+FIFO="$STATE_DIR/watch-tasks-stream.fifo"
+rm -f "$FIFO"
+mkfifo "$FIFO"
+FSWATCH_PID=""
+
+# Cleanup on any exit path (SIGINT, SIGTERM, normal exit). Also kills fswatch
+# by PID (belt) — SIGPIPE from the closed FIFO is the suspenders.
+# Dirty exits (SIGKILL) skip the trap but SIGPIPE handles cleanup naturally.
+trap 'rm -f "$PID_FILE" "$FIFO"; [ -n "${FSWATCH_PID:-}" ] && kill "$FSWATCH_PID" 2>/dev/null' EXIT INT TERM
 
 # Initial sweep — surface any pre-existing tasks that arrived during a
-# restart gap.
+# restart gap. `printf ... || exit 0` exits immediately on EPIPE (dead reader,
+# Mode A fix) rather than buffering ~100 events into the kernel pipe before
+# noticing. Caught 2026-05-23: 4h silent gap because echo writes were
+# buffered into a dead Monitor pipe.
 shopt -s nullglob
 for f in "$TASKS_DIR"/*.txt; do
-  echo "TASK_FILE: $(basename "$f")"
+  printf 'TASK_FILE: %s\n' "$(basename "$f")" || exit 0
 done
 shopt -u nullglob
 
 # Stream subsequent events. -l 0.5 = 500ms latency batch (fswatch coalesces
 # burst events). --event Created --event Renamed catches new file
 # appearance whether it lands as a fresh write or a rename-into-place.
+#
+# fswatch writes to the FIFO as a background job; we read from the FIFO in
+# the while loop. FIFO read-end open blocks until fswatch opens the write
+# end, so no events are lost during startup.
 #
 # TWO filters before emit:
 #
@@ -102,13 +121,16 @@ fswatch \
   --event Created \
   --event Renamed \
   "$TASKS_DIR" 2>/dev/null \
-| while IFS= read -r path; do
+> "$FIFO" &
+FSWATCH_PID=$!
+
+while IFS= read -r path; do
   case "$path" in
     *.txt)
       parent="$(dirname "$path")"
       if [ "$parent" = "$TASKS_DIR_ABS" ] && [ -f "$path" ]; then
-        echo "TASK_FILE: $(basename "$path")"
+        printf 'TASK_FILE: %s\n' "$(basename "$path")" || exit 0
       fi
       ;;
   esac
-done
+done < "$FIFO"
