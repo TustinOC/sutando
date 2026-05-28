@@ -1,8 +1,8 @@
 # `@sutando/client`
 
-Sutando's React frontend. Hosts four pages — **conversation**, **core-cli**, **dashboard**, **settings** — that map 1:1 to the panes in `src/Sutando/UnifiedMainWindow.swift`.
+Sutando's React frontend. Hosts the **conversation** page — the chat shell that fronts the voice agent, task stream, and dynamic content panels. Other Sutando surfaces (core-cli, dashboard, settings) live elsewhere: the Python dashboard at `:7844`, the macOS panes in `src/Sutando/UnifiedMainWindow.swift`.
 
-`GET /` serves this React bundle. The original inline HTML survives at `GET /legacy` as a one-release escape hatch (still served via `src/web-server.ts` + `src/web-client-html.ts`); both will be removed in PR-C step 6 once the new tree has burned in. Bookmarks pointing at `/v2` continue to work — it's an alias for `/`.
+`GET /` serves this React bundle. `GET /v2[/*]` is an alias kept for old bookmarks. The legacy inline-HTML client (`/legacy`, `src/web-client-html.ts`) was removed once the React tree burned in.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ Follows `CLAUDE.md § Frontend Conventions`:
 
 ## Routing
 
-No `react-router` yet. The active page is the `?page=` query param, read by `useCurrentRoute()`. Valid ids: `conversation`, `core-cli`, `dashboard`, `settings`. The Sutando macOS app's `UnifiedMainWindow.swift` can load each pane by setting `?page=<id>` on the bundle URL.
+Only one route today (`conversation`), so there's no `react-router`. `src/lib/config.ts` parses `?page=` into `initialRouteId` (default `conversation`) so the shell is ready when additional panes land; until then `App.tsx` mounts `ConversationPage` unconditionally.
 
 ## Server-agnostic config
 
@@ -45,7 +45,7 @@ pnpm install            # only on the first run; runs at repo root, not in clien
 pnpm --filter @sutando/client build  # writes client/dist/
 ```
 
-`src/web-server.ts` serves `client/dist/index.html` + assets at `/` and `/v2`. When the bundle isn't built yet, both routes fall back to the legacy inline HTML so a fresh checkout still boots.
+`src/web-server.ts` serves `client/dist/index.html` + hashed assets at `/` and `/v2`. When the bundle isn't built yet, both routes return a `503` with a one-line `pnpm install && pnpm build:client` hint.
 
 ## Dev workflow
 
