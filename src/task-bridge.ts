@@ -166,6 +166,40 @@ export function _isVoiceTask(taskId: string): boolean {
 	return false;
 }
 
+/** True iff taskId's task file has `source: context-drop` or `channel_id: local-hotkey`,
+ * OR has no `source:` line at all (legacy Swift writeTask() path, issue #969). */
+export function _isContextDropTask(taskId: string): boolean {
+	const candidates: string[] = [
+		join(TASK_DIR, `${taskId}.txt`),
+		join(TASK_DIR, 'processed', `${taskId}.txt`),
+		join(TASK_DIR, 'archive', `${taskId}.txt`),
+	];
+	const archiveRoot = join(TASK_DIR, 'archive');
+	if (existsSync(archiveRoot)) {
+		try {
+			for (const entry of readdirSync(archiveRoot)) {
+				if (!/^\d{4}-\d{2}$/.test(entry)) continue;
+				candidates.push(join(archiveRoot, entry, `${taskId}.txt`));
+			}
+		} catch {}
+	}
+	for (const p of candidates) {
+		if (!existsSync(p)) continue;
+		try {
+			const body = readFileSync(p, 'utf-8');
+			const headerLines: string[] = [];
+			for (const l of body.split('\n')) {
+				if (l.startsWith('task:')) break;
+				headerLines.push(l);
+			}
+			if (headerLines.some(l => l.startsWith('source: context-drop') || l.startsWith('channel_id: local-hotkey'))) return true;
+			// Legacy Swift path: no source field at all → treat as hotkey drop
+			if (!headerLines.some(l => l.startsWith('source:'))) return true;
+		} catch {}
+	}
+	return false;
+}
+
 /** Belt-suspenders guard for the result-watcher's unconditional fallthrough
  * (issue #1035, follow-up to PR #1033). Returns true iff the filename is one
  * that task-bridge legitimately delivers via `onResult()`. Rejects everything
@@ -716,6 +750,19 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 						_deliveredResults.add(file);
 						_pendingTasks.delete(taskId);
 						console.log(`${ts()} [TaskBridge] Chat task archived (no client): ${taskId}`);
+						setTimeout(() => {
+							archiveFile(path, 'results', taskId);
+							const taskFile = join(TASK_DIR, `${taskId}.txt`);
+							if (existsSync(taskFile)) archiveFile(taskFile, 'tasks', taskId);
+						}, 10_000);
+					}
+					// Context-drop tasks (hotkey / source: context-drop) have no bridge
+					// consumer — archive them directly so results don't pile up (#969).
+					if (file.startsWith('task-') && !taskId.startsWith('task-chat-') && _isContextDropTask(taskId)) {
+						_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
+						_deliveredResults.add(file);
+						_pendingTasks.delete(taskId);
+						console.log(`${ts()} [TaskBridge] Context-drop task archived (no client): ${taskId}`);
 						setTimeout(() => {
 							archiveFile(path, 'results', taskId);
 							const taskFile = join(TASK_DIR, `${taskId}.txt`);
