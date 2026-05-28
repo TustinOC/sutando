@@ -281,17 +281,9 @@ def status_path(name: str, workspace: Path | None = None) -> Path:
 
 
 def status_read_path(name: str, workspace: Path | None = None) -> Path:
-    """READ location of a status file: prefer `state/<name>`, fall back to the
-    legacy workspace-root `<name>` so an un-migrated install keeps working for
-    one release. Returns the `state/` path when neither exists (caller handles
-    missing). The fallback branch is removed the release after this one.
-    """
+    """READ location of a status file: `state/<name>`. Caller handles missing."""
     ws = workspace if workspace is not None else resolve_workspace()
-    new = ws / "state" / name
-    if new.exists():
-        return new
-    legacy = ws / name
-    return legacy if legacy.exists() else new
+    return ws / "state" / name
 
 
 def _migrate_root_status(workspace: Path) -> bool:
