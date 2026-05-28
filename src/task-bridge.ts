@@ -166,6 +166,25 @@ export function _isVoiceTask(taskId: string): boolean {
 	return false;
 }
 
+/** Read the `source:` header field from a task file without loading the full body. */
+export function _taskSource(taskId: string): string | null {
+	const candidates = [
+		join(TASK_DIR, `${taskId}.txt`),
+		join(TASK_DIR, 'processed', `${taskId}.txt`),
+		join(TASK_DIR, 'archive', `${taskId}.txt`),
+	];
+	for (const p of candidates) {
+		if (!existsSync(p)) continue;
+		try {
+			for (const line of readFileSync(p, 'utf-8').split('\n')) {
+				if (line.startsWith('task:')) break;
+				if (line.startsWith('source:')) return line.slice('source:'.length).trim();
+			}
+		} catch {}
+	}
+	return null;
+}
+
 /** Belt-suspenders guard for the result-watcher's unconditional fallthrough
  * (issue #1035, follow-up to PR #1033). Returns true iff the filename is one
  * that task-bridge legitimately delivers via `onResult()`. Rejects everything
@@ -709,13 +728,17 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 							console.error(`${ts()} [TaskBridge] Failed to forward ${taskId} to Discord:`, e);
 						}
 					}
-					// Chat-path tasks have no bridge consumer — archive them directly
-					// so results/task-chat-*.txt files don't accumulate forever.
-					if (taskId.startsWith('task-chat-')) {
+					// Chat-path and context-drop tasks have no bridge consumer —
+					// archive them directly so results don't accumulate forever.
+					// context-drop tasks are named task-{ts}.txt (indistinguishable
+					// from voice tasks by name alone), so check the task source header.
+					const isNoDelivery = taskId.startsWith('task-chat-') ||
+						_taskSource(taskId) === 'context-drop';
+					if (isNoDelivery) {
 						_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 						_deliveredResults.add(file);
 						_pendingTasks.delete(taskId);
-						console.log(`${ts()} [TaskBridge] Chat task archived (no client): ${taskId}`);
+						console.log(`${ts()} [TaskBridge] No-delivery task archived (no client): ${taskId}`);
 						setTimeout(() => {
 							archiveFile(path, 'results', taskId);
 							const taskFile = join(TASK_DIR, `${taskId}.txt`);
