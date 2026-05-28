@@ -248,7 +248,11 @@ DIFF_MD="$OUT/diff.md"
 } > "$DIFF_MD"
 
 # 5) Persist a copy of the diff under notes/ for review later.
-PERSIST="$LOCAL_REPO/notes/diagnose-cross-node-$(date +%Y-%m-%d).md"
+# Write to workspace notes/ (same resolution as gather.sh's NOTES_DIR block),
+# not $LOCAL_REPO/notes/ — the repo is read-only source; workspace is runtime.
+_NOTES_WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/notes"
+mkdir -p "$_NOTES_WS"
+PERSIST="$_NOTES_WS/diagnose-cross-node-$(date +%Y-%m-%d).md"
 cp "$DIFF_MD" "$PERSIST" 2>/dev/null || true
 
 echo "" >&2
