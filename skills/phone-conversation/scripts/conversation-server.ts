@@ -47,7 +47,7 @@
 import { config as _dotenvConfig } from 'dotenv';
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdirSync, writeFileSync, copyFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, copyFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, symlinkSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { voiceApiKey } from '../../../src/voice-key.js';
@@ -223,6 +223,18 @@ if (!NGROK_AUTHTOKEN && !process.env.TWILIO_WEBHOOK_URL) {
 const CALLS_DIR = join(RESULTS_DIR, 'calls');
 mkdirSync(CALLS_DIR, { recursive: true });
 mkdirSync(TASKS_DIR, { recursive: true });
+
+function archivePhoneFile(srcPath: string, dir: string, taskId: string): void {
+  try {
+    if (!existsSync(srcPath)) return;
+    const ym = new Date().toISOString().slice(0, 7);
+    const destDir = join(dir, 'archive', ym);
+    mkdirSync(destDir, { recursive: true });
+    renameSync(srcPath, join(destDir, `${taskId}.txt`));
+  } catch {
+    try { unlinkSync(srcPath); } catch { /* ignore */ }
+  }
+}
 
 const ts = () => new Date().toISOString().slice(11, 23);
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -407,6 +419,7 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 		if (callSession.hangingUp || !activeCalls.has(callSession.callSid)) {
 			clearInterval(poll);
 			callSession.pendingTasks = Math.max(0, callSession.pendingTasks - 1);
+			archivePhoneFile(taskPath, TASKS_DIR, taskId);
 			return;
 		}
 		if (existsSync(resultPath)) {
@@ -415,7 +428,8 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			const result = readFileSync(resultPath, 'utf-8').trim();
 			console.log(`${ts()} [Task] result for ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			callSession.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
-			try { unlinkSync(resultPath); } catch {}
+			archivePhoneFile(resultPath, RESULTS_DIR, taskId);
+			archivePhoneFile(taskPath, TASKS_DIR, taskId);
 			// Cache result so duplicate requests get instant replay
 			if (!callSession.taskResultCache) callSession.taskResultCache = new Map();
 			callSession.taskResultCache.set(taskDescription, result);
@@ -438,6 +452,7 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			clearInterval(poll);
 			callSession.pendingTasks = Math.max(0, callSession.pendingTasks - 1);
 			console.log(`${ts()} [Task] timeout for ${taskId}`);
+			archivePhoneFile(taskPath, TASKS_DIR, taskId);
 			try {
 				(callSession.voiceSession as any).transport.sendContent([
 					{ role: 'user', text: `[Task "${taskDescription}" timed out — still being worked on. Let the caller know.]` },
