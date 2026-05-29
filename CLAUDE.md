@@ -181,6 +181,16 @@ On each proactive loop pass, check `pending-questions.md` for unanswered items a
 - Voice agent: `src/voice-agent.ts`
 - Task bridge: `src/task-bridge.ts`
 - Skills: `skills/`
+- React UI: `client/` — git submodule pointing at the
+  [sutando-client](https://github.com/sonichi/sutando-client) repo. The
+  wire contract between the UI and `src/web-server.ts` lives at
+  `client/WIRE.md`. To plug in a different bundle without touching this
+  submodule, set `CLIENT_DIST_DIR=/abs/path/to/your/dist` before
+  `bash src/startup.sh`. When editing UI code, work inside `client/` —
+  `git status` from the submodule shows your in-progress changes, and
+  commits/branches there are pushed to sutando-client, NOT this repo.
+  Pin a new UI version into sutando with `git add client && git commit`
+  at the repo root after the submodule HEAD moves.
 
 ## Task bridge
 

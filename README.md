@@ -139,9 +139,11 @@ Voice agent and conversation server handle conversation-scope actions with **inl
 - *(optional, for video/audio)* ffmpeg (`brew install ffmpeg`) — used by subtitle-burn, video-concat, and recording handoff.
 
 ```bash
-# Clone
-git clone https://github.com/sonichi/sutando.git
+# Clone (the React UI ships as a git submodule — see "Pluggable UI" below)
+git clone --recurse-submodules https://github.com/sonichi/sutando.git
 cd sutando
+# If you forgot --recurse-submodules:
+# git submodule update --init --recursive
 
 # Configure (minimum: GEMINI_API_KEY is required)
 cp .env.example .env
@@ -150,6 +152,10 @@ cp .env.example .env
 # Start everything
 bash src/startup.sh
 ```
+
+`startup.sh` auto-initializes the `client/` submodule if it's missing,
+so a vanilla `git clone` without `--recurse-submodules` still produces
+a working UI on first run.
 
 This starts all services (voice agent, phone conversation server, web client, dashboard, API, Sutando menu bar app) and opens http://localhost:8080 in your browser. The autonomous loop starts automatically — click **Connect** and start talking. Look for **S** in your menu bar — it provides global hotkeys (see [Keyboard shortcuts](#keyboard-shortcuts)) plus **Open Core** (Claude Code terminal) and **Open Dashboard** (status page).
 
@@ -346,6 +352,27 @@ It consumes API quota proportional to how much work it finds to do.
 See **[SECURITY.md](SECURITY.md)** for full details, best practices, and how to test your setup.
 
 ---
+
+## Pluggable UI
+
+The React frontend lives in its own repository,
+[**sutando-client**](https://github.com/sonichi/sutando-client),
+and is checked out at `client/` here as a git submodule. The Node web
+server (`src/web-server.ts`) serves `client/dist/`, so the UI and the
+agent runtime ship and version independently.
+
+The wire contract between any UI and the Sutando backend is documented
+in [`client/WIRE.md`](./client/WIRE.md). To plug in a different frontend
+— a private branded build, a different framework, a thin mobile client —
+build any bundle that honors the contract and point the agent at it:
+
+```bash
+CLIENT_DIST_DIR=/abs/path/to/your/dist bash src/startup.sh
+```
+
+Forks that want to track upstream UI changes without re-cloning can pin
+a specific sutando-client commit via `git -C client checkout <sha>`,
+then `git add client && git commit` in this repo.
 
 ## Contributing
 

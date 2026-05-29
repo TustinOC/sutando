@@ -67,7 +67,26 @@ fi
 # rebuild. This makes `bash src/startup.sh` after editing the React app pick up
 # the changes without a separate `pnpm build:client` step.
 # Soft step — don't block startup if the build fails.
-if [ -d client ]; then
+# `client/` is now a git submodule pointing at the sutando-client repo
+# (see .gitmodules). On a fresh clone without --recurse-submodules the
+# directory is empty — auto-init so `bash src/startup.sh` from a vanilla
+# checkout still produces a working UI. The submodule URL may be a local
+# path (development), so allow file:// transport for this one operation.
+if [ -f .gitmodules ] && grep -q 'path = client' .gitmodules 2>/dev/null; then
+  if [ ! -f client/package.json ]; then
+    echo "  ~ client/ submodule not initialized — fetching..."
+    if git -c protocol.file.allow=always submodule update --init --recursive client \
+        > "${LOGS_DIR:-/tmp}/client-submodule.log" 2>&1; then
+      echo "  ✓ client/ submodule initialized"
+    else
+      echo "  ✗ client/ submodule init failed — see ${LOGS_DIR:-/tmp}/client-submodule.log"
+      echo "    The web UI at http://localhost:8080 will 503 until you run:"
+      echo "    git submodule update --init --recursive"
+    fi
+  fi
+fi
+
+if [ -d client ] && [ -f client/package.json ]; then
   needs_build=0
   if [ ! -f client/dist/index.html ]; then
     needs_build=1
