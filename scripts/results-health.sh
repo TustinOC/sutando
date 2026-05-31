@@ -28,7 +28,19 @@ for arg in "$@"; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-RESULTS="$REPO/results"
+# Resolve runtime results/ under the workspace per CLAUDE.md "Workspace contract".
+# `results/` moved out of the repo to $SUTANDO_WORKSPACE long ago; the prior
+# `$REPO/results` reference would look at an empty/legacy location for any
+# host with a configured workspace. Source $REPO/.env if available (so this
+# script works when called outside startup.sh's source chain) before falling
+# back to the canonical default.
+if [ -z "${SUTANDO_WORKSPACE:-}" ] && [ -f "$REPO/.env" ]; then
+	_ws_from_env=$(grep -E '^SUTANDO_WORKSPACE=' "$REPO/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")
+	[ -n "$_ws_from_env" ] && SUTANDO_WORKSPACE="${_ws_from_env/#\~/$HOME}"
+	unset _ws_from_env
+fi
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+RESULTS="$WORKSPACE/results"
 
 if [ ! -d "$RESULTS" ]; then
 	[ "$QUIET" -eq 0 ] && echo "results/ missing — nothing to check"

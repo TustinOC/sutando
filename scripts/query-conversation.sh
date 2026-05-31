@@ -11,7 +11,19 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DB="${SUTANDO_CONVERSATION_DB:-$REPO_DIR/data/conversation.sqlite}"
+# Resolve runtime data/ under the workspace per CLAUDE.md "Workspace contract".
+# `data/` moved out of the repo to $SUTANDO_WORKSPACE long ago; the prior
+# `$REPO_DIR/data/conversation.sqlite` fallback would look at an empty/legacy
+# location for any host with a configured workspace. Source $REPO_DIR/.env if
+# available (so this script works when called outside startup.sh's source
+# chain) before falling back to the canonical default.
+if [ -z "${SUTANDO_WORKSPACE:-}" ] && [ -f "$REPO_DIR/.env" ]; then
+	_ws_from_env=$(grep -E '^SUTANDO_WORKSPACE=' "$REPO_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")
+	[ -n "$_ws_from_env" ] && SUTANDO_WORKSPACE="${_ws_from_env/#\~/$HOME}"
+	unset _ws_from_env
+fi
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+DB="${SUTANDO_CONVERSATION_DB:-$WORKSPACE/data/conversation.sqlite}"
 
 if [[ ! -f "$DB" ]]; then
 	echo "error: $DB does not exist yet — no conversations recorded" >&2
