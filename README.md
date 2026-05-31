@@ -111,11 +111,13 @@ We're looking for contributors to help test and harden these capabilities. If yo
     ↻ = a cron job fires the `/proactive-loop` skill every 5 minutes
         (`*/5 * * * *` in `skills/schedule-crons/crons.json`). The skill
         runs as a 10-minute pass that keeps a persistent watcher on
-        `tasks/` via Claude Code's `Monitor` tool — pending tasks are
-        processed the moment they arrive, not just on the cron tick.
-        Each pass also runs health checks and picks the next build-log
-        item autonomously.
+        `<workspace>/tasks/` via Claude Code's `Monitor` tool — pending
+        tasks are processed the moment they arrive, not just on the cron
+        tick. Each pass also runs health checks and picks the next build-
+        log item autonomously.
 ```
+
+> **Path notation.** Throughout this README and the rest of the docs, `<workspace>/X` means the path under your per-user workspace dir (`$SUTANDO_WORKSPACE`, defaults to `~/.sutando/workspace/`). Bare `X/` (e.g. `src/`, `skills/`) means the public repo. Per-user mutable state — `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md` — lives under the workspace, not the repo. See [`CLAUDE.md`](CLAUDE.md) → "Workspace contract" and [`docs/workspace-contract.md`](docs/workspace-contract.md) for the full mental model.
 
 Four processes work together:
 - **Voice agent** (Gemini Live, WebSocket on :9900) — listens and talks in real time for browser voice.
@@ -123,7 +125,7 @@ Four processes work together:
 - **Conversation server** (Gemini Live, Twilio WebSocket on :3100) — same role as the voice agent for inbound and outbound phone calls.
 - **Core agent** (Claude Code CLI) — executes tasks with full system access. We use the CLI because it provides cron scheduling, plugins, and an interactive terminal that the SDK doesn't offer out of the box.
 
-Voice agent and conversation server handle conversation-scope actions with **inline tools** — in-process calls that round-trip instantly (describe the screen, hang up, send DTMF, read the clipboard/current time, capture a screenshot). For anything outside that scope they write to `tasks/`; core reads them, executes, and writes to `results/`, which each channel speaks or messages back. Telegram and Discord bridges only use the `tasks/` path.
+Voice agent and conversation server handle conversation-scope actions with **inline tools** — in-process calls that round-trip instantly (describe the screen, hang up, send DTMF, read the clipboard/current time, capture a screenshot). For anything outside that scope they write to `<workspace>/tasks/`; core reads them, executes, and writes to `<workspace>/results/`, which each channel speaks or messages back. Telegram and Discord bridges only use the task path.
 
 ---
 
@@ -157,7 +159,7 @@ This starts all services (voice agent, phone conversation server, web client, da
 >
 > - **It's local.** Sutando runs entirely on your Mac. No remote control plane, no third party with write access.
 > - **You control the audience.** 3-tier access gating means owner / verified / unverified callers get different capability bands on phone, Discord, and Telegram. Set `VERIFIED_CALLERS` in `.env` before going live.
-> - **Actions are auditable.** Every Claude Code invocation lands in `build_log.md`, every task in `tasks/` + `results/`, every shell call in the service logs (`logs/*.log`). Use `tail -f build_log.md` while it works to watch in real time.
+> - **Actions are auditable.** Every Claude Code invocation lands in `<workspace>/build_log.md`, every task in `<workspace>/tasks/` + `<workspace>/results/`, every shell call in the service logs (`<workspace>/logs/*.log`). Use `tail -f <workspace>/build_log.md` while it works to watch in real time.
 > - **Hooks are your brake pedal.** `git-rules-guard.sh` (see `~/.claude/hooks`) pops a Discord approval DM for any public write (push / PR / issue comment) regardless of transport. Reject with 👎 to block.
 >
 > Keep the Claude Code terminal window reachable — quota-exhaustion or an unrecognized CLI prompt can leave the core agent waiting for you to respond.
@@ -246,9 +248,9 @@ One table, organized by capability. The only required paid piece is your Claude 
 | Capability | Script | Status |
 |-----------|--------|--------|
 | Voice conversation | `voice-agent.ts` | Verified |
-| Task delegation (voice → Claude) | `task-bridge.ts` + `watch-tasks-stream.sh` + `tasks/` dir | Verified |
+| Task delegation (voice → Claude) | `task-bridge.ts` + `watch-tasks-stream.sh` + `<workspace>/tasks/` | Verified |
 | Screen capture + analysis | `macos-tools` skill | Verified |
-| Notes / second brain | `notes/` directory (YAML-frontmatter markdown) | Verified |
+| Notes / second brain | `<workspace>/notes/` (YAML-frontmatter markdown) | Verified |
 | Context drop + shortcuts | `src/Sutando/` menu bar app | Verified |
 | Gmail read/send/search | `gws-gmail` skill | Verified |
 | Calendar reading | `google-calendar` skill | Verified |

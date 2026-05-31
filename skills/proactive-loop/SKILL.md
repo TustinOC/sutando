@@ -6,6 +6,8 @@ user-invocable: true
 
 # Proactive Loop
 
+> **Path notation in this doc** — `tasks/`, `results/`, `state/` are all under the user's workspace (`$SUTANDO_WORKSPACE`, default `~/.sutando/workspace/`). They are NOT in the repo. See `CLAUDE.md` → "Workspace contract".
+
 Start Sutando's autonomous loop. Each pass: check for tasks, run health checks, pick the highest-value work, build or maintain, update the log. Monitors voice tasks, context drops between passes.
 
 **Usage**: `/proactive-loop [interval]`

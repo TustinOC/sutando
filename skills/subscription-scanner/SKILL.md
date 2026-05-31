@@ -57,7 +57,7 @@ The scan is **agent-driven**, not script-driven, because Gmail access lives in t
 2. Renders a sortable table with vendor, amount, frequency, account, status, last/next charge
 3. Highlights diffs from the previous snapshot (`scan_history[-1].added` in green, `removed` in strikethrough red)
 4. Shows last-scan timestamp at the top
-5. Provides a "Scan now" button that POSTs to `/paidsubscriptions/scan` — that endpoint writes a task file to `tasks/` triggering an out-of-cycle scan in the next loop pass
+5. Provides a "Scan now" button that POSTs to `/paidsubscriptions/scan` — that endpoint writes a task file to `<workspace>/tasks/` triggering an out-of-cycle scan in the next loop pass
 
 ## Cron
 

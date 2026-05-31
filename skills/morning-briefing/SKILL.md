@@ -20,9 +20,9 @@ Collect from each source (skip any that aren't configured):
 
 2. **Calendar** — Run `gws calendar +agenda --today` (table output). If you need JSON for parsing, use `gws calendar +agenda --today --format json`. List meetings with times. For each: who's attending, what it's about. Flag any travel (flights, OOO).
 
-3. **Discord** — Read recent messages from `logs/discord-bridge.log` (tail ~100 lines). Summarize anything actionable from overnight. Reference channel ID mapping at `$SUTANDO_MEMORY_DIR/reference_discord_channels.md`. Only surface messages NOT already replied to by the bridge.
+3. **Discord** — Read recent messages from `<workspace>/logs/discord-bridge.log` (tail ~100 lines). Summarize anything actionable from overnight. Reference channel ID mapping at `$SUTANDO_MEMORY_DIR/reference_discord_channels.md`. Only surface messages NOT already replied to by the bridge.
 
-4. **Pending tasks** — Check `pending-questions.md` for unanswered items. Check `tasks/` for queued tasks.
+4. **Pending tasks** — Check `<workspace>/pending-questions.md` for unanswered items. Check `<workspace>/tasks/` for queued tasks.
 
 5. **System status** — Run `python3 src/health-check.py`. Report any issues.
 

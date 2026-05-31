@@ -6,6 +6,8 @@ user-invocable: true
 
 # Task orphan check
 
+> **Path notation in this doc** — `tasks/`, `tasks/archive/`, `results/`, `state/` are all under the user's workspace (`$SUTANDO_WORKSPACE`, default `~/.sutando/workspace/`). They are NOT in the repo. See `CLAUDE.md` → "Workspace contract".
+
 Recovery half of the post-#1049 task-bridge redesign. Replaces the brittle attempts-counter (#1049 + #1066's followup) with a startup-time classification pass that uses existing side-effect markers (PR #1048's `.sending` files for Discord, result files in `results/`, archive presence) to decide what to do with each live task in `<workspace>/tasks/`.
 
 **Usage**: `/task-orphan-check`
