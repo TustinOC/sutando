@@ -51,21 +51,24 @@ fi
 echo
 echo "Reconstructed from disk (last ${HOURS}h window where applicable). Issue #1032 — recall half."
 
-# 1. Last session checkpoint
+# 1. Last session checkpoint. session-state.md is workspace-resident per
+# CLAUDE.md "Workspace contract"; prefer $WS, fall back to $REPO for
+# pre-workspace installs (matches the build_log.md pattern below — same
+# workspace-first, repo-fallback resolution).
 print_section "Last session checkpoint (session-state.md)"
-if [ -f "$REPO/session-state.md" ]; then
-  ts=$(grep -m1 -i '^timestamp:' "$REPO/session-state.md" 2>/dev/null | awk '{print $2}')
+_ss=""
+[ -f "$WS/session-state.md" ] && _ss="$WS/session-state.md"
+[ -z "$_ss" ] && [ -f "$REPO/session-state.md" ] && _ss="$REPO/session-state.md"
+if [ -n "$_ss" ]; then
+  ts=$(grep -m1 -i '^timestamp:' "$_ss" 2>/dev/null | awk '{print $2}')
   say "Captured: ${ts:-unknown}"
   echo '```'
-  sed -n '1,60p' "$REPO/session-state.md"
-  echo '```'
-elif [ -f "$WS/session-state.md" ]; then
-  echo '```'
-  sed -n '1,60p' "$WS/session-state.md"
+  sed -n '1,60p' "$_ss"
   echo '```'
 else
   say "(no session-state.md — last session may have exited without compacting; rely on logs below)"
 fi
+unset _ss
 
 # 1b. Previous-session transcript (Claude Code project .jsonl)
 #
@@ -155,9 +158,12 @@ results=$(/usr/bin/find "$WS/results" -maxdepth 1 -name 'task-*.txt' -mmin -$((H
 
 # 5. Pending questions — show only UN-resolved entries
 print_section "Pending questions (un-resolved only)"
+# pending-questions.md is workspace-resident per CLAUDE.md; prefer $WS,
+# fall back to $REPO for pre-workspace installs (matches the build_log.md
+# resolution pattern below).
 pq=""
-[ -f "$REPO/pending-questions.md" ] && pq="$REPO/pending-questions.md"
-[ -z "$pq" ] && [ -f "$WS/pending-questions.md" ] && pq="$WS/pending-questions.md"
+[ -f "$WS/pending-questions.md" ] && pq="$WS/pending-questions.md"
+[ -z "$pq" ] && [ -f "$REPO/pending-questions.md" ] && pq="$REPO/pending-questions.md"
 if [ -n "$pq" ]; then
   # Filter: skip sections whose body explicitly marks resolution. Pre-review
   # this matched bare substrings 'DONE' and 'RESOLVED' anywhere in prose —
