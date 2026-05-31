@@ -146,7 +146,35 @@ fi
 # (alphabetical). Bug silently skipped real memory writes for 5+ weeks
 # before being caught. See docs/workspace-contract.md.
 MEMORY_DIR="$HOME/.claude/projects/$(echo "$SCRIPT_PARENT" | sed 's|/|-|g')/memory"
-NOTES_DIR="$REPO_DIR/notes"
+# Workspace dir per CLAUDE.md "Workspace contract". Notes/data/state are
+# per-user mutable runtime artifacts that live under $SUTANDO_WORKSPACE
+# (no longer inside the public repo). If SUTANDO_WORKSPACE is unset in
+# the process env, source $REPO_DIR/.env so the standalone-invocation
+# case (`bash scripts/sync-memory.sh` from a fresh shell) still finds
+# the override; this is the same workspace-first pattern used by
+# scripts/results-health.sh + scripts/query-conversation.sh in this PR.
+if [ -z "${SUTANDO_WORKSPACE:-}" ] && [ -f "$REPO_DIR/.env" ]; then
+    _ws_from_env=$(grep -E '^SUTANDO_WORKSPACE=' "$REPO_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")
+    [ -n "$_ws_from_env" ] && SUTANDO_WORKSPACE="${_ws_from_env/#\~/$HOME}"
+    unset _ws_from_env
+fi
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+
+# Resolve a runtime path workspace-first with repo fallback. Per CLAUDE.md
+# the canonical location is workspace; the repo backstop preserves the
+# unmigrated case (notes/build_log.md still in repo per #1169 option B)
+# so the sync keeps working during the transition. New installs / migrated
+# users get the workspace path; legacy installs keep getting the repo path
+# until they migrate.
+ws_or_repo() {
+    if [ -e "$WORKSPACE/$1" ]; then
+        echo "$WORKSPACE/$1"
+    else
+        echo "$REPO_DIR/$1"
+    fi
+}
+
+NOTES_DIR="$(ws_or_repo notes)"
 LOG="/tmp/sync-memory.log"
 LOCK_DIR="/tmp/sync-memory.lock.d"
 
@@ -272,7 +300,7 @@ if [ $PULL_RC -ne 0 ]; then
     if echo "$PULL_OUT" | grep -q "CONFLICT\|conflict"; then
         log "REBASE CONFLICT — saving local versions and aborting rebase"
         # Save conflicting files for inspection
-        CONFLICT_DIR="$REPO_DIR/notes/.conflicts-$(hostname)-$(date +%Y%m%d-%H%M%S)"
+        CONFLICT_DIR="$NOTES_DIR/.conflicts-$(hostname)-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$CONFLICT_DIR"
         git diff --name-only --diff-filter=U > "$CONFLICT_DIR/conflicting-files.txt" 2>/dev/null
         git rebase --abort 2>/dev/null
@@ -326,7 +354,7 @@ fi
 
 # presenter-mode.sentinel: cross-node mute for talk windows (restored from PR #503,
 # dropped by PR #511). Opt-in single-file sync — rest of state/ stays per-node.
-PRESENTER_SENTINEL="$REPO_DIR/state/presenter-mode.sentinel"
+PRESENTER_SENTINEL="$(ws_or_repo state/presenter-mode.sentinel)"
 if [ -f "$PRESENTER_SENTINEL" ]; then
     mkdir -p state
     copy_if_newer "$PRESENTER_SENTINEL" "state/presenter-mode.sentinel" || true
@@ -356,7 +384,12 @@ MACHINE_FILES=(
     tab-aliases.json
 )
 for f in "${MACHINE_FILES[@]}"; do
-    src="$REPO_DIR/$f"
+    # build_log.md is a workspace-resident runtime artifact per CLAUDE.md;
+    # the others (PERSONAL_CLAUDE.md, voice-context.txt, stand-identity.json,
+    # assets/stand-avatar.png, tab-aliases.json) stay in the repo. Use
+    # workspace-first for each entry so a migrated user picks up the right
+    # one regardless of where each individual file currently lives.
+    src="$(ws_or_repo "$f")"
     [ -f "$src" ] || continue
     copy_if_newer "$src" "$MACHINE_DIR/$(basename "$f")"
 done
@@ -381,12 +414,16 @@ for skill_dir in "$REPO_DIR"/skills/personal-*/; do
         "$skill_dir" "$MACHINE_DIR/skills/$skill_name/" 2>/dev/null || true
 done
 
-# Private operational data dir (excluding example files + known binaries)
-if [ -d "$REPO_DIR/data" ]; then
+# Private operational data dir (excluding example files + known binaries).
+# data/ is workspace-resident per CLAUDE.md; ws_or_repo() falls back to the
+# repo location for unmigrated installs.
+_data_dir="$(ws_or_repo data)"
+if [ -d "$_data_dir" ]; then
     rsync -a --update --checksum \
         --exclude='*.example.json' --exclude='.DS_Store' \
-        "$REPO_DIR/data/" "$MACHINE_DIR/data/" 2>/dev/null || true
+        "$_data_dir/" "$MACHINE_DIR/data/" 2>/dev/null || true
 fi
+unset _data_dir
 
 # Notes listed in sync-excludes.txt (shared-notes excluded pre-talk) still get
 # backed up here in the machine-specific dir. Text-only filter: only .md / .html
@@ -437,8 +474,12 @@ fi
 # Both nodes' `<repo>/notes` is now a symlink into this repo; no copy needed.
 
 # Reverse: pull presenter-mode.sentinel from sync (other node flipped it on).
+# Write target lives under $WORKSPACE per CLAUDE.md (state/ is workspace-resident).
+# ws_or_repo above resolves PRESENTER_SENTINEL workspace-first; the parent
+# dir we mkdir here must match — derive from PRESENTER_SENTINEL rather than
+# hardcoding $REPO_DIR/state.
 if [ -f "state/presenter-mode.sentinel" ]; then
-    mkdir -p "$REPO_DIR/state"
+    mkdir -p "$(dirname "$PRESENTER_SENTINEL")"
     copy_if_newer "state/presenter-mode.sentinel" "$PRESENTER_SENTINEL" || true
 fi
 
