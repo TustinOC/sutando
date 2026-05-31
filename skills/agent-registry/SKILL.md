@@ -23,8 +23,8 @@ skills/agent-registry/
 └── hooks/session-start.sh        # Claude Code SessionStart hook
 ```
 
-- **DB:** `<workspace>/data/agent-registry.db` (SQLite, auto-created)
-- **Discovery file:** `<workspace>/state/agent-registry.json` — written by the
+- **DB:** `$SUTANDO_WORKSPACE/data/agent-registry.db` (SQLite, auto-created)
+- **Discovery file:** `$SUTANDO_WORKSPACE/state/agent-registry.json` — written by the
   service with the bound port so clients find it without a hardcoded port.
 - **Port:** binds `127.0.0.1`, first free port from `7847` upward.
 

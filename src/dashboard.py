@@ -134,7 +134,7 @@ def get_quota_status() -> dict:
     """Read quota state from quota-state.json (written by credential proxy).
 
     Quota state IS runtime state; the canonical (and only) home is
-    <workspace>/state/quota-state.json. The skill-dir fallback was removed:
+    $SUTANDO_WORKSPACE/state/quota-state.json. The skill-dir fallback was removed:
     a stale leftover copy under skills/quota-tracker/ silently shadowed the
     fresh file and froze this dashboard's quota panel for ~12h (2026-05-21).
     One path, one source of truth.

@@ -67,7 +67,7 @@ The script self-heals if the local sync clone gets stuck on a non-`main` branch.
 
 ## Optional: notes/ as a symlink
 
-If you want `<workspace>/notes/` and `~/.sutando/memory-sync/notes/` to be the same directory (so editing a note instantly syncs without a round-trip through `cp`), symlink one to the other on every machine:
+If you want `$SUTANDO_WORKSPACE/notes/` and `~/.sutando/memory-sync/notes/` to be the same directory (so editing a note instantly syncs without a round-trip through `cp`), symlink one to the other on every machine:
 
 ```bash
 mv ~/Desktop/sutando/notes ~/Desktop/sutando/notes.legacy-backup

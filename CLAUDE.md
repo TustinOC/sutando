@@ -78,7 +78,7 @@ If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It con
 
 ## Work Status
 
-Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `state/core-status.json` lands in `<repo>/state/` — where no reader looks. Readers resolve `<workspace>/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
+Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `state/core-status.json` lands in `<repo>/state/` — where no reader looks. Readers resolve `$SUTANDO_WORKSPACE/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
 
 ```bash
 CORE_STATUS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/state/core-status.json"
@@ -125,7 +125,7 @@ This ensures the dashboard, result-watcher, and timeout logic work the same rega
 
 ## Core liveness signal
 
-Each running sutando-core writes `<workspace>/state/cores/<hostname>.alive`
+Each running sutando-core writes `$SUTANDO_WORKSPACE/state/cores/<hostname>.alive`
 every 30 seconds (started by `src/startup.sh` as a background process; source
 at `src/core_heartbeat.py`). The file is per-host so multiple cores on
 different machines coexist; mtime is the cross-host "is this core alive?"
@@ -210,15 +210,15 @@ On each proactive loop pass, check `pending-questions.md` for unanswered items a
 
 ## Task bridge
 
-> **Path notation in this section** — `tasks/`, `results/` are shorthand for `<workspace>/tasks/`, `<workspace>/results/` (`$SUTANDO_WORKSPACE`, default `~/.sutando/workspace/`). See "Workspace contract" above. All task/result file ops resolve through `resolveWorkspace()` / `resolve_workspace()`; never compute paths relative to the repo.
+> **Path notation in this section** — `tasks/`, `results/` are shorthand for `$SUTANDO_WORKSPACE/tasks/`, `$SUTANDO_WORKSPACE/results/` (`$SUTANDO_WORKSPACE`, default `~/.sutando/workspace/`). See "Workspace contract" above. All task/result file ops resolve through `resolveWorkspace()` / `resolve_workspace()`; never compute paths relative to the repo.
 
 Tasks arrive from multiple channels via the same file bridge:
-- **Voice agent** writes tasks to `<workspace>/tasks/task-{ts}.txt`
+- **Voice agent** writes tasks to `$SUTANDO_WORKSPACE/tasks/task-{ts}.txt`
 - **Telegram bridge** (`src/telegram-bridge.py`) writes tasks from Telegram messages (text + photos + files + voice notes)
 - **Discord bridge** (`src/discord-bridge.py`) writes tasks from Discord DMs and channel @mentions (+ file attachments)
-- This session reads and executes them, writes results to `<workspace>/results/task-{ts}.txt`
-- Each bridge polls `<workspace>/results/` and sends the reply back to the originating channel
-- Proactive messages: write to `<workspace>/results/proactive-{ts}.txt` to speak to the user
+- This session reads and executes them, writes results to `$SUTANDO_WORKSPACE/results/task-{ts}.txt`
+- Each bridge polls `$SUTANDO_WORKSPACE/results/` and sends the reply back to the originating channel
+- Proactive messages: write to `$SUTANDO_WORKSPACE/results/proactive-{ts}.txt` to speak to the user
 - To send files in replies, include `[file: /path/to/file]` in the result text
 
 **Result-body protocol markers** — when the result body STARTS with one of these, the bridge handles delivery specially. Use them when multiple related tasks should produce ONE user-facing reply instead of N separate ones:
@@ -236,7 +236,7 @@ Tasks arrive from multiple channels via the same file bridge:
 
 Existing consumers (`discord-bridge.py`, `telegram-bridge.py`, `slack-bridge.py`, `task-bridge.ts`, `agent-api.py`) all key off the legacy `task-{id}.txt` shape — specific tracked task_id or `task-*` glob — so a `<key>.task-{id}.txt` filename slides past them. The matching scan inside `skills/discord-voice/scripts/discord-voice-server.ts` and `skills/phone-conversation/scripts/conversation-server.ts` reads-and-deletes the file, then injects its body into the live Gemini session via the same `transport.sendContent` path the work-tool result drain uses. Helper: `src/result-channel-key.ts` (TS) / `src/result_channel_key.py` (Python).
 
-**IMPORTANT:** On session start, ensure a task watcher is running. Use the `Monitor` tool to stream `bash src/watch-tasks-stream.sh` — it never exits during normal operation and emits `TASK_FILE: <name>` per new task as a per-event notification. When a notification arrives, Read the named file (the watcher emits a basename; resolve under `$SUTANDO_WORKSPACE/tasks/`), process it, and write a result to `<workspace>/results/`. The stream watcher replaces the older one-shot `watch-tasks.sh` (retired 2026-05-14) — no more restart-on-event cycles.
+**IMPORTANT:** On session start, ensure a task watcher is running. Use the `Monitor` tool to stream `bash src/watch-tasks-stream.sh` — it never exits during normal operation and emits `TASK_FILE: <name>` per new task as a per-event notification. When a notification arrives, Read the named file (the watcher emits a basename; resolve under `$SUTANDO_WORKSPACE/tasks/`), process it, and write a result to `$SUTANDO_WORKSPACE/results/`. The stream watcher replaces the older one-shot `watch-tasks.sh` (retired 2026-05-14) — no more restart-on-event cycles.
 
 If Sutando.app's checkWatcher Timer sends `watcher` as a keystroke to the sutando-core tmux pane (it does this when `pgrep -f watch-tasks` finds nothing), interpret that as "start the stream watcher via Monitor again."
 
@@ -276,7 +276,7 @@ When the user says "learn this", "remember my preference", "I always do it this 
 2. **Classify it:**
    - *Preference* → update `$SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/user_profile.md` (add to "Observed additions")
    - *Feedback/correction* → create or update a feedback memory file in `$SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_*.md`
-   - *Process/workflow* → save as a note in `<workspace>/notes/` with tag `[workflow, learned]`
+   - *Process/workflow* → save as a note in `$SUTANDO_WORKSPACE/notes/` with tag `[workflow, learned]`
 3. **Update the memory index** `MEMORY.md` if a new file was created.
 4. **Confirm briefly** what was learned: "Got it — I'll [do X] from now on."
 

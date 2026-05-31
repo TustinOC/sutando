@@ -27,7 +27,7 @@ export function resolveWorkspace(): string {
 }
 
 /**
- * Canonical WRITE location of a status file: `<workspace>/state/<name>`.
+ * Canonical WRITE location of a status file: `$SUTANDO_WORKSPACE/state/<name>`.
  * Loose status .json files live under state/, not the workspace root — the
  * root is structural (directories only). Twin of workspace_default.py's
  * `status_path`. Writers always use this.

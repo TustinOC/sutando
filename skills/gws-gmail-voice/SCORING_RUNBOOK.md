@@ -40,7 +40,7 @@ The LLM judges importance with full grounding. Rules retired in PR #705.
 
    **For each unchanged entry with `scored_at` within 24h**: REUSE existing score. Skip LLM call.
 
-   **Context-shift override (recommended):** if `<workspace>/tasks/` got fresh owner intent within the last hour that's materially different from the prior `context_snapshot.recent_owner_intent`, re-score even unchanged entries.
+   **Context-shift override (recommended):** if `$SUTANDO_WORKSPACE/tasks/` got fresh owner intent within the last hour that's materially different from the prior `context_snapshot.recent_owner_intent`, re-score even unchanged entries.
 
    Operators MAY layer additional rules at this step from their private skill repo — e.g. demoting PR-notification emails for PRs that have already been merged, boosting emails on active code threads. The algorithm above is the floor; tuning is the ceiling.
 

@@ -22,7 +22,7 @@ const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
 // `expected listening, got working` on the agent-state assertions.
 const { workspace: TEMP_WORKSPACE, cleanup: cleanupTempWorkspace } =
 	setupTempWorkspace('agent-state');
-// Status files live under <workspace>/state/ — the web-client reads them via
+// Status files live under $SUTANDO_WORKSPACE/state/ — the web-client reads them via
 // statusReadPath. The temp helper doesn't pre-create subdirs, so make state/.
 mkdirSync(join(TEMP_WORKSPACE, 'state'), { recursive: true });
 const CORE_STATUS_PATH = join(TEMP_WORKSPACE, 'state', 'core-status.json');

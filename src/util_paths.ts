@@ -10,7 +10,7 @@
 //                                     For files synced across the whole fleet
 //                                     (notes/, build_log.md).
 //
-// Both fall back to `<workspace>/<filename>` so existing installs keep working
+// Both fall back to `$SUTANDO_WORKSPACE/<filename>` so existing installs keep working
 // until they migrate. The `workspace` arg is optional; when omitted, the
 // helpers resolve to `$SUTANDO_WORKSPACE` (default `~/.sutando/workspace/`)
 // via resolveWorkspace() — NOT process.cwd(). Pre-#839 fixes the fallback was

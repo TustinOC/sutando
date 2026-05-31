@@ -3759,7 +3759,7 @@ async def poll_dm_fallback():
                     # invocation correct after PR #762 — which made REPO point
                     # at the runtime workspace (a subdir of the repo root), so
                     # `REPO / "src" / "dm-result.py"` would resolve to
-                    # `<workspace>/src/dm-result.py` (does not exist) and the
+                    # `$SUTANDO_WORKSPACE/src/dm-result.py` (does not exist) and the
                     # dm-fallback path errored out silently before delivering.
                     _DM_RESULT_SCRIPT = Path(__file__).resolve().parent / "dm-result.py"
                     result = subprocess.run(

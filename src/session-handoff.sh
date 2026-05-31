@@ -72,7 +72,7 @@ print(personal_path('pending-questions.md', Path('$REPO')))
   # Quota (with reset times)
   echo "## Quota"
   # Quota state is per-user runtime state — canonical home is
-  # <workspace>/state/quota-state.json (written by the credential proxy).
+  # $SUTANDO_WORKSPACE/state/quota-state.json (written by the credential proxy).
   # Reading an in-repo copy would pick up a stale shadow (see PR #970).
   QUOTA_FILE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/state/quota-state.json"
   if [ -f "$QUOTA_FILE" ]; then

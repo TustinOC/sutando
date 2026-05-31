@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-host heartbeat for sutando-core sessions.
 
-Writes a small JSON file at `<workspace>/state/cores/<hostname>.alive` every
+Writes a small JSON file at `$SUTANDO_WORKSPACE/state/cores/<hostname>.alive` every
 30 seconds while running. The file's content reports the core's pid, host,
 start time, last beat, and a free-form status string; the file's mtime is
 the cross-host "is this core still up?" signal.

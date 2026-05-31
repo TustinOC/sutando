@@ -2,7 +2,7 @@
 
 Every bridge (Discord, Slack, Telegram, …) and every owner-facing skill that
 sends messages to a non-owner audience writes one JSON-line per delivery to
-`<workspace>/state/outbox.log`. Owner can then audit what Sutando has said
+`$SUTANDO_WORKSPACE/state/outbox.log`. Owner can then audit what Sutando has said
 on their behalf via `tail -f`, the dashboard Outbox tab (follow-up PR), or
 ad-hoc `jq` queries.
 

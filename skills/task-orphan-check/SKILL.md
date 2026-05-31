@@ -1,6 +1,6 @@
 ---
 name: task-orphan-check
-description: "Resolve orphan tasks left in `<workspace>/tasks/` from a previous session that crashed mid-execution. Classifies each live task as done / fresh / stale by cross-referencing per-side-effect markers, then archives or recovers as appropriate. Runs once on startup; safe to re-invoke."
+description: "Resolve orphan tasks left in `$SUTANDO_WORKSPACE/tasks/` from a previous session that crashed mid-execution. Classifies each live task as done / fresh / stale by cross-referencing per-side-effect markers, then archives or recovers as appropriate. Runs once on startup; safe to re-invoke."
 user-invocable: true
 ---
 
@@ -8,7 +8,7 @@ user-invocable: true
 
 > **Path notation in this doc** — `tasks/`, `tasks/archive/`, `results/`, `state/` are all under the user's workspace (`$SUTANDO_WORKSPACE`, default `~/.sutando/workspace/`). They are NOT in the repo. See `CLAUDE.md` → "Workspace contract".
 
-Recovery half of the post-#1049 task-bridge redesign. Replaces the brittle attempts-counter (#1049 + #1066's followup) with a startup-time classification pass that uses existing side-effect markers (PR #1048's `.sending` files for Discord, result files in `results/`, archive presence) to decide what to do with each live task in `<workspace>/tasks/`.
+Recovery half of the post-#1049 task-bridge redesign. Replaces the brittle attempts-counter (#1049 + #1066's followup) with a startup-time classification pass that uses existing side-effect markers (PR #1048's `.sending` files for Discord, result files in `results/`, archive presence) to decide what to do with each live task in `$SUTANDO_WORKSPACE/tasks/`.
 
 **Usage**: `/task-orphan-check`
 
@@ -42,9 +42,9 @@ For each file in `tasks/`, let `<id>` be the value of the `id:` header line (e.g
 1. **Parse the header** — extract `id`, `timestamp`, `source`, `channel_id` (if Discord), `user_id`, `access_tier` (`owner` / `team` / `other`; default to `owner` if the field is absent — pre-tier task files predate the field and were authored by the owner).
 
 2. **Cross-reference completion markers** (any single match = task already completed):
-   - **`<workspace>/results/<id>.txt`** exists → **DONE**. The result file is the canonical completion marker; if it exists the task was processed.
-   - **`<workspace>/results/archive/<id>.txt`** exists → **DONE** (post-archive case).
-   - **`<workspace>/results/proactive-<id>.txt`** OR `.sending` variant exists → see step 2b below for the in-progress-vs-done split.
+   - **`$SUTANDO_WORKSPACE/results/<id>.txt`** exists → **DONE**. The result file is the canonical completion marker; if it exists the task was processed.
+   - **`$SUTANDO_WORKSPACE/results/archive/<id>.txt`** exists → **DONE** (post-archive case).
+   - **`$SUTANDO_WORKSPACE/results/proactive-<id>.txt`** OR `.sending` variant exists → see step 2b below for the in-progress-vs-done split.
 
    **Step 2b — `.sending` contract clarification** (per qingyun-sutando review of #1074):
    - `results/<id>.txt` (no suffix) → task completed AND result body written. **DONE.**
@@ -103,7 +103,7 @@ Otherwise:
 
 4. Apply step 3c bomb-guard (see below) to decide whether to truncate the preview list.
 
-5. Write `<workspace>/results/proactive-orphan-recovery-${ts}.txt`:
+5. Write `$SUTANDO_WORKSPACE/results/proactive-orphan-recovery-${ts}.txt`:
 
    ```
    Orphan recovery — N stale tasks from a prior session (oldest <Nm>, newest <Nm>, no completion markers).
@@ -151,7 +151,7 @@ The summary lands in the conversation buffer so the agent's first turn (and oper
 
 ## What this DOES NOT touch
 
-- `<workspace>/tasks/archive/` — graveyard; never modified except by this skill's own archive moves.
+- `$SUTANDO_WORKSPACE/tasks/archive/` — graveyard; never modified except by this skill's own archive moves.
 - The watcher (`watch-tasks-stream.sh`) — runs unchanged; just sees a smaller `tasks/` dir after orphan-check completes.
 - The bridges (`discord-bridge.py`, `telegram-bridge.py`) — orphan-check reads their per-side-effect markers (`.sending` files from #1048) but never modifies them.
 - `crons.json` or any scheduler state.

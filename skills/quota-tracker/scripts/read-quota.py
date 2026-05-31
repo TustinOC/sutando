@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Canonical (and only) home is <workspace>/state/quota-state.json, written by
+# Canonical (and only) home is $SUTANDO_WORKSPACE/state/quota-state.json, written by
 # the credential proxy. The skill-dir / cwd fallbacks were removed: a stale
 # leftover quota-state.json under skills/quota-tracker/ silently shadowed the
 # fresh file and froze the dashboard for ~12h (2026-05-21). One path, one

@@ -67,7 +67,7 @@ Per-user runtime state. Machine-local by default. Rebuildable.
 - Rotates or can be re-derived.
 - Has no value across machines (logs from MacBook aren't useful on Mac Mini).
 
-**Lifecycle:** ephemeral. `rm -rf <workspace>` should be survivable — startup re-creates whatever's needed.
+**Lifecycle:** ephemeral. `rm -rf $SUTANDO_WORKSPACE` should be survivable — startup re-creates whatever's needed.
 
 ### Memory
 

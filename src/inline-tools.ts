@@ -793,7 +793,7 @@ export const createChatTaskTool: ToolDefinition = {
 // ─── Notes tools ─────────────────────────────────────────
 // Resolve at module-init: $SUTANDO_MEMORY_DIR/notes (canonical) when set
 // (legacy $SUTANDO_PRIVATE_DIR honored via sharedPersonalPath()), else
-// <workspace>/notes fallback. Notes are SHARED across the fleet so they live
+// $SUTANDO_WORKSPACE/notes fallback. Notes are SHARED across the fleet so they live
 // at the top-level memory dir, not under machine-<host>/.
 import { sharedPersonalPath, memoryDirEnv } from './util_paths.js';
 const NOTES_DIR = sharedPersonalPath('notes', WORKSPACE_DIR);

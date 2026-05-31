@@ -14,7 +14,7 @@ Commands:
              deregister. This is the one-shot command the hook backgrounds.
 
 The service is located via the discovery file written by registry-service.py
-(<workspace>/state/agent-registry.json). With --autostart, the client launches
+($SUTANDO_WORKSPACE/state/agent-registry.json). With --autostart, the client launches
 the service detached if it is not already running.
 """
 

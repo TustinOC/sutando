@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 def config_path() -> Path:
-    """Return the path to `<workspace>/state/discord-config.json`."""
+    """Return the path to `$SUTANDO_WORKSPACE/state/discord-config.json`."""
     return resolve_workspace() / "state" / CONFIG_FILENAME
 
 

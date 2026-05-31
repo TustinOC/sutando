@@ -4,7 +4,7 @@
 > ([design §6](../docs/pointer-teacher-design.md#6-v1--productionized-into-sutando-)):
 > `resolver.py` → the **`point_at` inline tool** (`src/browser-tools.ts`);
 > `pointer-overlay.swift` → **`PointerOverlayView`** in `src/Sutando/main.swift`
-> driven by the app's `DispatchSource` watch of `<workspace>/state/pointer-cmd.json`.
+> driven by the app's `DispatchSource` watch of `$SUTANDO_WORKSPACE/state/pointer-cmd.json`.
 > Kept here as the proof artifact and the reference the production port was lifted from.
 
 Thinnest end-to-end slice of the [Pointer Teacher design](../docs/pointer-teacher-design.md) §6.

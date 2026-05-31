@@ -450,7 +450,7 @@ export const clickTool: ToolDefinition = {
 // See docs/adr/0001-pointer-teacher-brain.md. Do NOT swap the model or the
 // prompt format without re-running that POC — both choices are load-bearing.
 const POINTER_MODEL = process.env.POINTER_MODEL || 'gemini-3-flash-preview';
-// IPC: Sutando.app watches <workspace>/state via DispatchSource and flies the
+// IPC: Sutando.app watches $SUTANDO_WORKSPACE/state via DispatchSource and flies the
 // bezier pointer to whatever lands here. Go through resolveWorkspace() so we
 // agree with the Swift side's `AppDelegate.workspace` (added in #837) — not
 // process.cwd(), which silently bifurcates when SUTANDO_WORKSPACE points

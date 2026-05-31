@@ -92,12 +92,12 @@ def _private_machine_dir() -> Path | None:
 def personal_path(filename: str, workspace: Path | None = None) -> Path:
     """Resolve a personal-asset path.
 
-    Order: `$SUTANDO_MEMORY_DIR/machine-<host>/<filename>` → `<workspace>/<filename>`.
+    Order: `$SUTANDO_MEMORY_DIR/machine-<host>/<filename>` → `$SUTANDO_WORKSPACE/<filename>`.
     (Legacy `$SUTANDO_PRIVATE_DIR` is honored as a fallback with a
     deprecation warning — see `_memory_dir_env()`.)
     For files known to live under `assets/` in the public workspace
-    (currently `stand-avatar.png`), also tries `<workspace>/assets/<filename>`
-    before falling back to `<workspace>/<filename>`.
+    (currently `stand-avatar.png`), also tries `$SUTANDO_WORKSPACE/assets/<filename>`
+    before falling back to `$SUTANDO_WORKSPACE/<filename>`.
 
     Returns the FIRST existing path. If none exist, returns the preferred
     private-dir path so the caller's `.exists()` check fails gracefully.
@@ -132,7 +132,7 @@ def shared_personal_path(filename: str, workspace: Path | None = None) -> Path:
     """Resolve a shared-private path (notes, build_log, etc.) — files that
     sync across all of an owner's machines, not per-machine state.
 
-    Order: `$SUTANDO_MEMORY_DIR/<filename>` (top-level, shared) → `<workspace>/<filename>`.
+    Order: `$SUTANDO_MEMORY_DIR/<filename>` (top-level, shared) → `$SUTANDO_WORKSPACE/<filename>`.
     (Legacy `$SUTANDO_PRIVATE_DIR` is honored as a fallback with a
     deprecation warning — see `_memory_dir_env()`.)
 

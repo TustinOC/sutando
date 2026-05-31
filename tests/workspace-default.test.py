@@ -189,7 +189,7 @@ class TestMigrationFromLegacy(unittest.TestCase):
 class TestInRepoNotesMigration(unittest.TestCase):
     """Tests for `_migrate_inrepo_notes` — the env-set migration that catches
     stragglers in `<repo>/notes/` after the workspace contract moved canonical
-    notes to `<workspace>/notes/`.
+    notes to `$SUTANDO_WORKSPACE/notes/`.
 
     Different trigger than `_migrate_from_legacy`: that one is for env-UNSET
     legacy installs. This one is for env-SET installs whose code was writing

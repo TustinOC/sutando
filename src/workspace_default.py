@@ -117,14 +117,14 @@ def _migrate_from_legacy(target: Path) -> bool:
 
 
 def _migrate_inrepo_notes(workspace: Path) -> bool:
-    """One-time migration of `<repo>/notes/*` -> `<workspace>/notes/` when env-set
+    """One-time migration of `<repo>/notes/*` -> `$SUTANDO_WORKSPACE/notes/` when env-set
     workspaces have stragglers in the in-repo location.
 
     Different trigger than `_migrate_from_legacy`: that one fires only when
     `$SUTANDO_WORKSPACE` is UNSET (legacy install upgrading to the new default).
     THIS one fires when the env IS set, BUT the in-repo `notes/` dir (which
     code used to write to before the workspace contract) still contains files
-    that aren't under `<workspace>/notes/`. The trigger condition is
+    that aren't under `$SUTANDO_WORKSPACE/notes/`. The trigger condition is
     "workspace and in-repo location are different, AND in-repo has notes."
 
     Scope: top-level `.md`/`.txt` files only. Subdirectories (e.g.
@@ -137,7 +137,7 @@ def _migrate_inrepo_notes(workspace: Path) -> bool:
     Symmetric to `_migrate_from_legacy`'s posture: non-destructive on collision
     (skip the file if it already exists at the workspace location), logs each
     moved file to stderr, idempotent (second run finds in-repo empty and
-    bails). Also writes a sentinel (`<workspace>/.notes-migrated`) after a
+    bails). Also writes a sentinel (`$SUTANDO_WORKSPACE/.notes-migrated`) after a
     successful run so subsequent `resolve_workspace()` calls short-circuit
     on the cheap stat-check rather than re-running iterdir; per Lucy's #769
     review obs 2.
@@ -212,7 +212,7 @@ def _migrate_inrepo_notes(workspace: Path) -> bool:
 
 
 def _migrate_inrepo_build_log(workspace: Path) -> bool:
-    """One-time migration of `<repo>/build_log.md` -> `<workspace>/build_log.md`.
+    """One-time migration of `<repo>/build_log.md` -> `$SUTANDO_WORKSPACE/build_log.md`.
 
     Parallel to `_migrate_inrepo_notes`: fires regardless of env state when the
     in-repo `build_log.md` exists and workspace != repo root. Build_log is a
@@ -226,7 +226,7 @@ def _migrate_inrepo_build_log(workspace: Path) -> bool:
     migration fixes the split.
 
     Non-destructive on collision (skip if workspace already has build_log.md),
-    sentinel-gated for O(1) re-entry (`<workspace>/.build_log-migrated`).
+    sentinel-gated for O(1) re-entry (`$SUTANDO_WORKSPACE/.build_log-migrated`).
     """
     sentinel = workspace / ".build_log-migrated"
     if sentinel.exists():
@@ -270,7 +270,7 @@ def _migrate_inrepo_build_log(workspace: Path) -> bool:
 
 
 def status_path(name: str, workspace: Path | None = None) -> Path:
-    """Canonical WRITE location of a status file: `<workspace>/state/<name>`.
+    """Canonical WRITE location of a status file: `$SUTANDO_WORKSPACE/state/<name>`.
 
     Writers always target this. Pair with `status_read_path` for readers, which
     falls back to the legacy root location for one release. Keeps the directory
@@ -299,7 +299,7 @@ def _migrate_root_status(workspace: Path) -> bool:
 
     Parallel to `_migrate_inrepo_build_log` in posture: non-destructive on
     collision (skip if `state/<name>` already exists), sentinel-gated for O(1)
-    re-entry (`<workspace>/.status-migrated`, kept at the workspace root for
+    re-entry (`$SUTANDO_WORKSPACE/.status-migrated`, kept at the workspace root for
     consistency with the existing `.notes-migrated` / `.build_log-migrated`
     sentinels), never raises into resolution.
 
@@ -343,11 +343,11 @@ def _migrate_root_status(workspace: Path) -> bool:
 
 
 def _migrate_conversation_log(workspace: Path) -> bool:
-    """One-time migration of `<workspace>/conversation.log` -> `logs/`.
+    """One-time migration of `$SUTANDO_WORKSPACE/conversation.log` -> `logs/`.
 
     `conversation.log` is an append-only transcript, not a status file, so it
     belongs in `logs/` rather than `state/`. Same sentinel-gated, non-destructive
-    posture as `_migrate_root_status`; sentinel `<workspace>/.conversation-log-migrated`.
+    posture as `_migrate_root_status`; sentinel `$SUTANDO_WORKSPACE/.conversation-log-migrated`.
 
     Returns True iff the file was migrated.
     """
