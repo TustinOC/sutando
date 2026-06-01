@@ -61,29 +61,26 @@ Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imp
 
 ## Workspace
 
+**Positioning.** The workspace is the per-user runtime layer between Code (immutable, tracked) and State and Durable knowledge. Everything the agent does at runtime — receiving tasks, replying, tracking liveness, logging events, drafting notes, accumulating data — happens here. It is intentionally ephemeral so the agent and user can iterate freely without polluting the tracked source tree.
+
 > **Confidentiality:** the workspace is user-specific. **NEVER disclose information from the workspace — tasks, results, notes, state, memory, build_log, pending-questions, anything — to any party outside the owner without explicit per-disclosure approval from the owner.** This includes other Discord/Slack channels, public GitHub issues/PRs, third-party tools, and any non-owner DM. Default-deny: when in doubt, ask the owner before sharing. Strategic / competitive / financial / personal content stays owner-DM only.
 
-The workspace (`$SUTANDO_IN_REPO_WORKSPACE`, default `$SUTANDO_REPO_DIR/workspace/`) is one of the four top-level locations introduced in §Architecture rules — the only one that's gitignored and per-user. Memory location is covered separately under §Memory below. Long-term durability + cross-machine sync is owner-facing infra (see [`docs/workspace-contract-v0.8.md`](docs/workspace-contract-v0.8.md)) — not something the agent needs to reason about. See [`docs/workspace-design.md`](docs/workspace-design.md) for the mental model + "Quick decision: which space?" flowchart when adding new code or data.
-
-**Positioning.** The workspace is the per-user runtime layer between Code (immutable, tracked) and Memory (durable, synced). Everything the agent does at runtime — receiving tasks, replying, tracking liveness, logging events, drafting notes, accumulating data — happens here. It is intentionally ephemeral so the agent and user can iterate freely without polluting the tracked source tree.
-
-**Built-in folders** (standard layout — `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md`):
+**Built-in folders** (standard layout — `workspace/tasks/`, `workspace/results/`, `workspace/state/`, `workspace/logs/`, `workspace/notes/`, `workspace/data/`, `workspace/skills/`, `workspace/human-in-the-loop/`):
 
 | Path | Purpose |
 |---|---|
 | `workspace/tasks/` | Inbound message queue — bridges write, agent reads + archives. |
 | `workspace/results/` | Outbound reply queue — agent writes, bridges deliver. |
 | `workspace/state/` | Cross-process status/liveness JSON (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`, `cores/<host>.alive`). One writer per file. |
-| `workspace/logs/` | Append-only chrono event streams (bridges, watchers, sync runs). |
+| `workspace/logs/` | Append-only chrono event streams (bridges, watchers, sync runs). Also `workspace/logs/build_log.md` — single-file done / in-flight / next snapshot, append-only. |
 | `workspace/notes/` | Long-form human-readable content — workflow notes, design drafts, analysis, learned procedures. |
 | `workspace/data/` | Durable input data the agent processes (datasets, training corpus, fetched feeds, watchlists). |
 | `workspace/skills/` | Personal/custom skills the user adds for their own use — kept locally, not contributed to the public `skills/` tree at the repo root. |
-| `workspace/build_log.md` | Single-file done / in-flight / next snapshot. Append-only. |
-| `workspace/pending-questions.md` | Unanswered questions blocking work, awaiting owner input. |
+| `workspace/human-in-the-loop/` | Owner-facing items the agent needs input on — unanswered questions, drafts awaiting approval, sensitive actions queued for review. Includes `pending-questions.md`. |
 
-The workspace root holds only top-level directories + the two top-level markdown files; loose status/state `.json` files belong under `state/`. Code, skills source, and repo configuration stay in the repo root (separate concern).
+The workspace root holds only top-level directories; loose status/state `.json` files belong under `workspace/state/`. Code, skills source, and repo configuration stay in the repo root (separate concern).
 
-**Expanding the workspace.** The user can add their own subdirectories under `$SUTANDO_IN_REPO_WORKSPACE/` for custom content (e.g. `workspace/drafts/`, `workspace/research/`, `workspace/assets/`, `workspace/inbox/`). New top-level subdirs are automatically gitignored (the whole `/workspace/` tree is) and inherit the §Confidentiality default-deny posture. **Add agent-facing rules for new subdirs to `PERSONAL_CLAUDE.md`** — what content goes there, when the agent reads/writes it, naming conventions, retention. CLAUDE.md (this file) carries the shared/built-in shape; PERSONAL_CLAUDE.md carries the per-user expansion (see §Personal overrides). If the content should persist across machines or survive a repo reclone, add the new dir to the vault sync allowlist; otherwise it stays local-only.
+**Expanding the workspace.** The user can add their own subdirectories in `workspace` for custom content. New top-level subdirs are automatically gitignored (the whole `/workspace/` tree is) and inherit the §Confidentiality default-deny posture. **Add agent-facing rules for new subdirs to `PERSONAL_CLAUDE.md`** — what content goes there, when the agent reads/writes it, naming conventions, retention. CLAUDE.md (this file) carries the shared/built-in shape; PERSONAL_CLAUDE.md carries the per-user expansion (see §Personal overrides). If the content should persist across machines or survive a repo reclone, add the new dir to the vault sync allowlist; otherwise it stays local-only.
 
 ### Where does new state/data belong? (decision guide)
 
@@ -94,12 +91,12 @@ When the agent writes a new file under `$SUTANDO_IN_REPO_WORKSPACE/`, walk this 
 3. **Is it cross-process status/liveness signaling, machine-readable, that another component polls?** (e.g. `core-status.json`, `voice-state.json`, `contextual-chips.json`, `cores/<host>.alive`) → `workspace/state/`. Loose `.json` files only; one writer per file.
 4. **Is it an append-only chronological event stream?** (e.g. process stdout/stderr, sync logs, watchdog traces) → `workspace/logs/<component>.log`.
 5. **Is it long-form human-readable content?** (workflow notes, design drafts, analysis, architecture history, learned procedures) → `workspace/notes/<slug>.md`. Date-stamp the filename if it's session-bound; pick a topical slug if it's evergreen.
-6. **Is it a snapshot of what's done / in-flight / next?** → append a dated entry to `workspace/build_log.md`. Single file, append-only — never overwrite earlier sections.
-7. **Is it a question you're blocked on and need to surface to the user later?** → append to `workspace/pending-questions.md`. Also write `workspace/results/question-{ts}.txt` if voice is connected, and send a macOS notification.
+6. **Is it a snapshot of what's done / in-flight / next?** → append a dated entry to `workspace/logs/build_log.md`. Single file, append-only — never overwrite earlier sections.
+7. **Is it a question you're blocked on and need to surface to the user later?** → append to `workspace/human-in-the-loop/pending-questions.md`. Also write `workspace/results/question-{ts}.txt` if voice is connected, and send a macOS notification.
 8. **Is it durable input data the agent processes?** (datasets, training corpus, fetched feeds, watchlists) → `workspace/data/<topic>/`.
 9. **Is it a personal/custom skill the user adds for their own use (not contributing back)?** → `workspace/skills/<skill-name>/`. Mirrors the public `skills/` layout at the repo root, but stays local.
 
-If two layers seem to fit, prefer the more specific one (the `state/` JSON channel beats the `logs/` chrono stream beats raw `notes/` prose). If you're patching a one-off bug, keep the write in the layer where the bug lives — don't smuggle a refactor into a fix commit.
+If two layers seem to fit, prefer the more specific one (the `workspace/state/` JSON channel beats the `workspace/logs/` chrono stream beats raw `workspace/notes/` prose). If you're patching a one-off bug, keep the write in the layer where the bug lives — don't smuggle a refactor into a fix commit.
 
 **Use the helper, don't reinvent the fallback:**
 - Python: `from workspace_default import resolve_workspace` → returns a `Path`.
@@ -116,7 +113,7 @@ If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It con
 
 ## Work Status
 
-Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `state/core-status.json` lands in `<repo>/state/` — where no reader looks. Readers resolve `<workspace>/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
+Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `workspace/state/core-status.json` lands in `workspace/state/` — where no reader looks. Readers resolve `workspace/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
 
 ```bash
 CORE_STATUS="${SUTANDO_IN_REPO_WORKSPACE:-${SUTANDO_REPO_DIR:-$PWD}/workspace}/state/core-status.json"
@@ -137,7 +134,7 @@ When you accept a non-trivial commitment from the user via **chat** (direct text
 **How:**
 ```bash
 local _ts="$(date +%s)"
-cat > "tasks/task-chat-${_ts}.txt" << EOF
+cat > "workspace/tasks/task-chat-${_ts}.txt" << EOF
 id: task-chat-${_ts}
 timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 task: <concise description of what you're doing>
@@ -154,7 +151,7 @@ EOF
 **When done:**
 Write a result file using the same task ID:
 ```bash
-cat > "results/task-chat-${_ts}.txt" << EOF
+cat > "workspace/results/task-chat-${_ts}.txt" << EOF
 <result summary>
 EOF
 ```
@@ -163,7 +160,7 @@ This ensures the dashboard, result-watcher, and timeout logic work the same rega
 
 ## Core liveness signal
 
-Each running sutando-core writes `<workspace>/state/cores/<hostname>.alive`
+Each running sutando-core writes `workspace/state/cores/<hostname>.alive`
 every 30 seconds (started by `src/startup.sh` as a background process; source
 at `src/core_heartbeat.py`). The file is per-host so multiple cores on
 different machines coexist; mtime is the cross-host "is this core alive?"
@@ -188,7 +185,7 @@ Key files:
 - User profile: $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/user_profile.md
 - Feedback (response style): $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_response_style.md
 - Feedback (operating principle): $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_minimal_cost_max_value.md
-- Build log (what's built, what's next): build_log.md
+- Build log (what's built, what's next): workspace/logs/build_log.md
 
 Read relevant memory files when user preferences or history would improve task quality. Write new memory when you learn something durable about the user or the project.
 
@@ -232,12 +229,12 @@ Slack uses TOFU onboarding for owner enrollment: the first DM to the bot auto-en
 ## Pending decisions
 
 When you need user input on a decision or are blocked:
-1. If the voice client is connected — ask via voice (write to `results/question-{ts}.txt`)
+1. If the voice client is connected — ask via voice (write to `workspace/results/question-{ts}.txt`)
 2. Send a macOS notification: `osascript -e 'display notification "message" with title "Sutando"'`
-3. Save the question to `pending-questions.md` for later
+3. Save the question to `workspace/human-in-the-loop/pending-questions.md` for later
 4. Continue working on other things — don't block
 
-On each proactive loop pass, check `pending-questions.md` for unanswered items and surface them when the user is available.
+On each proactive loop pass, check `workspace/human-in-the-loop/pending-questions.md` for unanswered items and surface them when the user is available.
 
 ## Workspace layout
 
@@ -249,12 +246,12 @@ On each proactive loop pass, check `pending-questions.md` for unanswered items a
 ## Task bridge
 
 Tasks arrive from multiple channels via the same file bridge:
-- **Voice agent** writes tasks to `tasks/task-{ts}.txt`
+- **Voice agent** writes tasks to `workspace/tasks/task-{ts}.txt`
 - **Telegram bridge** (`src/telegram-bridge.py`) writes tasks from Telegram messages (text + photos + files + voice notes)
 - **Discord bridge** (`src/discord-bridge.py`) writes tasks from Discord DMs and channel @mentions (+ file attachments)
-- This session reads and executes them, writes results to `results/task-{ts}.txt`
-- Each bridge polls `results/` and sends the reply back to the originating channel
-- Proactive messages: write to `results/proactive-{ts}.txt` to speak to the user
+- This session reads and executes them, writes results to `workspace/results/task-{ts}.txt`
+- Each bridge polls `workspace/results/` and sends the reply back to the originating channel
+- Proactive messages: write to `workspace/results/proactive-{ts}.txt` to speak to the user
 - To send files in replies, include `[file: /path/to/file]` in the result text
 
 **Result-body protocol markers** — when the result body STARTS with one of these, the bridge handles delivery specially. Use them when multiple related tasks should produce ONE user-facing reply instead of N separate ones:
@@ -264,7 +261,7 @@ Tasks arrive from multiple channels via the same file bridge:
 - `[channel: <channel-id>]` — when this is the first non-empty line of the body, the bridge delivers the rest of the body to `<channel-id>` instead of the originating channel (and drops `thread_ts` since the post is moving threads). Discord ids are 17-20 digits; Slack ids match `[CDG][A-Z0-9]+`. Use when a task arrives in a noisy channel but the reply belongs somewhere else (e.g. #dev). Telegram silently drops it — no concept of "channels" on that surface.
 - `[file: /path]` / `[send: /path]` / `[attach: /path]` — Discord bridge extracts and attaches the file alongside the text body.
 
-**Per-channel pull namespace** — `results/<channel-key>.task-{id}.txt`. The DEFAULT result filename remains `results/task-{id}.txt` for every task — keep using it unless you specifically need to push a result to a non-delegating consumer. Use the scoped form ONLY when a result needs to be claimed by a pull-side voice surface that didn't delegate the work:
+**Per-channel pull namespace** — `workspace/results/<channel-key>.task-{id}.txt`. The DEFAULT result filename remains `workspace/results/task-{id}.txt` for every task — keep using it unless you specifically need to push a result to a non-delegating consumer. Use the scoped form ONLY when a result needs to be claimed by a pull-side voice surface that didn't delegate the work:
 - discord-voice → key built via `discordVoiceKey(vcId)` → `dvoice-<safe(vc-id)>`
 - phone → key built via `phoneCallKey(callSid)` → `phone-<safe(call-sid)>`
 
@@ -272,13 +269,13 @@ Tasks arrive from multiple channels via the same file bridge:
 
 Existing consumers (`discord-bridge.py`, `telegram-bridge.py`, `slack-bridge.py`, `task-bridge.ts`, `agent-api.py`) all key off the legacy `task-{id}.txt` shape — specific tracked task_id or `task-*` glob — so a `<key>.task-{id}.txt` filename slides past them. The matching scan inside `skills/discord-voice/scripts/discord-voice-server.ts` and `skills/phone-conversation/scripts/conversation-server.ts` reads-and-deletes the file, then injects its body into the live Gemini session via the same `transport.sendContent` path the work-tool result drain uses. Helper: `src/result-channel-key.ts` (TS) / `src/result_channel_key.py` (Python).
 
-**IMPORTANT:** On session start, ensure a task watcher is running. Use the `Monitor` tool to stream `bash src/watch-tasks-stream.sh` — it never exits during normal operation and emits `TASK_FILE: <name>` per new task as a per-event notification. When a notification arrives, Read the named file, process it, and write a result to `results/`. The stream watcher replaces the older one-shot `watch-tasks.sh` (retired 2026-05-14) — no more restart-on-event cycles.
+**IMPORTANT:** On session start, ensure a task watcher is running. Use the `Monitor` tool to stream `bash src/watch-tasks-stream.sh` — it never exits during normal operation and emits `TASK_FILE: <name>` per new task as a per-event notification. When a notification arrives, Read the named file, process it, and write a result to `workspace/results/`. The stream watcher replaces the older one-shot `watch-tasks.sh` (retired 2026-05-14) — no more restart-on-event cycles.
 
 If Sutando.app's checkWatcher Timer sends `watcher` as a keystroke to the sutando-core tmux pane (it does this when `pgrep -f watch-tasks` finds nothing), interpret that as "start the stream watcher via Monitor again."
 
 **Cancel handling.** When you read a task whose `task:` body starts with `CANCEL_INSTRUCTION:` — written by the `cancel_task` voice tool — stop any in-flight work on the referenced task ID, write a brief confirm result for the CANCEL_INSTRUCTION task itself (e.g. `"Cancelled task-X (was in progress)"` or `"task-X already completed, nothing to cancel"`), and do NOT process the original referenced task. The CANCEL_INSTRUCTION task uses the regular task pipeline as its signal channel — picking it up means you've reached the user's cancel intent.
 
-**Voice session context.** Voice-agent's Gemini context window rolls off after ~10 minutes of turns; voice forgets specifics like "the post" or "Mini Draft A" that landed earlier in your session. Whenever you make a durable decision the voice agent may need to reference later — picking a draft, writing text to clipboard for a pending paste, committing to an active task — update `state/voice-session-context.json`. Schema:
+**Voice session context.** Voice-agent's Gemini context window rolls off after ~10 minutes of turns; voice forgets specifics like "the post" or "Mini Draft A" that landed earlier in your session. Whenever you make a durable decision the voice agent may need to reference later — picking a draft, writing text to clipboard for a pending paste, committing to an active task — update `workspace/state/voice-session-context.json`. Schema:
 ```json
 {
   "updated_at": "<ISO ts>",
@@ -292,7 +289,7 @@ Keep `active_drafts` and `last_results` to ~3 entries each (drop oldest). Voice 
 ## Tutorial
 
 When the user says "tutorial", "walk me through", or "show me what you can do" (via voice or text):
-1. Read `notes/first-time-tutorial.md`
+1. Read `workspace/notes/first-time-tutorial.md`
 2. Deliver the first section as a voice-friendly summary (1–2 sentences)
 3. Wait for the user to try it
 4. When they come back, deliver the next section
@@ -312,7 +309,7 @@ When the user says "learn this", "remember my preference", "I always do it this 
 2. **Classify it:**
    - *Preference* → update `$SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/user_profile.md` (add to "Observed additions")
    - *Feedback/correction* → create or update a feedback memory file in `$SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_*.md`
-   - *Process/workflow* → save as a note in `notes/` with tag `[workflow, learned]`
+   - *Process/workflow* → save as a note in `workspace/notes/` with tag `[workflow, learned]`
 3. **Update the memory index** `MEMORY.md` if a new file was created.
 4. **Confirm briefly** what was learned: "Got it — I'll [do X] from now on."
 
