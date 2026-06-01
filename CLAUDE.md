@@ -14,9 +14,12 @@ Be concise and direct. Prefer action over explanation. Default to the smallest a
 
 ## Architecture rules
 
-Sutando's file state lives in two spaces the agent reads/writes:
-- **Code** ( `$SUTANDO_REPO_DIR`, the git checkout) — tracked source. Internal organization covered by this section.
-- **Workspace** (`$SUTANDO_IN_REPO_WORKSPACE`, i.e., `workspace/` , per-user runtime state) — lives inside the repo by default (`<repo>/workspace/`), gitignored. Internal organization covered by §Workspace below.
+Sutando's repo is organized into four top-level locations:
+
+- **Code** — `src/`, `skills/`, `scripts/`. The tracked source. Internal organization covered by §Code layers below.
+- **Docs** — `docs/`. Design documents, architecture notes, contributor guides. Tracked.
+- **Tests** — `tests/`. Unit / integration / lint tests run by CI. Tracked.
+- **Workspace** — `workspace/` (`$SUTANDO_IN_REPO_WORKSPACE`). Per-user runtime state. Lives inside the repo by default, **gitignored**. Internal organization covered by §Workspace below.
 
 ### Code layers
 
@@ -51,7 +54,7 @@ Read `CONTRIBUTING.md` and follow its "Before opening any PR or issue" section. 
 - Confirm your git author email is GH-mapped — not `*.local` (macOS hostname auto-fill) or `noreply@anthropic.com` (Claude Code default). CLA-Assistant silently leaves the check PENDING on unmappable emails.
 - Single concern per PR; no bundled refactors
 - Confirm the bug exists on `upstream/main` before adding a fix
-- Respect the V1-workspace hold list (`workspace_default.{py,ts}`, `sync-memory.sh`, `claude_home_path`, `agent-registry` paths)
+- Respect the workspace hold list (`workspace_default.{py,ts}`, `sync-memory.sh`, `claude_home_path`, `agent-registry` paths)
 - After `update-branch`, CLA-Assistant may not auto-rerun — try `@cla-assistant check` comment or close+reopen if stuck
 
 Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imports from `src/` or another skill, modifies main-repo files, or is tightly bound to a feature there (e.g. `skills/phone-conversation/`). A skill is **standalone** (PR to `sonichi/sutando-skills`) if it ships its own scripts/binaries, reads files but doesn't import main-repo modules, and works against any checkout. If unsure, ask in #design.
@@ -60,7 +63,7 @@ Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imp
 
 > **Confidentiality:** the workspace is user-specific. **NEVER disclose information from the workspace — tasks, results, notes, state, memory, build_log, pending-questions, anything — to any party outside the owner without explicit per-disclosure approval from the owner.** This includes other Discord/Slack channels, public GitHub issues/PRs, third-party tools, and any non-owner DM. Default-deny: when in doubt, ask the owner before sharing. Strategic / competitive / financial / personal content stays owner-DM only.
 
-The workspace (`$SUTANDO_IN_REPO_WORKSPACE`, default `$SUTANDO_REPO_DIR/workspace/`) is one of the two top-level file-state spaces introduced in §Architecture rules. Memory location is covered separately under §Memory below. Long-term durability + cross-machine sync is owner-facing infra (see [`docs/workspace-contract-v0.8.md`](docs/workspace-contract-v0.8.md)) — not something the agent needs to reason about. See [`docs/workspace-design.md`](docs/workspace-design.md) for the mental model + "Quick decision: which space?" flowchart when adding new code or data.
+The workspace (`$SUTANDO_IN_REPO_WORKSPACE`, default `$SUTANDO_REPO_DIR/workspace/`) is one of the four top-level locations introduced in §Architecture rules — the only one that's gitignored and per-user. Memory location is covered separately under §Memory below. Long-term durability + cross-machine sync is owner-facing infra (see [`docs/workspace-contract-v0.8.md`](docs/workspace-contract-v0.8.md)) — not something the agent needs to reason about. See [`docs/workspace-design.md`](docs/workspace-design.md) for the mental model + "Quick decision: which space?" flowchart when adding new code or data.
 
 **Positioning.** The workspace is the per-user runtime layer between Code (immutable, tracked) and Memory (durable, synced). Everything the agent does at runtime — receiving tasks, replying, tracking liveness, logging events, drafting notes, accumulating data — happens here. It is intentionally ephemeral so the agent and user can iterate freely without polluting the tracked source tree.
 
