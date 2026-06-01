@@ -1,0 +1,29 @@
+{
+  "workspace": {
+    "path": "${REPO_DIR}/workspace"
+  },
+  "vault": {
+    "enabled": false,
+    "remote_url": "",
+    "sync": {
+      "include": [
+        "notes/",
+        "skills/",
+        "tasks/archive/",
+        "state/cores/"
+      ],
+      "exclude": [
+        "tasks/",
+        "results/",
+        "state/core-status.json",
+        "state/quota-state.json",
+        "state/voice-state.json",
+        "voice-state.json",
+        "*.heartbeat",
+        "logs/",
+        "tmp/"
+      ]
+    },
+    "interval_seconds": 1800
+  }
+}

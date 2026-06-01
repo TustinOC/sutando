@@ -1,6 +1,6 @@
 # Workspace design — the 3-space model
 
-**Status:** RFC. Open alignment decisions appear inline as "Decisions" at the bottom; reactions welcome in the matching tracking issue.
+**Status:** Ratified. The 3-space model is now the operational contract — see [`docs/workspace-config.md`](workspace-config.md) for the current runtime behavior. The Decisions section at the bottom is preserved as a record of the design choices.
 
 ## Why this doc exists
 
@@ -23,7 +23,7 @@ If you can't place a path on this flowchart in 5 seconds, the path probably want
 | Space | Purpose | Lives at | Sync | Lifecycle |
 |---|---|---|---|---|
 | **Code** | Source of truth for behavior | `$SUTANDO_REPO_DIR` (git checkout) | Public git (`sonichi/sutando`) | Persistent; updated by `git pull` |
-| **State** | Per-user runtime, mostly machine-local | `$SUTANDO_WORKSPACE` (default `~/.sutando/workspace/`) | None — per-machine | Ephemeral; rebuildable; rotates |
+| **State** | Per-user runtime, mostly machine-local | `$SUTANDO_WORKSPACE` (default `<repo>/workspace/`) | None — per-machine | Ephemeral; rebuildable; rotates |
 | **Memory** | User-content the user reads + edits | `$SUTANDO_PRIVATE_DIR` (proposed rename → `SUTANDO_MEMORY_DIR`) | Private git per fleet (`<user>-sutando-memory.git`) | Persistent; user-authored |
 
 Within Memory, two flavors:
@@ -58,7 +58,7 @@ Per-user runtime state. Machine-local by default. Rebuildable.
 - TypeScript: `import { resolveWorkspace } from './workspace_default.js'` (post-#821).
 - Swift: `AppDelegate.workspace` (post-#837).
 
-**Lives at:** `$SUTANDO_WORKSPACE` or `~/.sutando/workspace/` (default).
+**Lives at:** `$SUTANDO_WORKSPACE` or `<repo>/workspace/` (default). The pre-M0 default `~/.sutando/workspace/` is honored as a legacy escape hatch when the env var is set, with a one-time migration warning.
 
 **Sync model:** none by default. Each Mac has its own State. If a user wants to inspect across machines they'd do it manually.
 

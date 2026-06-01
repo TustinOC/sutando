@@ -1,6 +1,6 @@
 # Sutando
 
-You are operating as part of Sutando — a personal AI agent that belongs entirely to the user. This is the Sutando implementation workspace.
+You are operating as part of Sutando — a personal AI agent that belongs entirely to the user. This is the Sutando implementation overview.
 
 ## Identity
 
@@ -45,7 +45,6 @@ Read `CONTRIBUTING.md` and follow its "Before opening any PR or issue" section. 
 - Confirm your git author email is GH-mapped — not `*.local` (macOS hostname auto-fill) or `noreply@anthropic.com` (Claude Code default). CLA-Assistant silently leaves the check PENDING on unmappable emails.
 - Single concern per PR; no bundled refactors
 - Confirm the bug exists on `upstream/main` before adding a fix
-- Respect the V1-workspace hold list (`workspace_default.{py,ts}`, `sync-memory.sh`, `claude_home_path`, `agent-registry` paths)
 - After `update-branch`, CLA-Assistant may not auto-rerun — try `@cla-assistant check` comment or close+reopen if stuck
 
 Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imports from `src/` or another skill, modifies main-repo files, or is tightly bound to a feature there (e.g. `skills/phone-conversation/`). A skill is **standalone** (PR to `sonichi/sutando-skills`) if it ships its own scripts/binaries, reads files but doesn't import main-repo modules, and works against any checkout. If unsure, ask in #design.
@@ -58,19 +57,15 @@ All per-user mutable state — `tasks/`, `results/`, `state/`, `data/`, `logs/`,
 
 **Resolution (every service reads the same):**
 
-1. `$SUTANDO_WORKSPACE` env var (override; `~` is expanded).
-2. `~/.sutando/workspace/` (default).
-
-The default deliberately avoids `~/Library/Application Support/sutando/` — that path is Sutando.app's territory (Chromium-style Cache/, GPUCache/, Cookies/, blob_storage/, etc.); the user-task workspace lives under its own hidden home-relative dir so the two concerns never collide. Historic anti-pattern: bridges fell back to the script's repo root via `Path(__file__).resolve().parent.parent`, which polluted `git status` and — when invoked from an app-bundled `src/` symlink — stranded owner DMs in a bundle-tasks/ dir while the watcher polled workspace-tasks/.
+**Default:** the workspace lives at `<repo>/workspace/` (in-repo). To override, edit `sutando.config.local.json` (per-clone, gitignored) — see [`docs/workspace-config.md`](docs/workspace-config.md). The `$SUTANDO_WORKSPACE` env var is honored as a legacy escape hatch with a one-time deprecation warning. Historic anti-pattern: bridges fell back to the script's repo root via `Path(__file__).resolve().parent.parent`, which polluted `git status` and — when invoked from an app-bundled `src/` symlink — stranded owner DMs in a bundle-tasks/ dir while the watcher polled workspace-tasks/.
 
 **Use the helper, don't reinvent the fallback:**
 - Python: `from workspace_default import resolve_workspace` → returns a `Path`.
 - TypeScript: `import { resolveWorkspace } from './workspace_default.js'` → returns a `string` (added in #821).
 - Swift: `AppDelegate.workspace` property in `src/Sutando/main.swift` (added in #837 — split alongside `repoRoot` for code-adjacent paths).
 
-Separately, `SUTANDO_REPO_DIR` (added in #831 cleanup) names the public-repo checkout for scripts like `sync-memory.sh` and `session-handoff.sh` that need the source tree. Do NOT conflate with `SUTANDO_WORKSPACE` — they live in different dirs (`~/Desktop/sutando` vs `~/.sutando/workspace/`).
+For full details on resolution order, overrides, and the protection layers (pre-commit hook + CI), see [`docs/workspace-config.md`](docs/workspace-config.md).
 
-For existing-repo migration + the stop-gap env, and the orphan-symlink cleanup (post-#835): see [`docs/workspace-contract.md`](docs/workspace-contract.md).
 
 ## Personal overrides
 
@@ -78,10 +73,10 @@ If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It con
 
 ## Work Status
 
-Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `state/core-status.json` lands in `<repo>/state/` — where no reader looks. Readers resolve `<workspace>/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
+Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `state/core-status.json` lands in `<repo>/state/` — where no reader looks. Readers resolve `$SUTANDO_WORKSPACE/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
 
 ```bash
-CORE_STATUS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/state/core-status.json"
+CORE_STATUS="$(bash scripts/sutando-config.sh workspace)/state/core-status.json"
 echo '{"status":"running","step":"<description>","ts":<epoch>}' > "$CORE_STATUS"   # start of significant work
 echo '{"status":"idle","ts":<epoch>}' > "$CORE_STATUS"                            # when done
 ```
@@ -125,7 +120,7 @@ This ensures the dashboard, result-watcher, and timeout logic work the same rega
 
 ## Core liveness signal
 
-Each running sutando-core writes `<workspace>/state/cores/<hostname>.alive`
+Each running sutando-core writes `$SUTANDO_WORKSPACE/state/cores/<hostname>.alive`
 every 30 seconds (started by `src/startup.sh` as a background process; source
 at `src/core_heartbeat.py`). The file is per-host so multiple cores on
 different machines coexist; mtime is the cross-host "is this core alive?"
@@ -201,7 +196,7 @@ When you need user input on a decision or are blocked:
 
 On each proactive loop pass, check `pending-questions.md` for unanswered items and surface them when the user is available.
 
-## Workspace layout
+## Project layout
 
 - Vision + docs: `README.md` (this directory)
 - Voice agent: `src/voice-agent.ts`

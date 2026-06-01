@@ -1,5 +1,7 @@
 # Workspace Contract
 
+> **Note:** For the current setup, see [`workspace-config.md`](workspace-config.md) — workspace now defaults to `<repo>/workspace/` and is configured via `sutando.config.local.json`. The principle below still holds: code lives in the repo, runtime state lives in the workspace; only the default location moved.
+
 Every file Sutando reads or writes lives in one of two locations. Knowing which is which prevents an entire class of split-brain bugs.
 
 ## The rule

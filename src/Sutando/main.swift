@@ -16,23 +16,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var lastDropTime: Date = .distantPast
     var screencaptureInFlight: Bool = false  // guards against stacked crosshair launches
     // Runtime state lives under the per-user workspace dir, not the repo
-    // checkout. Mirrors src/workspace_default.py + src/workspace_default.ts
-    // (PR #762 / #821). Resolution:
-    //   1. $SUTANDO_WORKSPACE (override; ~ expansion supported)
-    //   2. ~/.sutando/workspace/ (canonical default)
+    // checkout. **Delegates to SutandoConfig.resolveWorkspace()** as of the
+    // M0 cutover (was inline env-check + hardcoded ~/.sutando/workspace
+    // fallback). The Swift loader twin lives at
+    // src/Sutando/SutandoConfig.swift and matches src/sutando_config.{py,ts}
+    // byte-for-byte. Resolution order:
+    //   1. $SUTANDO_WORKSPACE env var (legacy escape hatch; warn once)
+    //   2. sutando.config.local.json -> workspace.path (per-clone override)
+    //   3. sutando.config.json -> workspace.path (tracked defaults)
+    //   4. ${REPO_DIR}/workspace baked-in default
     //
     // Pre-#762 main.swift wrote tasks/logs/state under the repo checkout via
     // CLAUDE.md walk-up. Post-#762 that dir no longer exists, so writeTask
-    // silently failed (try? write returns nil if parent dir missing) — the
-    // bug Chi hit 2026-05-18 where context-drop notified + logged but the
-    // bridge never saw the task.
-    let workspace: String = {
-        let env = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"]?.trimmingCharacters(in: .whitespaces)
-        if let env = env, !env.isEmpty {
-            return (env as NSString).expandingTildeInPath
-        }
-        return NSHomeDirectory() + "/.sutando/workspace"
-    }()
+    // silently failed — the bug Chi hit 2026-05-18 where context-drop
+    // notified + logged but the bridge never saw the task.
+    let workspace: String = SutandoConfig.resolveWorkspace()
 
     // Repo checkout for skills-adjacent paths (assets, src/*.py, scripts/*.sh)
     // that ship alongside the code. Same CLAUDE.md walk-up used before #762.

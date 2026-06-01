@@ -1,14 +1,14 @@
 # Known Issues
 
-## Workspace contract migration in progress
+## Workspace contract — Milestone 0 (in-repo default)
 
-The 3-space workspace contract (Code / Workspace / Memory — see [`docs/workspace-design.md`](docs/workspace-design.md)) is in the middle of a transition. Some existing scripts and skills still write per-user state into the repo (`<repo>/tasks/`, `<repo>/results/`, `<repo>/state/`, `<repo>/logs/`, `<repo>/data/`, etc.) instead of `$SUTANDO_WORKSPACE/`.
+The workspace now defaults to `<repo>/workspace/` (in-repo). Configuration goes through [`sutando.config.local.json`](docs/workspace-config.md) — the loader resolves the path with a clear precedence order (config file > legacy env var > baked-in default).
 
-**Effect for users**: depending on how a script was invoked, runtime state may end up in either location. On a workspace-pinned install, state written to the repo path is invisible to readers that look in `$SUTANDO_WORKSPACE`. Symptoms include sentinels that never trigger, scans that miss live data, or reply-context that doesn't reach the bot.
+**For existing users** with `SUTANDO_WORKSPACE` set in `.env` or shell init: the env var is still honored, and you'll see a one-time deprecation warning at startup pointing you at the config file. No action required for now; migrate when convenient.
 
-**Status**: A migration CLI (`scripts/sutando-migrate.sh`) is queued in PR #1271 to move existing repo-anchored state into the workspace. Per-site fixes for individual scripts are tracked in PRs #1272–#1334 (filed but held in draft until the V1 contract is finalized). The path-resolution audit (`workspace-contract-audit` skill) catches new violations at PR time.
+**For users with state in the old default location** (`~/.sutando/workspace/`): the upcoming Milestone 1 recovery skill (`bash scripts/sutando-migrate.sh`) will help you audit and move existing runtime data into the in-repo workspace.
 
-If you hit a path-resolution oddity, check whether your script is reading from the repo vs `$SUTANDO_WORKSPACE` and report the file/line in an issue.
+If you hit a path-resolution oddity, check the resolved workspace via `bash scripts/sutando-config.sh workspace` and report the file/line in an issue.
 
 ## Task status flickers in web UI after API restart
 

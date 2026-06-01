@@ -16,72 +16,36 @@
  *   2. ~/.sutando/workspace/
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join, parse } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
-let _fallbackWarnPrinted = false;
+import { resolveWorkspace as _resolveWorkspaceFromConfig } from './sutando_config.js';
 
 /**
- * Best-effort: read `SUTANDO_WORKSPACE=` from the repo's .env file.
+ * Resolve the workspace directory per the canonical contract.
  *
- * Walks up from this module's resolved path to find the nearest `.env`,
- * then scans for a `SUTANDO_WORKSPACE=` line. Returns the (tilde-expanded)
- * value or undefined on any failure — never throws. Used only to enrich
- * the fallback-warn message below; resolution itself does NOT consume
- * this value, so a user who genuinely wants the default still gets it.
+ * **Delegates to `src/sutando_config.ts::resolveWorkspace`** as of the
+ * M0 cutover. The new loader implements the resolution order:
+ *
+ *   1. $SUTANDO_WORKSPACE env var (legacy escape hatch; warn once)
+ *   2. sutando.config.local.json -> workspace.path (per-clone override)
+ *   3. sutando.config.json -> workspace.path (tracked defaults)
+ *   4. ${REPO_DIR}/workspace baked-in default
+ *
+ * This wrapper is preserved so existing callers don't need code changes
+ * — the export name + signature + return type are unchanged. Behavior
+ * differs in two ways from the pre-cutover version:
+ *
+ *   - Default location is ${REPO_DIR}/workspace (in-repo), not
+ *     ~/.sutando/workspace/. Users with $SUTANDO_WORKSPACE set keep
+ *     their old location with a one-time warning.
+ *   - .env declarations of SUTANDO_WORKSPACE no longer leak into
+ *     resolution when the env var itself is unset. The loader emits
+ *     a one-time stderr warning if .env disagrees with the resolved
+ *     workspace.
  */
-function grepEnvForWorkspace(): string | undefined {
-	try {
-		let cur = fileURLToPath(import.meta.url);
-		for (let i = 0; i < 5; i++) {
-			cur = dirname(cur);
-			if (cur === parse(cur).root) return undefined;
-			const envFile = join(cur, '.env');
-			if (existsSync(envFile)) {
-				for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-					const s = line.trim();
-					if (s.startsWith('SUTANDO_WORKSPACE=')) {
-						let val = s.split('=').slice(1).join('=').trim();
-						if (val.length >= 2 && val[0] === val[val.length - 1] && (val[0] === '"' || val[0] === "'")) {
-							val = val.slice(1, -1);
-						}
-						return val ? val.replace(/^~/, homedir()) : undefined;
-					}
-				}
-				return undefined;
-			}
-		}
-	} catch {
-		// Best-effort; never block resolution on .env probe failures.
-	}
-	return undefined;
-}
-
 export function resolveWorkspace(): string {
-	const env = process.env.SUTANDO_WORKSPACE?.trim();
-	if (env) return env.replace(/^~/, homedir());
-	const fallback = join(homedir(), '.sutando', 'workspace');
-	// Surface the silent-fallback bug class (see PR #1367/#1368): if .env
-	// defines SUTANDO_WORKSPACE but the process never got it (e.g. a service
-	// started outside `bash src/startup.sh`), the caller silently lands in
-	// the default while the rest of the fleet uses the override → split-brain.
-	// One stderr line per process makes the miss visible. We do NOT auto-honor
-	// the .env value here — that's a behavior change and lives in callers
-	// that opt into it (e.g. skills/agent-registry/scripts/_workspace_resolve.py).
-	if (!_fallbackWarnPrinted) {
-		_fallbackWarnPrinted = true;
-		const envFileVal = grepEnvForWorkspace();
-		if (envFileVal && envFileVal !== fallback) {
-			process.stderr.write(
-				`workspace: SUTANDO_WORKSPACE is unset in process env, falling back to ${fallback}. ` +
-				`NOTE: .env declares SUTANDO_WORKSPACE='${envFileVal}' which is NOT being honored here — ` +
-				`source .env or export the var before this process to avoid split-brain with other services.\n`
-			);
-		}
-	}
-	return fallback;
+	return _resolveWorkspaceFromConfig();
 }
 
 /**

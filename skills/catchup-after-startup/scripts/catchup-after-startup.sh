@@ -30,7 +30,14 @@ else
   done
   REPO="${REPO:-$HOME/Desktop/sutando}"   # falls through to the conventional path if probe finds nothing
 fi
-WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+# Workspace resolution goes through the canonical loader (M0 cutover).
+# Falls back to the legacy inline default only if the wrapper script
+# isn't present (e.g. catchup invoked from outside the repo).
+if [ -f "$REPO/scripts/sutando-config.sh" ]; then
+  WS="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
+else
+  WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+fi
 # Hours window: positional arg wins (so /catchup-after-startup 12 works as
 # documented), env var second, default 3h. Pre-review the script only read
 # CATCHUP_HOURS — the documented `[hours]` arg was silently ignored (Mini #1).

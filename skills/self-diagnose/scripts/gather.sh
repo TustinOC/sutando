@@ -47,9 +47,18 @@ mkdir -p "$OUT"
 # #769 review obs 4. Dual-path was added so pre-#762 installs don't
 # silently lose cold-review-log access; safe to remove after every node
 # has resolved its workspace at least once.
-WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
-if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-	NOTES_DIR="$SUTANDO_WORKSPACE/notes"
+# Workspace resolution goes through the canonical loader (M0 cutover).
+# Fallback to the legacy inline default keeps the script working in odd
+# host configurations where the wrapper isn't reachable.
+if [ -f "$REPO/scripts/sutando-config.sh" ]; then
+	WS="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
+else
+	WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+fi
+# NOTES_DIR remains a dual-path: prefer workspace/notes, fall back to repo/notes
+# for pre-#762 installs (per Lucy's #769 obs 4, drop-after 2026-08-15).
+if [ -d "$WS/notes" ]; then
+	NOTES_DIR="$WS/notes"
 else
 	NOTES_DIR="$REPO/notes"
 fi

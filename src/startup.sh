@@ -51,6 +51,30 @@ else
 fi
 if [ $missing -eq 1 ]; then echo ""; echo "Fix the above and try again."; exit 1; fi
 
+# Exercise the new config loader as a startup banner. Surfaces:
+#   • $SUTANDO_WORKSPACE legacy-escape-hatch warning (if env is set)
+#   • .env-drift warning (if .env declares a value but config resolves differently)
+#   • config parse errors (fails fast before init.sh tries to write to a bad path)
+#
+# stdout is discarded (just the JSON dump); stderr passes through so the user
+# sees diagnostics live. A non-zero exit means malformed config — the parse
+# error is already on stderr from this same invocation.
+#
+# Note: the actual workspace path used below in `WORKSPACE=...` still comes
+# from the legacy resolver in this file. Wiring it to come from the loader
+# is a follow-up change — this banner is the early-warning layer.
+if ! python3 -m src.sutando_config >/dev/null; then
+  echo "  ✗ sutando.config.json is malformed — fix the parse error above."
+  exit 1
+fi
+
+# Wire the tracked git hooks. Idempotent — re-running prints "already
+# installed" and exits 0. Done at startup so users don't have to remember
+# `bash scripts/install-git-hooks.sh` after cloning. If a user only ever
+# explores the repo without running startup.sh, the standalone script is
+# still there as a fallback (mentioned in README).
+bash "$REPO/scripts/install-git-hooks.sh" >/dev/null 2>&1 || true
+
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
 # pending-questions.md, build_log.md, crons.json, …). Idempotent — safe to
@@ -155,15 +179,19 @@ echo ""
 # Install Claude Code skills (runs every startup, idempotent)
 bash "$REPO/skills/install.sh" 2>/dev/null || true
 
-# Resolve the runtime workspace (separate from $REPO so per-user state lives
-# outside the git checkout). Same resolution shape as src/workspace_default.py:
-#   1. $SUTANDO_WORKSPACE env override (tilde-expand if needed)
-#   2. ~/.sutando/workspace/ (canonical default)
-#
-# All service logs + tasks/results land under $WORKSPACE/logs etc. instead of
-# the repo-root legacy paths. health-check + dashboard already read from
-# $WORKSPACE/logs — this redirects the writes to match.
-if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+# Resolve the runtime workspace via the canonical loader (M0 cutover).
+# The loader implements the full resolution order:
+#   1. $SUTANDO_WORKSPACE env var (legacy escape hatch; warn once)
+#   2. sutando.config.local.json -> workspace.path (per-clone override)
+#   3. sutando.config.json -> workspace.path (tracked defaults)
+#   4. ${REPO_DIR}/workspace baked-in default
+# Inline fallback retained for the rare case where the wrapper isn't
+# present (extracted-tarball install, etc.). All service logs + tasks/
+# results land under $WORKSPACE/logs etc. instead of the repo-root legacy
+# paths. health-check + dashboard already read from $WORKSPACE/logs.
+if [ -f "$REPO/scripts/sutando-config.sh" ]; then
+  WORKSPACE="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
+elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
   WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
 else
   WORKSPACE="$HOME/.sutando/workspace"
@@ -314,7 +342,7 @@ fi
 # Kill any running instance so the fresh binary can take over.
 if [ -f "$SUT_SRC" ] && { [ ! -f "$SUT_BIN" ] || [ "$SUT_SRC" -nt "$SUT_BIN" ]; }; then
   echo "  Compiling Sutando (source newer than binary)..."
-  if (cd "$REPO/src/Sutando" && swiftc -O -o Sutando main.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
+  if (cd "$REPO/src/Sutando" && swiftc -O -o Sutando main.swift SutandoConfig.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
     echo "  ✓ Sutando compiled"
 
     # Sync the fresh binary into the .app bundle if one exists, ensure the

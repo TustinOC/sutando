@@ -20,20 +20,27 @@
 
 set -u
 
-# Resolve TASKS_DIR. Priority: explicit positional arg → $SUTANDO_WORKSPACE/tasks
-# → canonical default `~/.sutando/workspace/tasks` (matching
-# `workspace_default.resolve_workspace()` — the shared contract every bridge
-# already follows). The bridges (discord-bridge.py, telegram-bridge.py,
-# dm-result.py — see PRs #708/#720/#722/#723) write to that default when env
-# is unset; if this watcher fell back to `<repo>/tasks/` instead, the bridges
-# would write to one dir and the watcher would poll another, so owner DMs land
-# silently. Diagnosed 2026-05-15 (~3 dropped DMs over 17 min) and again
-# 2026-05-16 (~45 min silent gap when the Monitor was started without
-# SUTANDO_WORKSPACE exported into its env) — second incident motivated
-# replacing the legacy `<repo>/tasks` fallback with the workspace default so
-# the divergence can't happen even when callers forget to export.
+__SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+__REPO_ROOT="$(cd "$__SCRIPT_DIR/.." && pwd)"
+
+# Resolve TASKS_DIR. Priority: explicit positional arg → canonical loader
+# (env + config + default) — matching `workspace_default.resolve_workspace()`,
+# the shared contract every bridge already follows via the M0 cutover.
+# The bridges (discord-bridge.py, telegram-bridge.py, dm-result.py — see PRs
+# #708/#720/#722/#723) write to the resolved workspace; if this watcher fell
+# back to `<repo>/tasks/` instead, the bridges would write to one dir and the
+# watcher would poll another, so owner DMs land silently. Diagnosed 2026-05-15
+# (~3 dropped DMs over 17 min) and again 2026-05-16 (~45 min silent gap when
+# the Monitor was started without SUTANDO_WORKSPACE exported into its env) —
+# second incident motivated replacing the legacy `<repo>/tasks` fallback with
+# the workspace default so the divergence can't happen even when callers
+# forget to export. M0 cutover delegates this to scripts/sutando-config.sh,
+# with the inline legacy-default fallback retained for non-checkout installs.
 if [ -n "${1:-}" ]; then
   TASKS_DIR="$1"
+elif [ -f "$__REPO_ROOT/scripts/sutando-config.sh" ]; then
+  __WS="$(bash "$__REPO_ROOT/scripts/sutando-config.sh" workspace)"
+  TASKS_DIR="$__WS/tasks"
 elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
   TASKS_DIR="$SUTANDO_WORKSPACE/tasks"
 else
@@ -53,10 +60,12 @@ TASKS_DIR_ABS="$(cd "$TASKS_DIR" && pwd -P)"
 # the session and turn into an orphan. The trap below removes the file on a
 # clean exit; the Stop hook removes it after the kill on dirty exits.
 #
-# Same workspace resolution as TASKS_DIR (above): explicit env override,
-# else canonical default. Living under state/ matches the workspace contract
+# Same workspace resolution as TASKS_DIR (above): M0 cutover routes through
+# the canonical loader. Living under state/ matches the workspace contract
 # in CLAUDE.md (loose status/state files belong there).
-if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+if [ -f "$__REPO_ROOT/scripts/sutando-config.sh" ]; then
+  STATE_DIR="$(bash "$__REPO_ROOT/scripts/sutando-config.sh" workspace)/state"
+elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
   STATE_DIR="${SUTANDO_WORKSPACE/#\~/$HOME}/state"
 else
   STATE_DIR="$HOME/.sutando/workspace/state"

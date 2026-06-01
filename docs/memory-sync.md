@@ -62,7 +62,7 @@ The script self-heals if the local sync clone gets stuck on a non-`main` branch.
 | Variable | Default | Notes |
 |---|---|---|
 | `SUTANDO_MEMORY_REPO` | (required) | git URL of your private memory repo |
-| `SUTANDO_WORKSPACE` | `~/Desktop/sutando` | path to your sutando working tree |
+| `SUTANDO_WORKSPACE` | `<repo>/workspace/` (M0 default) | path to your workspace; legacy escape hatch — prefer `sutando.config.local.json` (see [`workspace-config.md`](workspace-config.md)) |
 | `SUTANDO_MEMORY_SYNC_DIR` | `~/.sutando/memory-sync` | local clone path |
 
 ## Optional: notes/ as a symlink

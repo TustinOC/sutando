@@ -204,7 +204,14 @@ fi
 #
 # The same convention is documented in this script's pre-2026-05-11 history
 # ("notes/ bidirectional rsync removed: both nodes now symlink").
-WS_DIR="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+# Workspace resolution goes through the canonical loader (M0 cutover).
+# Fallback retains the legacy inline default for the rare case where the
+# wrapper isn't present (e.g. extracted-archive install).
+if [ -f "$REPO_DIR/scripts/sutando-config.sh" ]; then
+    WS_DIR="$(bash "$REPO_DIR/scripts/sutando-config.sh" workspace)"
+else
+    WS_DIR="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+fi
 # Disambiguation guard: if a host has SUTANDO_WORKSPACE pointing at a public-repo
 # checkout (legacy semantic), the symlink-bootstrap below would point at
 # `<repo>/notes` not the workspace `notes/`. Detect via `.git` presence + skip.
