@@ -6,6 +6,23 @@
 
 ---
 
+## High-level decision
+
+**Use `$SUTANDO_REPO_DIR/workspace/` to save all per-user state and data.** The decision to put the workspace at an in-repo address is intentional: it preserves **Claude Code's cwd-anchored privileges** (CLAUDE.md auto-load, skills auto-discovery, project-slug for session transcripts, hook scope, no `--add-dir` needed). Any other location forfeits these and reintroduces overlay machinery v0.7 already tried and backed out.
+
+**Consequence**: the user-specified `$SUTANDO_WORKSPACE` env override is **retired**. There is no path to override the workspace location. (Edge cases — shared workspace across multiple checkouts — are addressed via filesystem-level symlink, not env config.)
+
+### Mitigations for the downside of putting data inside the repo
+
+| Concern | Mitigation |
+|---|---|
+| **Data durability** — workspace dies with the repo (delete the repo, lose the state) | **`$SUTANDO_VAULT`** is the separate durability layer. Sync mechanism around it: cron (today's 30-min cadence via `sync-memory.sh`), SessionStart / SessionEnd hooks, or manual invocation. Memory syncs by default; user can extend the allowlist. See §4. |
+| **Data volume** — accumulated state could distract Claude Code's cwd-anchored discovery (slow project-slug indexing, large `git status`, etc.) | **Nightly archive cron** (`scripts/archive-workspace.sh`) rotates stale `tasks/processed/` + `logs/` (>30 days old) into `archive/<yyyy-mm>/`. See §2.6. Other content (notes/, data/) is user-managed. |
+
+These two mitigations are what make the in-repo decision safe to make as a default.
+
+---
+
 ## 1. Goal
 
 Define exactly two things:
