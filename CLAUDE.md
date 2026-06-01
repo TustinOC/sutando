@@ -15,8 +15,8 @@ Be concise and direct. Prefer action over explanation. Default to the smallest a
 ## Architecture rules
 
 Sutando's file state lives in two spaces the agent reads/writes:
-- **Code** (`$SUTANDO_REPO_DIR`, the git checkout) — tracked source. Internal organization covered by this section.
-- **Workspace** (`$SUTANDO_IN_REPO_WORKSPACE`, per-user runtime state) — lives inside the repo by default (`<repo>/workspace/`), gitignored. Internal organization covered by §Workspace below.
+- **Code** ( `$SUTANDO_REPO_DIR`, the git checkout) — tracked source. Internal organization covered by this section.
+- **Workspace** (`$SUTANDO_IN_REPO_WORKSPACE`, i.e., `workspace/` , per-user runtime state) — lives inside the repo by default (`<repo>/workspace/`), gitignored. Internal organization covered by §Workspace below.
 
 ### Code layers
 
@@ -68,31 +68,33 @@ The workspace (`$SUTANDO_IN_REPO_WORKSPACE`, default `$SUTANDO_REPO_DIR/workspac
 
 | Path | Purpose |
 |---|---|
-| `tasks/` | Inbound message queue — bridges write, agent reads + archives. |
-| `results/` | Outbound reply queue — agent writes, bridges deliver. |
-| `state/` | Cross-process status/liveness JSON (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`, `cores/<host>.alive`). One writer per file. |
-| `logs/` | Append-only chrono event streams (bridges, watchers, sync runs). |
-| `notes/` | Long-form human-readable content — workflow notes, design drafts, analysis, learned procedures. |
-| `data/` | Durable input data the agent processes (datasets, training corpus, fetched feeds, watchlists). |
-| `build_log.md` | Single-file done / in-flight / next snapshot. Append-only. |
-| `pending-questions.md` | Unanswered questions blocking work, awaiting owner input. |
+| `workspace/tasks/` | Inbound message queue — bridges write, agent reads + archives. |
+| `workspace/results/` | Outbound reply queue — agent writes, bridges deliver. |
+| `workspace/state/` | Cross-process status/liveness JSON (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`, `cores/<host>.alive`). One writer per file. |
+| `workspace/logs/` | Append-only chrono event streams (bridges, watchers, sync runs). |
+| `workspace/notes/` | Long-form human-readable content — workflow notes, design drafts, analysis, learned procedures. |
+| `workspace/data/` | Durable input data the agent processes (datasets, training corpus, fetched feeds, watchlists). |
+| `workspace/skills/` | Personal/custom skills the user adds for their own use — kept locally, not contributed to the public `skills/` tree at the repo root. |
+| `workspace/build_log.md` | Single-file done / in-flight / next snapshot. Append-only. |
+| `workspace/pending-questions.md` | Unanswered questions blocking work, awaiting owner input. |
 
 The workspace root holds only top-level directories + the two top-level markdown files; loose status/state `.json` files belong under `state/`. Code, skills source, and repo configuration stay in the repo root (separate concern).
 
-**Expanding the workspace.** The user can add their own subdirectories under `$SUTANDO_IN_REPO_WORKSPACE/` for custom content (e.g. `drafts/`, `research/`, `screenshots/`, `inbox/`). New top-level subdirs are automatically gitignored (the whole `/workspace/` tree is) and inherit the §Confidentiality default-deny posture. **Add agent-facing rules for new subdirs to `PERSONAL_CLAUDE.md`** — what content goes there, when the agent reads/writes it, naming conventions, retention. CLAUDE.md (this file) carries the shared/built-in shape; PERSONAL_CLAUDE.md carries the per-user expansion (see §Personal overrides). If the content should persist across machines or survive a repo reclone, add the new dir to the vault sync allowlist; otherwise it stays local-only.
+**Expanding the workspace.** The user can add their own subdirectories under `$SUTANDO_IN_REPO_WORKSPACE/` for custom content (e.g. `workspace/drafts/`, `workspace/research/`, `workspace/assets/`, `workspace/inbox/`). New top-level subdirs are automatically gitignored (the whole `/workspace/` tree is) and inherit the §Confidentiality default-deny posture. **Add agent-facing rules for new subdirs to `PERSONAL_CLAUDE.md`** — what content goes there, when the agent reads/writes it, naming conventions, retention. CLAUDE.md (this file) carries the shared/built-in shape; PERSONAL_CLAUDE.md carries the per-user expansion (see §Personal overrides). If the content should persist across machines or survive a repo reclone, add the new dir to the vault sync allowlist; otherwise it stays local-only.
 
 ### Where does new state/data belong? (decision guide)
 
 When the agent writes a new file under `$SUTANDO_IN_REPO_WORKSPACE/`, walk this list top-to-bottom and stop at the first match:
 
-1. **Is it an inbound message claimed from a channel (Discord / Telegram / Slack / voice / phone / chat)?** → `tasks/task-{id}.txt`. The bridges write these; the agent only reads + archives.
-2. **Is it the agent's reply to a task (delivered back through the originating channel)?** → `results/task-{id}.txt`. Bridge polls, delivers, archives. See CLAUDE.md "Result-body protocol markers" for `[deduped:]`, `[no-send]`, `[channel:]`, `[file:]`.
-3. **Is it cross-process status/liveness signaling, machine-readable, that another component polls?** (e.g. `core-status.json`, `voice-state.json`, `contextual-chips.json`, `cores/<host>.alive`) → `state/`. Loose `.json` files only; one writer per file.
-4. **Is it an append-only chronological event stream?** (e.g. process stdout/stderr, sync logs, watchdog traces) → `logs/<component>.log`.
-5. **Is it long-form human-readable content?** (workflow notes, design drafts, analysis, architecture history, learned procedures) → `notes/<slug>.md`. Date-stamp the filename if it's session-bound; pick a topical slug if it's evergreen.
-6. **Is it a snapshot of what's done / in-flight / next?** → append a dated entry to `build_log.md`. Single file, append-only — never overwrite earlier sections.
-7. **Is it a question you're blocked on and need to surface to the user later?** → append to `pending-questions.md`. Also write `results/question-{ts}.txt` if voice is connected, and send a macOS notification.
-8. **Is it durable input data the agent processes?** (datasets, training corpus, fetched feeds, watchlists) → `data/<topic>/`.
+1. **Is it an inbound message claimed from a channel (Discord / Telegram / Slack / voice / phone / chat)?** → `workspace/tasks/task-{id}.txt`. The bridges write these; the agent only reads + archives.
+2. **Is it the agent's reply to a task (delivered back through the originating channel)?** → `workspace/results/task-{id}.txt`. Bridge polls, delivers, archives. See CLAUDE.md "Result-body protocol markers" for `[deduped:]`, `[no-send]`, `[channel:]`, `[file:]`.
+3. **Is it cross-process status/liveness signaling, machine-readable, that another component polls?** (e.g. `core-status.json`, `voice-state.json`, `contextual-chips.json`, `cores/<host>.alive`) → `workspace/state/`. Loose `.json` files only; one writer per file.
+4. **Is it an append-only chronological event stream?** (e.g. process stdout/stderr, sync logs, watchdog traces) → `workspace/logs/<component>.log`.
+5. **Is it long-form human-readable content?** (workflow notes, design drafts, analysis, architecture history, learned procedures) → `workspace/notes/<slug>.md`. Date-stamp the filename if it's session-bound; pick a topical slug if it's evergreen.
+6. **Is it a snapshot of what's done / in-flight / next?** → append a dated entry to `workspace/build_log.md`. Single file, append-only — never overwrite earlier sections.
+7. **Is it a question you're blocked on and need to surface to the user later?** → append to `workspace/pending-questions.md`. Also write `workspace/results/question-{ts}.txt` if voice is connected, and send a macOS notification.
+8. **Is it durable input data the agent processes?** (datasets, training corpus, fetched feeds, watchlists) → `workspace/data/<topic>/`.
+9. **Is it a personal/custom skill the user adds for their own use (not contributing back)?** → `workspace/skills/<skill-name>/`. Mirrors the public `skills/` layout at the repo root, but stays local.
 
 If two layers seem to fit, prefer the more specific one (the `state/` JSON channel beats the `logs/` chrono stream beats raw `notes/` prose). If you're patching a one-off bug, keep the write in the layer where the bug lives — don't smuggle a refactor into a fix commit.
 
