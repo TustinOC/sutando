@@ -103,7 +103,7 @@ See `screen_companion.md` at the repo root. Owner is iterating on the model (M1 
 
 Configs are non-executable YAML — they only declare the interaction shape. No path to arbitrary code execution from a config alone.
 
-**`tools_allow` is hard-enforced at activation time.** When `activate_screen_companion` is called, the tool invokes `session.updateTools()` via the `callUpdateTools` hook in `src/vision-tools.ts`, replacing the live VoiceSession's tool surface with only the tools named in `tools_allow` plus two always-retained tools (`activate_screen_companion` for mode-switching, `deactivate_screen_companion` for exit). Gemini physically cannot call tools outside this set for the rest of the session.
+**`tools_allow` is hard-enforced at activation time.** When `activate_screen_companion` is called, the tool invokes `session.updateTools()` via the `callUpdateTools` hook in `src/vision-tools.ts`, replacing the live VoiceSession's tool surface with only the tools named in `tools_allow` plus the **always-retained set** (`ALWAYS_RETAIN` in `skills/screen-companion/tools.ts`): `activate_screen_companion`, `deactivate_screen_companion`, `switch_mode`, and `work` (task delegation). The restriction filters the **full registered session surface** (`getFullToolSurface()`), not just `inlineTools`, so non-inline `mainAgentTools` like `work` and `switch_mode` survive the restriction (#1365). Gemini physically cannot call tools outside this set for the rest of the session.
 
 To exit: the user says "exit" / "stop" / "done" and Gemini calls `deactivate_screen_companion`, which calls `callRestoreTools()` to restore the full pre-activation tool surface.
 
@@ -117,7 +117,7 @@ Configs still cannot grant tools the active VoiceSession doesn't already expose 
 
 What IS persisted by default:
 - **Text transcript** of the spoken conversation, in `<workspace>/data/screen-companion-<sessionId>.jsonl`. Same convention as `phone-conversation/conversation-server.ts` + `discord-voice/discord-voice-server.ts`.
-- **Notes the user explicitly asks Sutando to take** — saved to `<workspace>/notes/` once a `take_note` tool lands (planned; see issue #797). Today, "remember this" requests are persisted only as part of the conversation transcript above.
+- **Notes the user explicitly asks Sutando to take** — saved to `<workspace>/notes/` via the `take_note` tool. "Remember this" / "note that" requests during a session land as `.md` files under `notes/` with a `screen-companion` tag.
 
 What is NOT persisted by default:
 - Vision frames (the screenshots themselves) — sent to Gemini Live and discarded.

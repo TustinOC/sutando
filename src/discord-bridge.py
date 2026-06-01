@@ -53,6 +53,7 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
+from single_instance import acquire as _single_instance_acquire  # noqa: E402
 import discord_config  # noqa: E402  — Sutando workspace-local discord config (#1147)
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
@@ -2826,6 +2827,15 @@ async def _handle_discord_message(message, force=False):
     # line into the task file's k:v shape (per qingyun review on #1077).
     channel_name = (getattr(message.channel, "name", None) or "DM").replace("\n", " ")
     guild_name = (message.guild.name if message.guild else "DM").replace("\n", " ")
+    # When this message is a reply, emit the parent's id so the core agent can
+    # re-fetch the full original on demand rather than relying on the lossy
+    # 400-char `[Replying to ...]` snippet. Mirrors how the official Claude
+    # Discord plugin works (reference by message_id + fetch).
+    parent_msg_line = (
+        f"parent_message_id: {message.reference.message_id}\n"
+        if getattr(message, "reference", None) and message.reference.message_id
+        else ""
+    )
     task_file.write_text(
         f"id: {task_id}\n"
         f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
@@ -2835,6 +2845,7 @@ async def _handle_discord_message(message, force=False):
         f"channel_name: {channel_name}\n"
         f"guild_name: {guild_name}\n"
         f"source_message_id: {message.id}\n"
+        f"{parent_msg_line}"
         f"user_id: {message.author.id}\n"
         f"access_tier: {access_tier}\n"
         f"priority: {priority}\n"
@@ -3833,4 +3844,5 @@ if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "send":
         _send_via_rest(sys.argv[2], " ".join(sys.argv[3:]))
     else:
+        _single_instance_acquire("discord-bridge")
         client.run(TOKEN, log_handler=None)
