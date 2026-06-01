@@ -51,24 +51,26 @@ Read `CONTRIBUTING.md` and follow its "Before opening any PR or issue" section. 
 Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imports from `src/` or another skill, modifies main-repo files, or is tightly bound to a feature there (e.g. `skills/phone-conversation/`). A skill is **standalone** (PR to `sonichi/sutando-skills`) if it ships its own scripts/binaries, reads files but doesn't import main-repo modules, and works against any checkout. If unsure, ask in #design.
 
 ## Workspace contract
-
-Sutando's file state lives in three concentric spaces — **Code** (`$SUTANDO_REPO_DIR`, the git checkout), **State** (`$SUTANDO_WORKSPACE`, per-user runtime), **Memory** (`$SUTANDO_MEMORY_DIR`, user-content synced across the fleet — legacy alias `$SUTANDO_PRIVATE_DIR` honored for one release per #870). See [`docs/workspace-design.md`](docs/workspace-design.md) for the 3-space mental model + "Quick decision: which space?" flowchart when adding new code or data.
+# TODO-VAULT
+Sutando's file state lives in three concentric spaces — **Code** (`$SUTANDO_REPO_DIR`, the git checkout), **State** (`$SUTANDO_IN_REPO_WORKSPACE`, per-user runtime), **Memory** (`$SUTANDO_MEMORY_DIR`, user-content synced across the fleet — legacy alias `$SUTANDO_PRIVATE_DIR` honored for one release per #870). See [`docs/workspace-design.md`](docs/workspace-design.md) for the 3-space mental model + "Quick decision: which space?" flowchart when adding new code or data.
 
 All per-user mutable state — `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md`, etc. — lives under a single **workspace** directory. Loose status/state `.json` files (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`) live under `state/`; the workspace root holds only the top-level directories. Code, skills source, and repo configuration stay in the repo root (separate concern).
 
 **Resolution (every service reads the same):**
 
-1. `$SUTANDO_WORKSPACE` env var (override; `~` is expanded).
-2. `~/.sutando/workspace/` (default).
+1. `$SUTANDO_IN_REPO_WORKSPACE` env var (override; `~` is expanded).
+2. `$SUTANDO_REPO_DIR/workspace/` (default, **highly recommended**) — gitignored via repo `.gitignore`.
 
-The default deliberately avoids `~/Library/Application Support/sutando/` — that path is Sutando.app's territory (Chromium-style Cache/, GPUCache/, Cookies/, blob_storage/, etc.); the user-task workspace lives under its own hidden home-relative dir so the two concerns never collide. Historic anti-pattern: bridges fell back to the script's repo root via `Path(__file__).resolve().parent.parent`, which polluted `git status` and — when invoked from an app-bundled `src/` symlink — stranded owner DMs in a bundle-tasks/ dir while the watcher polled workspace-tasks/.
+The in-repo default exists so the workspace inherits the **full set of Claude Code cwd privileges**: CLAUDE.md auto-load + ancestor walk, skills auto-discovery under `<cwd>/skills/`, project-slug for transcripts under `~/.claude/projects/`, no `--add-dir` needed for state reads, hook-event resolution, and SessionStart/SessionEnd hook scope. Putting the workspace anywhere else (e.g. `~/.sutando/workspace/`) forfeits these — overrides via env var should be deliberate (e.g. shared workspace across multiple repo checkouts), not default.
+
+Historic anti-pattern (still avoid): bridges falling back to the script's repo root via `Path(__file__).resolve().parent.parent` — that polluted `git status` directly. The in-repo workspace is safe because it's gitignored at `/workspace/`; the danger was untracked top-level files, not a contained subdir.
 
 **Use the helper, don't reinvent the fallback:**
 - Python: `from workspace_default import resolve_workspace` → returns a `Path`.
 - TypeScript: `import { resolveWorkspace } from './workspace_default.js'` → returns a `string` (added in #821).
 - Swift: `AppDelegate.workspace` property in `src/Sutando/main.swift` (added in #837 — split alongside `repoRoot` for code-adjacent paths).
 
-Separately, `SUTANDO_REPO_DIR` (added in #831 cleanup) names the public-repo checkout for scripts like `sync-memory.sh` and `session-handoff.sh` that need the source tree. Do NOT conflate with `SUTANDO_WORKSPACE` — they live in different dirs (`~/Desktop/sutando` vs `~/.sutando/workspace/`).
+Separately, `SUTANDO_REPO_DIR` (added in #831 cleanup) names the public-repo checkout for scripts like `sync-memory.sh` and `session-handoff.sh` that need the source tree. `SUTANDO_IN_REPO_WORKSPACE` lives inside `SUTANDO_REPO_DIR` by default (`<repo>/workspace/`) — but the two are still distinct env vars: the repo dir holds code (tracked), the workspace dir holds per-user state (gitignored). Don't conflate.
 
 For existing-repo migration + the stop-gap env, and the orphan-symlink cleanup (post-#835): see [`docs/workspace-contract.md`](docs/workspace-contract.md).
 
@@ -81,7 +83,7 @@ If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It con
 Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `state/core-status.json` lands in `<repo>/state/` — where no reader looks. Readers resolve `<workspace>/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
 
 ```bash
-CORE_STATUS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}/state/core-status.json"
+CORE_STATUS="${SUTANDO_IN_REPO_WORKSPACE:-${SUTANDO_REPO_DIR:-$PWD}/workspace}/state/core-status.json"
 echo '{"status":"running","step":"<description>","ts":<epoch>}' > "$CORE_STATUS"   # start of significant work
 echo '{"status":"idle","ts":<epoch>}' > "$CORE_STATUS"                            # when done
 ```
