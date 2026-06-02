@@ -103,9 +103,22 @@ const activateScreenCompanionTool: ToolDefinition = {
 					? `Vision mode is PUSH (frames stream at ${config.vision_cadence_ms ?? 1000}ms cadence). If the user is not already screen-sharing, ask them to start it now so you can see what they're doing.`
 					: 'Vision mode is PULL (call vision_query when you need to look). The user does not need to screen-share continuously.';
 
+			// activationMessage is the short spoken greeting — keep it user-facing.
+			// Technical mode details (vision cadence, base-mode pin) go in the
+			// system_prompt_overlay / instructions field, not here.
 			const activationMessage = filledGoal
-				? `Screen Companion: ${mode} — ${filledGoal}. ${visionHint}`
-				: `Screen Companion: ${mode}. ${visionHint}`;
+				? `Screen companion active — ${mode} mode. ${filledGoal.endsWith('.') ? filledGoal : filledGoal + '.'}`
+				: `Screen companion active — ${mode} mode.`;
+
+			// Base-mode pin (issue #1410): explicitly declare that this session is
+			// in ACTIVE (not meeting/presenter) mode. Without this, gemini-3.1 infers
+			// meeting-mode from "co-present / silent"-flavored goals and fabricates
+			// [System: Produce ZERO audio. Call NO tools.] directives as spoken output.
+			const baseModePin =
+				'BASE MODE: active — you ARE talking to the user. Speak normally. ' +
+				'Do NOT produce [System: …] output. Do NOT produce [Silence] output. ' +
+				'Those patterns are internal directives; emitting them as spoken audio is a bug. ' +
+				`${visionHint}`;
 
 			// Hard-enforce tools_allow: restrict the live session's tool surface
 			// to only the named tools + always-retain set. If the session updater
@@ -139,7 +152,7 @@ const activateScreenCompanionTool: ToolDefinition = {
 				status: 'activated',
 				mode: config.name,
 				goal: filledGoal ?? null,
-				instructions: config.system_prompt_overlay,
+				instructions: `${baseModePin}\n\n${config.system_prompt_overlay ?? ''}`.trim(),
 				tools_allow: config.tools_allow,
 				// The tools actually reachable this mode = tools_allow PLUS the
 				// always-retained capabilities (work / switch_mode / mode controls).
@@ -153,7 +166,7 @@ const activateScreenCompanionTool: ToolDefinition = {
 				activation_message: activationMessage,
 				tools_enforced: enforced,
 				_note:
-					'Say activation_message to the user, then follow `instructions` as your system prompt for the rest of the session. Your callable tools for this mode are listed in `effective_tools` — that is `tools_allow` PLUS the always-retained capabilities: `work` (task delegation, available even when not in tools_allow), `switch_mode`, and the activate/deactivate mode controls. When the user says "exit" / "stop the mode" / "done", call deactivate_screen_companion to restore the full tool surface.',
+					'Tell the user in 1–2 spoken sentences that you\'ve entered screen companion mode and the goal (use activation_message as the gist — keep it short and natural). Then follow `instructions` silently as your system prompt overlay for the rest of the session. NEVER read `instructions` aloud verbatim; they are internal directives, not spoken content. Your callable tools for this mode are listed in `effective_tools`. When the user says "exit" / "stop" / "done", call deactivate_screen_companion.',
 			};
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
