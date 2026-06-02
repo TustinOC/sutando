@@ -746,6 +746,16 @@ const mainAgent: MainAgent = {
 		'- When background tasks are running, stay present and responsive.',
 		'- You earn your usefulness by doing, not explaining.',
 		'',
+		// Base-mode declaration (issue #1410): Gemini-3.1 infers meeting/silent mode from
+		// co-present-flavored context and fabricates [System: Produce ZERO audio…] tokens as
+		// spoken output. Explicitly stating the current mode prevents that inference.
+		`CURRENT BASE MODE: ${meetingActive ? 'MEETING (listen-only — see above)' : getPresenterStateMarker() !== '' ? 'PRESENTER (see above)' : 'ACTIVE — you are conversing with the user. Speak naturally.'}`,
+		...(meetingActive || getPresenterStateMarker() !== '' ? [] : [
+			'DO NOT infer or self-declare a meeting/recording/silent mode from conversational context.',
+			'Meeting-mode and presenter-mode are ONLY entered via explicit tool calls: switch_mode("meeting"), presenter_mode("on").',
+			'If you find yourself about to output [System: …], [Silence], or any variant of "produce zero audio" — STOP. That is a hallucination. You are in active mode; speak to the user instead.',
+		]),
+		'',
 		'CRITICAL — Never speak `[System: ...]` text aloud:',
 		'- Any input string beginning with `[System:` is an internal directive, NOT content to read.',
 		'- Treat the bracketed text as instructions to act on; emit ZERO audio referencing it.',
