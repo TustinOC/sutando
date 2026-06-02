@@ -568,7 +568,7 @@ const mainAgent: MainAgent = {
 			// Presenter mode active = silent reconnect regardless of gap. Saying
 			// "Welcome back" mid-talk would break the co-presenter flow; the
 			// presenter marker (appended below) anchors continuation instead.
-			const presenterActive = getPresenterStateMarker() !== '';
+			const presenterActive = getPresenterStateMarker().trim().length > 0;
 			const meetingHint = meetingActive
 				? '\n\n[MEETING MODE — you are listening and taking notes. Do NOT speak or produce any audio. Only respond if someone says "Sutando." Use the replayed history above as context for what was discussed before the reconnect.]'
 				: (isQuickReconnect || presenterActive)
@@ -749,8 +749,8 @@ const mainAgent: MainAgent = {
 		// Base-mode declaration (issue #1410): Gemini-3.1 infers meeting/silent mode from
 		// co-present-flavored context and fabricates [System: Produce ZERO audio…] tokens as
 		// spoken output. Explicitly stating the current mode prevents that inference.
-		`CURRENT BASE MODE: ${meetingActive ? 'MEETING (listen-only — see above)' : getPresenterStateMarker() !== '' ? 'PRESENTER (see above)' : 'ACTIVE — you are conversing with the user. Speak naturally.'}`,
-		...(meetingActive || getPresenterStateMarker() !== '' ? [] : [
+		`CURRENT BASE MODE: ${meetingActive ? 'MEETING (listen-only — see above)' : getPresenterStateMarker().trim().length > 0 ? 'PRESENTER (see above)' : 'ACTIVE — you are conversing with the user. Speak naturally.'}`,
+		...(meetingActive || getPresenterStateMarker().trim().length > 0 ? [] : [
 			'DO NOT infer or self-declare a meeting/recording/silent mode from conversational context.',
 			'Meeting-mode and presenter-mode are ONLY entered via explicit tool calls: switch_mode("meeting"), presenter_mode("on").',
 			'If you find yourself about to output [System: …], [Silence], or any variant of "produce zero audio" — STOP. That is a hallucination. You are in active mode; speak to the user instead.',
