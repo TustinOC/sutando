@@ -1,0 +1,1600 @@
+#!/usr/bin/env bash
+# sutando-migrate.sh — M1 Part 2 recovery / migration CLI
+#
+# Migrates per-user workspace state from legacy locations to the canonical M0
+# in-repo workspace (<repo>/workspace/ by default; honors sutando.config.local.json
+# and $SUTANDO_WORKSPACE legacy env override).
+#
+# Sources auto-detected (any subset may be present):
+#   A  <repo>/                                — pre-M0 repo-root writes (notes/, state/,
+#                                                results/, tasks/, logs/, data/, build_log.md,
+#                                                conversation.log, pending-questions.md,
+#                                                session-state.md, context-drop.txt)
+#   B  ~/.sutando/workspace/                  — pre-M0 default fallback
+#   C  $SUTANDO_WORKSPACE  (env / .env)       — custom override (commonly the
+#                                                managed-sync workspace dir)
+#
+# Per-class action (file-class → strategy):
+#   structural-copy      notes/, data/, logs/, results/archive/, results/calls/,
+#                        config/, slack-inbox/, telegram-inbox/, tasks/archive/
+#   collision/keep-both  notes/*.md, data/* user files
+#   newest-mtime-wins    state/*.json snapshots, pending-questions.md,
+#                        session-state.md
+#   append-merge OR      build_log.md, conversation.log, context-drop.txt
+#     sidecar (default)
+#   re-home              loose root *.json (cloud-auth, device, contextual-chips,
+#                        voice-state, core-status) → <dest>/state/
+#   skip-ephemeral       *.alive, tasks/task-*.txt + results/task-*.txt <60s old,
+#                        migration-backup-*.tar.gz, .gitkeep, .DS_Store
+#   skip-vcs             .git/  (handled by separate sync-rehome script if
+#                        sync is in use; otherwise orphaned in source)
+#
+# Modes:
+#   scan      (default) — read-only audit; print per-source per-class action; exits 0
+#   commit    — actually do it (rsync -a + per-class strategy; backup first)
+#   verify    — post-migration: source-empty + dest-complete + hash match
+#   rollback  — restore <dest> from a prior migration-backup tarball
+#
+# Safety guarantees (per `feedback_design_quality`):
+#   - Idempotent at every phase; re-runnable after partial failure
+#   - Atomic per-file: rsync → sha256 verify → mark source-migrated → only then delete source (if --delete)
+#   - Backup <dest> to <dest>/state/migration-backup-<ts>.tar.gz before any commit-mode write
+#   - Refuses if realpath(dest) == realpath(any source)
+#   - Refuses to follow source symlinks (the #1149 footgun)
+#   - In-flight protection: tasks/*.txt + results/*.txt newer than $INFLIGHT_GUARD_SEC are skipped+warned
+#   - Loud failure on partial state (set -euo pipefail); no silent fallbacks
+#
+# Honors `feedback_workspace_m1_no_auto_commit`: this script mutates workspace
+# DATA but never runs `git commit` against any source/dest repo. The
+# sync-workspace.sh re-route is a separate concern (see sutando-plus's
+# sutando-migrate-sync.sh).
+#
+# Usage:
+#   bash scripts/sutando-migrate.sh                       # scan (dry-run)
+#   bash scripts/sutando-migrate.sh --json                # scan, JSON output
+#   bash scripts/sutando-migrate.sh --source A,B          # restrict sources scanned
+#   bash scripts/sutando-migrate.sh commit                # do it (writes to dest)
+#   bash scripts/sutando-migrate.sh commit --merge-append # Strategy B (concat with divider)
+#                                                          # instead of sidecar (Strategy C default)
+#   bash scripts/sutando-migrate.sh verify                # post-migration check
+#   bash scripts/sutando-migrate.sh rollback <backup-id>  # restore from tarball
+#   bash scripts/sutando-migrate.sh --help
+
+set -euo pipefail
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────────────────────────────────────
+
+INFLIGHT_GUARD_SEC=60
+
+# Canonical workspace surface — the ONLY paths the script reads from a source.
+# Anything outside this surface in a source is ignored (a source can be a
+# whole repo checkout (Source A) — we MUST NOT recursively walk sutando's
+# code, node_modules, .git, etc.).
+WORKSPACE_SURFACE_DIRS=(
+    "notes"
+    "state"
+    "results"
+    "tasks"
+    "logs"
+    "data"
+    "config"
+    "slack-inbox"
+    "telegram-inbox"
+    # Per Mini #7 #design 2026-06-02: defensive surface coverage for dirs observed
+    # in real workspaces but not yet in M0 contract. Class rules use
+    # collision-keep-both/structural to preserve content; CLAUDE.md should
+    # eventually contract-define these or evict them.
+    "agents"
+    "docs"
+    "email-drafts"
+    "agent-inbox"
+)
+
+# Per `feedback_per_source_surface_lists` 2026-06-02: dirs in Mini's #7
+# defensive set that EXIST at the sutando repo root as CODE (not workspace
+# data). Source A walks must SKIP these — otherwise migration would treat
+# `<repo>/docs/`, `<repo>/agents/`, etc. as workspace surface, migrate them
+# into `<workspace>/`, and `--delete-source` would delete the repo's own
+# documentation. Caught after owner's repo-root cleanup wiped `<repo>/docs/`
+# (recovered via git checkout HEAD -- docs/).
+SOURCE_A_EXCLUDE=(
+    "agents"
+    "docs"
+    "email-drafts"
+    "agent-inbox"
+)
+WORKSPACE_SURFACE_FILES=(
+    "build_log.md"
+    "conversation.log"
+    "pending-questions.md"
+    "session-state.md"
+    "context-drop.txt"
+    "cloud-auth.json"
+    "device.json"
+    "contextual-chips.json"
+    "voice-state.json"
+    "core-status.json"
+    # Per Lucy #design 2026-06-02: contract-defined personal-override file
+    # ("if PERSONAL_CLAUDE.md exists in workspace root, read+follow it").
+    # Previously missing from the surface → would skip-unknown → user's
+    # personal rules silently lost on migration. Now class-handled.
+    "PERSONAL_CLAUDE.md"
+    # Per Lucy #design 2026-06-02: additional per-host status JSONs that
+    # were unruled. Adding as surface so they don't skip-unknown.
+    "quota-state.json"
+    "dynamic-content.json"
+    "stand-identity.json"
+)
+
+# In-flight ephemeral patterns (skipped with warning if matched + age < guard)
+EPHEMERAL_PATTERNS=(
+    "*.alive"
+    ".DS_Store"
+    ".gitkeep"
+    "migration-backup-*.tar.gz"
+)
+
+# Quarantine-walk excludes (when WALK_FULL_TREE is set for a source).
+# Anything matching these patterns is skipped entirely — not migrated, not
+# quarantined. Per Lucy #design 2026-06-02 + owner direction: capture user's
+# custom workspace content (experiments/, obsidian-vault/, etc.) without
+# accidentally hoovering up VCS/runtime/build artifacts.
+QUARANTINE_EXCLUDES=(
+    ".git"
+    "node_modules"
+    ".cache"
+    ".venv"
+    "venv"
+    "__pycache__"
+    "dist"
+    "build"
+    ".next"
+    ".nuxt"
+    ".DS_Store"
+)
+
+# Per-class file classification rules. Order matters — first match wins.
+declare -a CLASS_RULES
+CLASS_RULES=(
+    # form: <relpath-glob>|<class>
+    # ORDER MATTERS — first match wins. Per Mini's #design review 2026-06-02:
+    # - root loose-file globs (no leading directory) only match root files;
+    #   `state/voice-state.json` does NOT match the bare `voice-state.json` rule
+    # - rule ordering puts root rules before sub-dir rules
+    # - `state/auth/*` MUST precede `state/*.json` so per-host auth files don't
+    #   get incorrectly `newest-mtime`-resolved (Mini #2)
+    "build_log.md|append"
+    "conversation.log|rehome-narrative-log"
+    "context-drop.txt|append"
+    "pending-questions.md|append"
+    # Per Lucy #design 2026-06-02 — contract-defined personal override.
+    # Singleton-canonical: newest-mtime is the right strategy (one user,
+    # one PERSONAL_CLAUDE; cross-host divergence means whichever the user
+    # edited most recently wins).
+    "PERSONAL_CLAUDE.md|newest-mtime"
+    # Per Lucy #design 2026-06-02 — per-host state files at root (pre-M0
+    # layout) shouldn't migrate as newest-wins (would drop a host's data
+    # if multi-host scan). Re-home to state/ via rehome-state class +
+    # commit-time collision-keep-both for per-host preservation.
+    "quota-state.json|rehome-state"
+    "dynamic-content.json|rehome-state"
+    "stand-identity.json|rehome-state"
+    # ^ per Mini #1: file ACCUMULATES owner questions across hosts;
+    # newest-mtime silently drops a host's unique entries. Migrate via append
+    # (commit-side dedupe-per-line still TODO; Strategy C sidecar by default).
+    "pending-questions-resolved-archive-*.md|rehome-dated-snapshot"
+    "session-state.md|newest-mtime"
+    "cloud-auth.json|rehome-state"
+    "device.json|rehome-state"
+    "contextual-chips.json|rehome-state"
+    "voice-state.json|rehome-state"
+    "core-status.json|rehome-state"
+    "tasks/archive/*|structural"
+    # Per Mini #design 5:27 UTC: legacy task-archive subdirs from older bridge
+    # versions. Mini's workspace has 29 processed + 559 done; owner's B has 34
+    # processed, C has 147 processed. Real historical task content — must NOT
+    # hit the `tasks/*|skip-unknown` catchall below.
+    "tasks/processed/*|structural"
+    "tasks/done/*|structural"
+    "tasks/task-*.txt|inflight-guard"  # CANCEL_INSTRUCTION still starts with `task-` per CLAUDE.md
+    "tasks/*|skip-unknown"
+    "results/archive/*|structural"
+    "results/calls/*|structural"
+    # Mini #design 5:27 UTC pre-merge checklist: defensive coverage for
+    # symmetric legacy subdirs not seen in this scan but plausible on other
+    # hosts. Cost = 0, prevents future scan gap.
+    "results/processed/*|structural"
+    "results/done/*|structural"
+    "results/task-*.txt|inflight-guard"
+    "results/*|skip-unknown"
+    "state/cores/*.alive|skip-ephemeral"
+    "state/auth/*|structural"  # Mini #2: per-host identity, NOT newest-wins
+    # Per Lucy #design 2026-06-02 follow-up empirical: per-host status JSONs
+    # at state/<name>.json would hit state/*.json|newest-mtime and drop a
+    # losing host's data on multi-host scan. Same hazard as state/auth — carve
+    # out to structural to preserve per-host copies.
+    "state/core-status.json|structural"
+    "state/quota-state.json|structural"
+    "state/dynamic-content.json|structural"
+    "state/voice-state.json|structural"
+    "state/contextual-chips.json|structural"
+    "state/*.json|newest-mtime"
+    "state/*|structural"
+    "notes/*|collision-keep-both"  # Mini #4: accretes cruft over N migrations;
+                                    # commit-side identical-drop mitigates 87/87 in real data
+    "logs/*|structural"
+    "data/*|collision-keep-both"  # Mini #5: was structural (ambiguous); keep-both safer
+    "config/*|collision-keep-both"  # Mini #3: scope undefined in contract; safer default
+    "slack-inbox/*|structural"
+    "telegram-inbox/*|structural"
+    # Mini #7: surface adds for C-observed dirs not in M0-contract; safe default
+    "agents/*|structural"
+    "docs/*|structural"
+    "email-drafts/*|structural"
+    "agent-inbox/*|structural"
+    # Catchall — per Lucy #design 2026-06-02 + owner direction: workspace
+    # sources B+C may have user-custom dirs/files (experiments/, obsidian-vault/,
+    # personal-src/, repro-*.ts, etc.) outside the canonical surface. Anything
+    # that doesn't match an explicit rule above falls here and gets quarantined
+    # to <dest>/legacy/<src-tag>/quarantine/<relpath>. Net: no user content is
+    # silently lost. Only walked when WALK_FULL_TREE per-source flag is set
+    # (B + C); Source A (repo root) stays surface-restricted to avoid
+    # quarantining sutando code.
+    "*|quarantine-unknown"
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Resolve script root + helper location (handles cross-checkout via BASH_SOURCE)
+# ──────────────────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+HELPER="$REPO_DIR/scripts/sutando-config.sh"
+
+if [ ! -x "$HELPER" ] && [ ! -f "$HELPER" ]; then
+    echo "sutando-migrate: cannot find $HELPER (expected next to this script)" >&2
+    exit 2
+fi
+# Dest resolution deferred to after arg parsing so --respect-env can take effect.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Source detection
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Source A — repo root, non-canonical legacy
+# (TEST hook: SUTANDO_MIGRATE_SRC_A overrides for E2E fixtures)
+A_PATH="${SUTANDO_MIGRATE_SRC_A:-$REPO_DIR}"
+A_REAL="$(cd "$A_PATH" 2>/dev/null && pwd -P || true)"
+
+# Source B — pre-M0 default fallback
+# (TEST hook: SUTANDO_MIGRATE_SRC_B overrides for E2E fixtures)
+B_PATH="${SUTANDO_MIGRATE_SRC_B:-$HOME/.sutando/workspace}"
+
+# Source C — env override (env or .env)
+# (TEST hook: SUTANDO_MIGRATE_SRC_C overrides for E2E fixtures)
+detect_C() {
+    local c=""
+    if [ -n "${SUTANDO_MIGRATE_SRC_C:-}" ]; then
+        c="$SUTANDO_MIGRATE_SRC_C"
+    elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+        c="$SUTANDO_WORKSPACE"
+    elif [ -f "$REPO_DIR/.env" ]; then
+        c="$(grep -E '^SUTANDO_WORKSPACE=' "$REPO_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^"//;s/"$//;s/^//;s/$//')"
+    fi
+    # Expand ~
+    c="${c/#\~/$HOME}"
+    echo "$c"
+}
+C_PATH="$(detect_C)"
+
+# Validate + canonicalize sources; drop empty / non-existent / == dest
+validate_source() {
+    local tag="$1"
+    local path="$2"
+    local real=""
+    [ -z "$path" ] && return 1
+    [ ! -d "$path" ] && return 1
+    real="$(cd "$path" 2>/dev/null && pwd -P || true)"
+    [ -z "$real" ] && return 1
+    if [ "$real" = "$DEST_REAL" ]; then
+        echo "sutando-migrate: source $tag ($real) == dest; skipping" >&2
+        return 1
+    fi
+    echo "$real"
+    return 0
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-file classification
+# ──────────────────────────────────────────────────────────────────────────────
+
+classify() {
+    # $1 = source-relative path (e.g. "notes/foo.md")
+    local rel="$1"
+    local rule
+    for rule in "${CLASS_RULES[@]}"; do
+        local glob="${rule%%|*}"
+        local class="${rule##*|}"
+        # shellcheck disable=SC2254
+        case "$rel" in
+            $glob) echo "$class"; return 0 ;;
+        esac
+    done
+    # No rule matched — caller decides (skip-unknown or structural)
+    echo "unknown"
+}
+
+# Check inflight age — returns 0 if file is older than guard
+age_safe() {
+    local file="$1"
+    local now mtime age
+    now="$(date +%s)"
+    mtime="$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)"
+    age=$((now - mtime))
+    [ "$age" -ge "$INFLIGHT_GUARD_SEC" ]
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scan: walk a source, report per-class buckets
+# ──────────────────────────────────────────────────────────────────────────────
+
+declare -a SOURCES_REAL SOURCES_TAGS
+declare -a REPORT_LINES
+
+# Cross-source index: TSV file collecting (relpath, tag, class, mtime, size) per
+# file across ALL sources. Post-processed to surface relpaths that appear in
+# >1 source (cross-source collisions per-source scan misses — e.g. build_log.md
+# in A AND C bound for the same dest path).
+XSRC_INDEX="$(mktemp -t sutando-migrate-xsrc.XXXXXX)"
+trap 'rm -f "$XSRC_INDEX"' EXIT INT TERM
+# Also include dest's existing files (tag "DEST") so we surface dest-collisions
+# uniformly with cross-source collisions.
+
+record_xsrc() {
+    # $1=tag, $2=relpath, $3=class, $4=abs-path
+    local tag="$1" rel="$2" cls="$3" file="$4"
+    local mt sz
+    mt="$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)"
+    sz="$(stat -f %z "$file" 2>/dev/null || stat -c %s "$file" 2>/dev/null || echo 0)"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$rel" "$tag" "$cls" "$mt" "$sz" >> "$XSRC_INDEX"
+}
+
+scan_source() {
+    local tag="$1"
+    local src="$2"
+    # NOTE on portability: --base is not portable; we use absolute paths only.
+    # Walk every non-ignored regular file under src.
+    local file rel cls dest_path collision_kind="" size mtime_iso
+    local n_structural=0 n_append=0 n_newest=0 n_rehome=0 n_skip=0 n_inflight=0 n_collision=0 n_unknown=0
+    local bytes_total=0
+
+    REPORT_LINES+=("")
+    REPORT_LINES+=("--- Source $tag — $src ---")
+
+    # .git detection (commit-history layer; informational only for scan)
+    if [ -d "$src/.git" ]; then
+        REPORT_LINES+=("  .git: present (commit history; needs separate sync-rehome handling for vault sync)")
+    fi
+
+    # Migration sentinels — partial-migration history at this source
+    local sentinels
+    sentinels="$(find "$src" -maxdepth 1 -type f -name ".*-migrated*" 2>/dev/null | sort)"
+    if [ -n "$sentinels" ]; then
+        REPORT_LINES+=("  prior partial migration sentinels:")
+        while IFS= read -r s; do
+            local sm
+            sm="$(stat -f '%Sm' -t '%Y-%m-%d' "$s" 2>/dev/null || stat -c '%y' "$s" 2>/dev/null | cut -d' ' -f1)"
+            REPORT_LINES+=("    $(basename "$s")  ($sm)")
+        done <<<"$sentinels"
+    fi
+
+    # Build the explicit walk list. Surface-restricted for Source A (its root
+    # is the SUTANDO REPO checkout, not a workspace — walking the whole tree
+    # would pull in src/, node_modules/, .git, etc; 15,044-file false positive
+    # caught in scan v1). Full-tree for sources B + C (they ARE workspace
+    # roots; user-custom content like experiments/ obsidian-vault/ should be
+    # quarantined per Lucy #design + owner direction 2026-06-02).
+    local -a walk_paths=()
+    local sd sf _ex_a
+    # Per feedback_per_source_surface_lists 2026-06-02: detect whether THIS
+    # source path IS a sutando repo checkout (by content, not by tag) — if
+    # so, skip dirs that exist as repo code rather than workspace data
+    # (docs/, agents/, etc.). Detection: presence of `src/sutando_config.py`
+    # (or the same-shape sutando-config.sh) at source root. Owner clarified
+    # 2026-06-02 07:29: "We should only EXCLUDE them when they are in the
+    # sutando repo root." A custom workspace path that happens to live
+    # inside a sutando checkout should ALSO get the exclude.
+    local IS_SUTANDO_REPO=0
+    if [ -f "$src/src/sutando_config.py" ] || [ -f "$src/scripts/sutando-config.sh" ]; then
+        IS_SUTANDO_REPO=1
+    fi
+    for sd in "${WORKSPACE_SURFACE_DIRS[@]}"; do
+        if [ "$IS_SUTANDO_REPO" = "1" ]; then
+            local _skip_a=0
+            for _ex_a in "${SOURCE_A_EXCLUDE[@]}"; do
+                [ "$sd" = "$_ex_a" ] && _skip_a=1 && break
+            done
+            [ "$_skip_a" = "1" ] && continue
+        fi
+        [ -d "$src/$sd" ] && walk_paths+=("$src/$sd")
+    done
+    for sf in "${WORKSPACE_SURFACE_FILES[@]}"; do
+        [ -f "$src/$sf" ] && walk_paths+=("$src/$sf")
+    done
+    # Quarantine walk: for B + C, also include any TOP-LEVEL entries not
+    # already in the surface (e.g. experiments/, personal-src/, qr-codes/,
+    # obsidian-vault/, loose .ts files). Skip standard noise.
+    case "$tag" in
+        B|C)
+            local entry name
+            for entry in "$src"/* "$src"/.[!.]*; do
+                [ -e "$entry" ] || continue
+                name="$(basename "$entry")"
+                # Skip if already in surface (dirs or files).
+                local already=0
+                for sd in "${WORKSPACE_SURFACE_DIRS[@]}"; do [ "$name" = "$sd" ] && already=1 && break; done
+                [ "$already" = "1" ] && continue
+                for sf in "${WORKSPACE_SURFACE_FILES[@]}"; do [ "$name" = "$sf" ] && already=1 && break; done
+                [ "$already" = "1" ] && continue
+                # Skip standard excludes.
+                local skip=0
+                for ex in "${QUARANTINE_EXCLUDES[@]}"; do [ "$name" = "$ex" ] && skip=1 && break; done
+                [ "$skip" = "1" ] && continue
+                # Also skip hidden files that are migration sentinels themselves.
+                case "$name" in
+                    .migrated-from-*|.legacy-migrated-*|.notes-migrated|.build_log-migrated|.conversation-log-migrated|.status-migrated|.legacy-notice-printed|.last-pq-notify|.env|.gitignore)
+                        continue ;;
+                esac
+                walk_paths+=("$entry")
+            done
+            ;;
+    esac
+    [ ${#walk_paths[@]} -eq 0 ] && {
+        REPORT_LINES+=("  (no workspace surface present at this source — nothing to migrate)")
+        return 0
+    }
+
+    # Walk only the surface; skip .git contents (handled separately) and pre-
+    # existing migration backups.
+    while IFS= read -r -d '' file; do
+        rel="${file#"$src"/}"
+        case "$rel" in
+            .git/*) continue ;;
+            state/migration-backup-*.tar.gz) n_skip=$((n_skip+1)); continue ;;
+            .DS_Store|*/.DS_Store) n_skip=$((n_skip+1)); continue ;;
+            .gitkeep|*/.gitkeep) n_skip=$((n_skip+1)); continue ;;
+        esac
+
+        cls="$(classify "$rel")"
+        size="$(stat -f %z "$file" 2>/dev/null || stat -c %s "$file" 2>/dev/null || echo 0)"
+        bytes_total=$((bytes_total + size))
+
+        # Index for cross-source collision detection (only classes that
+        # produce writes; skip-ephemeral / skip-unknown / inflight don't
+        # collide because they aren't migrated). re-home target is
+        # state/<basename>, not the original relpath, so we index under the
+        # re-homed path so re-home collisions surface correctly.
+        case "$cls" in
+            structural|append|newest-mtime|collision-keep-both)
+                record_xsrc "$tag" "$rel" "$cls" "$file"
+                ;;
+            rehome-state)
+                # Per Mini #design 2026-06-02: cloud-auth/device → state/auth/, others → state/
+                local _b="$(basename "$rel")"
+                case "$_b" in
+                    cloud-auth.json|device.json)
+                        record_xsrc "$tag" "state/auth/$_b" "$cls" "$file"
+                        ;;
+                    *)
+                        record_xsrc "$tag" "state/$_b" "$cls" "$file"
+                        ;;
+                esac
+                ;;
+            rehome-dated-snapshot)
+                # Per Mini #design earlier: dated snapshot → notes/archive/<base>
+                record_xsrc "$tag" "notes/archive/$(basename "$rel")" "$cls" "$file"
+                ;;
+            rehome-narrative-log)
+                # Per Mini #design earlier: root conversation.log → logs/workspace-narrative.log
+                record_xsrc "$tag" "logs/workspace-narrative.log" "$cls" "$file"
+                ;;
+        esac
+
+        case "$cls" in
+            structural)
+                # Collision check
+                dest_path="$DEST/$rel"
+                if [ -e "$dest_path" ]; then
+                    n_collision=$((n_collision+1))
+                else
+                    n_structural=$((n_structural+1))
+                fi
+                ;;
+            append)
+                # Always treated as collision once dest also has it; otherwise straight copy
+                dest_path="$DEST/$rel"
+                if [ -e "$dest_path" ] && [ -s "$dest_path" ]; then
+                    n_append=$((n_append+1))
+                else
+                    n_structural=$((n_structural+1))
+                fi
+                ;;
+            newest-mtime)
+                n_newest=$((n_newest+1))
+                ;;
+            rehome-state)
+                # Target is <dest>/state/<basename>
+                n_rehome=$((n_rehome+1))
+                ;;
+            collision-keep-both)
+                dest_path="$DEST/$rel"
+                if [ -e "$dest_path" ]; then
+                    n_collision=$((n_collision+1))
+                else
+                    n_structural=$((n_structural+1))
+                fi
+                ;;
+            inflight-guard)
+                if age_safe "$file"; then
+                    # Old in-flight artifact — treat as archive
+                    n_structural=$((n_structural+1))
+                else
+                    n_inflight=$((n_inflight+1))
+                fi
+                ;;
+            skip-ephemeral|skip-unknown)
+                n_skip=$((n_skip+1))
+                ;;
+            unknown)
+                n_unknown=$((n_unknown+1))
+                ;;
+        esac
+    done < <(find "${walk_paths[@]}" -type f -print0 2>/dev/null)
+
+    REPORT_LINES+=("  files by action:")
+    REPORT_LINES+=("    structural (copy-or-keep-both new):  $n_structural")
+    REPORT_LINES+=("    collision    (same path, diff content):$n_collision")
+    REPORT_LINES+=("    append-merge (build_log/conv.log):    $n_append")
+    REPORT_LINES+=("    newest-mtime (snapshots):             $n_newest")
+    REPORT_LINES+=("    re-home      (loose JSON → state/):   $n_rehome")
+    REPORT_LINES+=("    in-flight-skip (<${INFLIGHT_GUARD_SEC}s old):       $n_inflight")
+    REPORT_LINES+=("    skip-ephemeral / .DS_Store / .gitkeep:$n_skip")
+    REPORT_LINES+=("    unknown (no rule matched, will skip): $n_unknown")
+    REPORT_LINES+=("    total bytes:                          $(numfmt --to=iec "$bytes_total" 2>/dev/null || echo "$bytes_total")")
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Arg parsing
+# ──────────────────────────────────────────────────────────────────────────────
+
+MODE="scan"
+JSON=0
+SOURCE_FILTER=""
+MERGE_APPEND=0
+DELETE_SOURCE=0
+FORCE=0
+ROLLBACK_ID=""
+
+EXPLAIN_PATH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        scan|commit|verify|rollback) MODE="$1"; shift ;;
+        explain)
+            MODE="explain"
+            shift
+            # Next non-flag arg is the path to explain (positional).
+            if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+                EXPLAIN_PATH="$1"
+                shift
+            fi
+            ;;
+        --dry-run) MODE="scan"; shift ;;  # alias for scan, per Mini #design 2026-06-02
+        --json) JSON=1; shift ;;
+        --source) SOURCE_FILTER="$2"; shift 2 ;;
+        --merge-append) MERGE_APPEND=1; shift ;;
+        --delete-source) DELETE_SOURCE=1; shift ;;
+        --force) FORCE=1; shift ;;
+        --respect-env) RESPECT_ENV=1; shift ;;
+        --backup-id) ROLLBACK_ID="$2"; shift 2 ;;
+        --help|-h)
+            sed -n '1,80p' "${BASH_SOURCE[0]}"
+            exit 0
+            ;;
+        *)
+            echo "sutando-migrate: unknown arg: $1" >&2
+            echo "Try --help" >&2
+            exit 2
+            ;;
+    esac
+done
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dest resolution (deferred until after arg parsing so --respect-env applies)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Migration semantics (option 2 in M1 Part 2 design): the in-repo workspace is
+# the destination regardless of whatever $SUTANDO_WORKSPACE the user has set
+# today — migration MOVES data INTO the new default. Use `--respect-env` to
+# honor env (e.g. for users whose dest is intentionally an env-overridden path).
+if [ "${RESPECT_ENV:-0}" = "1" ]; then
+    DEST="$(bash "$HELPER" workspace 2>/dev/null)"
+else
+    DEST="$(env -u SUTANDO_WORKSPACE bash "$HELPER" workspace 2>/dev/null)"
+fi
+[ -z "$DEST" ] && {
+    echo "sutando-migrate: workspace resolver returned no path. Run from a sutando checkout." >&2
+    exit 2
+}
+mkdir -p "$DEST"
+DEST_REAL="$(cd "$DEST" 2>/dev/null && pwd -P || true)"
+[ -z "$DEST_REAL" ] && {
+    echo "sutando-migrate: cannot resolve dest realpath ($DEST)" >&2
+    exit 2
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main: scan (commit/verify/rollback stubs for now — phase 2B-2E)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# In --json mode, all banner chatter goes to stderr so stdout is parseable JSON.
+banner() { if [ "$JSON" = "1" ]; then echo "$@" >&2; else echo "$@"; fi; }
+
+banner "sutando-migrate: mode=$MODE  dest=$DEST_REAL"
+[ "${RESPECT_ENV:-0}" = "0" ] && [ -n "${SUTANDO_WORKSPACE:-}" ] && \
+    banner "sutando-migrate: NOTE — \$SUTANDO_WORKSPACE=$SUTANDO_WORKSPACE in env; ignored for dest computation (use --respect-env to honor)"
+banner ""
+
+# Discover sources
+A_REAL_OK=""; B_REAL_OK=""; C_REAL_OK=""
+A_REAL_OK="$(validate_source A "$A_PATH" || true)"
+B_REAL_OK="$(validate_source B "$B_PATH" || true)"
+C_REAL_OK="$(validate_source C "$C_PATH" || true)"
+
+banner "sources detected:"
+[ -n "$A_REAL_OK" ] && banner "  A (repo root):                 $A_REAL_OK"
+[ -n "$B_REAL_OK" ] && banner "  B (~/.sutando/workspace/):     $B_REAL_OK"
+[ -n "$C_REAL_OK" ] && banner "  C (SUTANDO_WORKSPACE env):     $C_REAL_OK"
+[ -z "$A_REAL_OK$B_REAL_OK$C_REAL_OK" ] && {
+    # Rollback and verify don't need sources — they operate on dest alone.
+    case "$MODE" in
+        rollback|verify) ;;
+        *)
+            if [ "$JSON" = "1" ]; then
+                echo '{"dest":"'"$DEST_REAL"'","sources":{},"totals":{"unique_relpaths":0,"collisions":0,"identical_content":0,"genuine_conflicts":0,"by_class":{}},"notable_collisions":[]}'
+            else
+                echo "  (none — nothing to migrate; dest=$DEST_REAL is the only locus)"
+            fi
+            exit 0
+            ;;
+    esac
+}
+banner ""
+
+# Optional source filter
+include_src() {
+    local tag="$1"
+    [ -z "$SOURCE_FILTER" ] && return 0
+    [[ ",$SOURCE_FILTER," == *",$tag,"* ]]
+}
+
+index_dest_for_collisions() {
+    # Walk dest's workspace surface, recording any existing files as tag DEST
+    # so dest-collisions surface uniformly with cross-source collisions in the
+    # post-processing report. Existing dest files do not get migrated; they're
+    # the prior state the report is helping owner reason about.
+    local sd sf
+    local -a dest_walk=()
+    for sd in "${WORKSPACE_SURFACE_DIRS[@]}"; do
+        [ -d "$DEST_REAL/$sd" ] && dest_walk+=("$DEST_REAL/$sd")
+    done
+    for sf in "${WORKSPACE_SURFACE_FILES[@]}"; do
+        [ -f "$DEST_REAL/$sf" ] && dest_walk+=("$DEST_REAL/$sf")
+    done
+    [ ${#dest_walk[@]} -eq 0 ] && return
+    while IFS= read -r -d '' file; do
+        local rel="${file#"$DEST_REAL"/}"
+        case "$rel" in
+            .git/*|*/.git/*) continue ;;
+            state/migration-backup-*.tar.gz) continue ;;
+            .DS_Store|*/.DS_Store|.gitkeep|*/.gitkeep) continue ;;
+        esac
+        local cls
+        cls="$(classify "$rel")"
+        case "$cls" in
+            structural|append|newest-mtime|collision-keep-both|rehome-state)
+                record_xsrc "DEST" "$rel" "existing" "$file"
+                ;;
+        esac
+    done < <(find "${dest_walk[@]}" -type f -print0 2>/dev/null)
+}
+
+report_cross_source() {
+    # Post-process XSRC_INDEX (TSV: relpath\ttag\tclass\tmtime\tsize) and print
+    # any relpath that appears in 2+ rows (cross-source / dest collision).
+    # Emits a compact per-class summary + a per-class detail list (capped).
+    local total_xs total_xs_files
+    total_xs_files="$(awk -F'\t' '{print $1}' "$XSRC_INDEX" | sort -u | wc -l | tr -d ' ')"
+    total_xs="$(awk -F'\t' '
+        {n[$1]++}
+        END {c=0; for (k in n) if (n[k]>1) c++; print c}
+    ' "$XSRC_INDEX")"
+
+    REPORT_LINES+=("")
+    REPORT_LINES+=("--- Cross-source collision report ---")
+    REPORT_LINES+=("  total unique relpaths across sources+dest: $total_xs_files")
+    REPORT_LINES+=("  relpaths present in >1 location:           $total_xs")
+
+    if [ "$total_xs" -eq 0 ]; then
+        REPORT_LINES+=("  (no cross-source / dest collisions — commit is safe per-source)")
+        return
+    fi
+
+    # Identical-content collisions: cross-source rows where ALL entries share
+    # the same mtime AND size for the relpath. High-confidence "same file
+    # mirrored through sync" — commit can pick one source as canonical and
+    # skip the rest (no real conflict). Common case: memory-sync mirroring
+    # notes/ between B and C.
+    local total_identical
+    # Concatenated-key idiom (BSD awk has no array-of-array); detect identical
+    # across all entries of a relpath by counting distinct (mtime,size) pairs.
+    total_identical="$(awk -F'\t' '
+        {
+            n[$1]++
+            key = $1 SUBSEP $4 "|" $5
+            if (!(key in seen)) { seen[key]=1; pairs[$1]++ }
+        }
+        END {
+            ident=0
+            for (k in n) if (n[k]>1 && pairs[k]==1) ident++
+            print ident
+        }
+    ' "$XSRC_INDEX" 2>/dev/null || echo 0)"
+
+    REPORT_LINES+=("  of which identical-content (same mtime + size):  $total_identical (commit will pick one canonical + skip rest)")
+    REPORT_LINES+=("  genuine cross-source conflicts (need strategy):  $((total_xs - total_identical))")
+
+    # Per-class breakdown of cross-source collisions
+    REPORT_LINES+=("  by class:")
+    while read -r cnt c; do
+        REPORT_LINES+=("    $cnt × $c")
+    done < <(awk -F'\t' '
+        {n[$1]++; cls[$1]=$3}
+        END {for (k in n) if (n[k]>1) print cls[k]}
+    ' "$XSRC_INDEX" | sort | uniq -c | sort -rn | head -10)
+
+    # Top notable collisions (append-class first, then size)
+    REPORT_LINES+=("  notable collisions (cap 20; full list with --json):")
+    while IFS='|' read -r c rel locs; do
+        REPORT_LINES+=("    [$c] $rel  → $locs")
+    done < <(awk -F'\t' '
+        {locs[$1]=locs[$1] "," $2 "(mt=" $4 ",sz=" $5 ")"; cls[$1]=$3; n[$1]++}
+        END {for (k in n) if (n[k]>1) printf "%s|%s|%s\n", cls[k], k, substr(locs[k],2)}
+    ' "$XSRC_INDEX" | sort -t'|' -k1,1 | head -20)
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Commit / verify / rollback
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Stable backup id for this commit invocation (also serves as sentinel suffix)
+BACKUP_ID=""
+
+backup_dest() {
+    # Per-second ts collision possible when two commits happen in same second
+    # (test idempotency re-run + initial commit are the typical case). Append
+    # PID + random so each backup_dest call gets a unique BACKUP_ID. Without
+    # this, the second commit's tar would overwrite the first AND include it.
+    BACKUP_ID="$(date -u +%Y%m%dT%H%M%SZ)-p$$r$RANDOM"
+    local backup_path="$DEST_REAL/state/migration-backup-$BACKUP_ID.tar.gz"
+    mkdir -p "$DEST_REAL/state"
+    # Backup only the workspace surface (avoid backing up the backup-in-progress).
+    local -a surface=()
+    local sd sf
+    for sd in "${WORKSPACE_SURFACE_DIRS[@]}"; do
+        [ -e "$DEST_REAL/$sd" ] && surface+=("$sd")
+    done
+    for sf in "${WORKSPACE_SURFACE_FILES[@]}"; do
+        [ -e "$DEST_REAL/$sf" ] && surface+=("$sf")
+    done
+    if [ ${#surface[@]} -gt 0 ]; then
+        [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] backup_dest surface: ${surface[*]}" >&2
+        # Tar to a system temp location (OUTSIDE dest/state/) to avoid the
+        # self-reference where tarring state/ also includes the partial
+        # backup tarball being written. Move atomically into state/ at end.
+        # Mini's intermittent test-failure trail led to this — exclude didn't
+        # work reliably across BSD/GNU tar.
+        local tmp_backup
+        tmp_backup="$(mktemp -t sutando-mig-backup.XXXXXX).tar.gz"
+        ( cd "$DEST_REAL" && tar -czf "$tmp_backup" "${surface[@]}" 2>/dev/null )
+        # Now delete the migration-backup-*.tar.gz entries from the tar so
+        # restoring doesn't repopulate them. Easier: just mv to final spot.
+        mv "$tmp_backup" "$backup_path"
+        echo "sutando-migrate: backup → $backup_path"
+    else
+        # Empty dest — write an empty marker so rollback still has a known id
+        : > "$backup_path"
+        echo "sutando-migrate: dest empty; placeholder backup → $backup_path"
+    fi
+}
+
+# Per-source migration sentinel. Idempotency token: if present + not --force, skip source.
+source_sentinel() {
+    echo "$DEST_REAL/state/.migrated-from-$1-$BACKUP_ID"
+}
+any_source_sentinel() {
+    # Any sentinel for this source tag (commit may have been run before with a
+    # different backup id). Returns 0 if found.
+    ls "$DEST_REAL/state/.migrated-from-$1-"* >/dev/null 2>&1
+}
+
+# Atomic per-file copy preserving mtime. Returns 0 on success.
+copy_preserving_mtime() {
+    local src="$1" dst="$2"
+    mkdir -p "$(dirname "$dst")"
+    # Atomic: cp -p to sibling tmp then mv. -p preserves mtime + mode.
+    local tmp="$dst.tmp.$$"
+    cp -p "$src" "$tmp" && mv -f "$tmp" "$dst"
+}
+
+# SHA-256 verify (macOS shasum / Linux sha256sum). Returns 0 if hashes match.
+sha_match() {
+    local a="$1" b="$2"
+    local ha hb
+    if command -v shasum >/dev/null 2>&1; then
+        ha="$(shasum -a 256 "$a" 2>/dev/null | awk '{print $1}')"
+        hb="$(shasum -a 256 "$b" 2>/dev/null | awk '{print $1}')"
+    else
+        ha="$(sha256sum "$a" 2>/dev/null | awk '{print $1}')"
+        hb="$(sha256sum "$b" 2>/dev/null | awk '{print $1}')"
+    fi
+    [ -n "$ha" ] && [ "$ha" = "$hb" ]
+}
+
+# Per-file commit dispatch. $1=src-file abs, $2=src-relpath, $3=src-tag, $4=class
+# Returns count category via stdout: "copied|kept-dest|skipped|sidecar|rehomed"
+commit_one() {
+    local src_file="$1" rel="$2" tag="$3" cls="$4"
+    local dst_path
+
+    case "$cls" in
+        structural|collision-keep-both)
+            dst_path="$DEST_REAL/$rel"
+            if [ -e "$dst_path" ]; then
+                # Same content (mtime+size) → identical-drop. Different →
+                # keep-both: rename source-incoming to <file>.legacy-<tag>.
+                local src_mt src_sz dst_mt dst_sz
+                src_mt="$(stat -f %m "$src_file" 2>/dev/null || stat -c %Y "$src_file")"
+                src_sz="$(stat -f %z "$src_file" 2>/dev/null || stat -c %s "$src_file")"
+                dst_mt="$(stat -f %m "$dst_path" 2>/dev/null || stat -c %Y "$dst_path")"
+                dst_sz="$(stat -f %z "$dst_path" 2>/dev/null || stat -c %s "$dst_path")"
+                if [ "$src_mt" = "$dst_mt" ] && [ "$src_sz" = "$dst_sz" ]; then
+                    echo "identical-drop"
+                    return 0
+                fi
+                # Genuine collision: write loser as sidecar, keep dest as primary
+                # only if dest is newer. If src is newer, swap.
+                # Per Mini #design 2026-06-02 blocker #3 + flaky-test re-fix:
+                # uniqueness needs both per-second timestamp AND a serial counter
+                # (`date +%s` resolution is too coarse when commit_one fires
+                # multiple times within same second across sources).
+                # SIDECAR_SERIAL counter would live in subshell because
+                # commit_one's echo is captured via $(); use $RANDOM (per-call
+                # entropy from /dev/urandom-seeded bash PRNG) + $$ (pid) instead.
+                local ts_suffix
+                ts_suffix="$(date -u +%Y%m%dT%H%M%SZ)-p$$r$RANDOM"
+                if [ "$src_mt" -gt "$dst_mt" ]; then
+                    # dest's content (whatever was there) goes to a sidecar.
+                    # Name it .legacy-prior-<src_tag>-<ts> to convey "this is
+                    # what was at dest before <src_tag> overwrote it" + the
+                    # timestamp ensures 3-way collisions don't clobber.
+                    copy_preserving_mtime "$dst_path" "$dst_path.legacy-prior-from-$tag-$ts_suffix"
+                    copy_preserving_mtime "$src_file" "$dst_path"
+                    echo "src-wins-newer"
+                else
+                    # src loses; preserve under tagged + timestamped sidecar.
+                    copy_preserving_mtime "$src_file" "$dst_path.legacy-$tag-$ts_suffix"
+                    echo "dest-wins-newer"
+                fi
+                return 0
+            else
+                copy_preserving_mtime "$src_file" "$dst_path"
+                echo "copied"
+                return 0
+            fi
+            ;;
+        newest-mtime)
+            dst_path="$DEST_REAL/$rel"
+            if [ -e "$dst_path" ]; then
+                local src_mt dst_mt
+                src_mt="$(stat -f %m "$src_file" 2>/dev/null || stat -c %Y "$src_file")"
+                dst_mt="$(stat -f %m "$dst_path" 2>/dev/null || stat -c %Y "$dst_path")"
+                if [ "$src_mt" -gt "$dst_mt" ]; then
+                    copy_preserving_mtime "$src_file" "$dst_path"
+                    echo "src-newer"
+                else
+                    echo "dest-newer"
+                fi
+            else
+                copy_preserving_mtime "$src_file" "$dst_path"
+                echo "copied"
+            fi
+            return 0
+            ;;
+        rehome-state|rehome-dated-snapshot|rehome-narrative-log)
+            # Per Mini's #design 2026-06-02 04:54Z (state JSONs) + earlier
+            # workspace audit (dated snapshots + conversation.log):
+            #   rehome-state          → state/<base> OR state/auth/<base>
+            #                           (cloud-auth/device → auth/; per-host durable;
+            #                           CLAUDE.md should declare state/auth/ excluded
+            #                           from transient-state cleanup)
+            #   rehome-dated-snapshot → notes/archive/<base>
+            #                           (pending-questions-resolved-archive-*.md etc)
+            #   rehome-narrative-log  → logs/workspace-narrative.log
+            #                           (root conversation.log → logs/. Renamed to
+            #                           dodge the existing per-pid logs/conversation.log
+            #                           collision. Owner-Q flagged; filename can change.)
+            local base="$(basename "$rel")"
+            case "$cls" in
+                rehome-state)
+                    case "$base" in
+                        cloud-auth.json|device.json) dst_path="$DEST_REAL/state/auth/$base" ;;
+                        *) dst_path="$DEST_REAL/state/$base" ;;
+                    esac
+                    ;;
+                rehome-dated-snapshot)
+                    dst_path="$DEST_REAL/notes/archive/$base"
+                    ;;
+                rehome-narrative-log)
+                    dst_path="$DEST_REAL/logs/workspace-narrative.log"
+                    ;;
+            esac
+            # Common per-mtime swap, identical-drop, or write-fresh.
+            if [ -e "$dst_path" ]; then
+                local src_mt dst_mt
+                src_mt="$(stat -f %m "$src_file" 2>/dev/null || stat -c %Y "$src_file")"
+                dst_mt="$(stat -f %m "$dst_path" 2>/dev/null || stat -c %Y "$dst_path")"
+                if [ "$src_mt" -gt "$dst_mt" ]; then
+                    copy_preserving_mtime "$src_file" "$dst_path"
+                    echo "rehomed-newer"
+                else
+                    echo "rehomed-skip-older"
+                fi
+            else
+                copy_preserving_mtime "$src_file" "$dst_path"
+                echo "rehomed"
+            fi
+            return 0
+            if [ -e "$dst_path" ]; then
+                local src_mt dst_mt
+                src_mt="$(stat -f %m "$src_file" 2>/dev/null || stat -c %Y "$src_file")"
+                dst_mt="$(stat -f %m "$dst_path" 2>/dev/null || stat -c %Y "$dst_path")"
+                if [ "$src_mt" -gt "$dst_mt" ]; then
+                    copy_preserving_mtime "$src_file" "$dst_path"
+                    echo "rehomed-newer"
+                else
+                    echo "rehomed-skip-older"
+                fi
+            else
+                copy_preserving_mtime "$src_file" "$dst_path"
+                echo "rehomed"
+            fi
+            return 0
+            ;;
+        append)
+            # Default Strategy C: sidecar at <dest>/legacy/<tag>/<rel>.
+            # --merge-append (Strategy B): concat with divider to <dest>/<rel>.
+            if [ "$MERGE_APPEND" = "1" ]; then
+                dst_path="$DEST_REAL/$rel"
+                mkdir -p "$(dirname "$dst_path")"
+                if [ -e "$dst_path" ]; then
+                    {
+                        cat "$dst_path"
+                        echo ""
+                        echo "=== migrated from source $tag at $BACKUP_ID ==="
+                        echo ""
+                        cat "$src_file"
+                    } > "$dst_path.merge.$$" && mv -f "$dst_path.merge.$$" "$dst_path"
+                    echo "merged"
+                else
+                    copy_preserving_mtime "$src_file" "$dst_path"
+                    echo "copied"
+                fi
+            else
+                dst_path="$DEST_REAL/legacy/$tag/$rel"
+                copy_preserving_mtime "$src_file" "$dst_path"
+                echo "sidecar"
+            fi
+            return 0
+            ;;
+        inflight-guard)
+            # Old in-flight artifacts (tasks/task-*.txt, results/task-*.txt)
+            # NEVER copy to dest's live queue (would re-fire the watcher and
+            # double-process old work). Route to tasks/archive/<src-tag>/ or
+            # results/archive/<src-tag>/ instead. Bug discovered when a stale
+            # May 22 task migrated from B fired the watcher post-test.
+            if age_safe "$src_file"; then
+                local subdir="${rel%%/*}"  # tasks or results
+                local file_base="${rel#*/}" # task-*.txt
+                dst_path="$DEST_REAL/$subdir/archive/$tag/$file_base"
+                copy_preserving_mtime "$src_file" "$dst_path"
+                echo "archived-stale"
+            else
+                echo "skipped-inflight"
+            fi
+            return 0
+            ;;
+        quarantine-unknown)
+            # Per Lucy #design 2026-06-02 + owner direction: workspace sources
+            # may have user-custom content outside the canonical surface (e.g.
+            # experiments/, obsidian-vault/, personal-src/). Preserve under a
+            # namespaced quarantine path rather than skip-unknown'ing it.
+            dst_path="$DEST_REAL/legacy/$tag/quarantine/$rel"
+            copy_preserving_mtime "$src_file" "$dst_path"
+            echo "quarantined"
+            return 0
+            ;;
+        skip-ephemeral|skip-unknown|unknown)
+            echo "skipped-class"
+            return 0
+            ;;
+    esac
+    echo "skipped-fallthrough"
+}
+
+commit_source() {
+    local tag="$1" src="$2"
+    local SENTINEL_PRESENT=0
+    any_source_sentinel "$tag" && SENTINEL_PRESENT=1
+
+    # Mini #design 2026-06-02 new blocker #2: --delete-source must NOT re-run
+    # the commit walk when a sentinel exists (would duplicate appends + extra
+    # sidecars). Two-phase pattern: phase 1 does commit walk + writes sentinel;
+    # phase 2 (--delete-source --backup-id) skips commit walk + only does the
+    # delete walk against the existing dest landing.
+    local DO_COMMIT_WALK=1
+    if [ "$SENTINEL_PRESENT" = "1" ] && [ "$FORCE" = "0" ]; then
+        if [ "$DELETE_SOURCE" = "1" ]; then
+            DO_COMMIT_WALK=0  # phase 2 mode: skip commit, just delete
+            echo "--- Phase 2: --delete-source against source $tag (sentinel present; skip commit walk) ---"
+        else
+            echo "sutando-migrate: source $tag has prior migration sentinel — skip (use --force)"
+            return 0
+        fi
+    fi
+
+    echo
+    [ "$DO_COMMIT_WALK" = "1" ] && echo "--- Committing source $tag ($src) ---"
+
+    # Reuse the same walk-list logic as scan_source (including B+C quarantine).
+    local -a walk_paths=()
+    local sd sf _ex_a
+    # Per feedback_per_source_surface_lists 2026-06-02: detect whether THIS
+    # source path IS a sutando repo checkout (by content, not by tag) — if
+    # so, skip dirs that exist as repo code rather than workspace data
+    # (docs/, agents/, etc.). Detection: presence of `src/sutando_config.py`
+    # (or the same-shape sutando-config.sh) at source root. Owner clarified
+    # 2026-06-02 07:29: "We should only EXCLUDE them when they are in the
+    # sutando repo root." A custom workspace path that happens to live
+    # inside a sutando checkout should ALSO get the exclude.
+    local IS_SUTANDO_REPO=0
+    if [ -f "$src/src/sutando_config.py" ] || [ -f "$src/scripts/sutando-config.sh" ]; then
+        IS_SUTANDO_REPO=1
+    fi
+    for sd in "${WORKSPACE_SURFACE_DIRS[@]}"; do
+        if [ "$IS_SUTANDO_REPO" = "1" ]; then
+            local _skip_a=0
+            for _ex_a in "${SOURCE_A_EXCLUDE[@]}"; do
+                [ "$sd" = "$_ex_a" ] && _skip_a=1 && break
+            done
+            [ "$_skip_a" = "1" ] && continue
+        fi
+        [ -d "$src/$sd" ] && walk_paths+=("$src/$sd")
+    done
+    for sf in "${WORKSPACE_SURFACE_FILES[@]}"; do
+        [ -f "$src/$sf" ] && walk_paths+=("$src/$sf")
+    done
+    case "$tag" in
+        B|C)
+            local entry name skip ex already
+            for entry in "$src"/* "$src"/.[!.]*; do
+                [ -e "$entry" ] || continue
+                name="$(basename "$entry")"
+                already=0
+                for sd in "${WORKSPACE_SURFACE_DIRS[@]}"; do [ "$name" = "$sd" ] && already=1 && break; done
+                [ "$already" = "1" ] && continue
+                for sf in "${WORKSPACE_SURFACE_FILES[@]}"; do [ "$name" = "$sf" ] && already=1 && break; done
+                [ "$already" = "1" ] && continue
+                skip=0
+                for ex in "${QUARANTINE_EXCLUDES[@]}"; do [ "$name" = "$ex" ] && skip=1 && break; done
+                [ "$skip" = "1" ] && continue
+                case "$name" in
+                    .migrated-from-*|.legacy-migrated-*|.notes-migrated|.build_log-migrated|.conversation-log-migrated|.status-migrated|.legacy-notice-printed|.last-pq-notify|.env|.gitignore)
+                        continue ;;
+                esac
+                walk_paths+=("$entry")
+            done
+            ;;
+    esac
+    [ ${#walk_paths[@]} -eq 0 ] && { echo "  (nothing on surface; skip)"; return 0; }
+
+    local n_copied=0 n_kept=0 n_skipped=0 n_sidecar=0 n_rehomed=0 n_identical=0 n_quarantined=0 n_other=0
+    # Phase 2 mode skips the commit walk entirely.
+    if [ "$DO_COMMIT_WALK" = "0" ]; then
+        # Skip ahead to the delete block (it walks walk_paths independently).
+        :
+    else
+    local file rel cls outcome
+    while IFS= read -r -d '' file; do
+        rel="${file#"$src"/}"
+        case "$rel" in
+            .git/*) continue ;;
+            state/migration-backup-*.tar.gz) continue ;;
+            .DS_Store|*/.DS_Store|.gitkeep|*/.gitkeep) n_skipped=$((n_skipped+1)); continue ;;
+        esac
+        # Mini #design 2026-06-02 new-blocker #4: recursive quarantine excludes.
+        # A custom dir like experiments/node_modules/ should be skipped even
+        # though experiments/ matched the quarantine catchall at top level.
+        # Walk rel segments and skip if ANY matches QUARANTINE_EXCLUDES.
+        local _skip_recursive=0
+        local _seg
+        IFS='/' read -ra _segs <<<"$rel"
+        for _seg in "${_segs[@]}"; do
+            for _ex in "${QUARANTINE_EXCLUDES[@]}"; do
+                [ "$_seg" = "$_ex" ] && { _skip_recursive=1; break 2; }
+            done
+        done
+        if [ "$_skip_recursive" = "1" ]; then
+            n_skipped=$((n_skipped+1)); continue
+        fi
+        cls="$(classify "$rel")"
+        outcome="$(commit_one "$file" "$rel" "$tag" "$cls")"
+        case "$outcome" in
+            copied|src-wins-newer|src-newer|rehomed|rehomed-newer|merged|archived-stale|copied-stale)
+                n_copied=$((n_copied+1)) ;;
+            dest-wins-newer|dest-newer|rehomed-skip-older|skipped-collision-dest)
+                n_kept=$((n_kept+1)) ;;
+            identical-drop)
+                n_identical=$((n_identical+1)) ;;
+            sidecar)
+                n_sidecar=$((n_sidecar+1)) ;;
+            quarantined)
+                n_quarantined=$((n_quarantined+1)) ;;
+            skipped-class|skipped-inflight|skipped-fallthrough)
+                n_skipped=$((n_skipped+1)) ;;
+            *)
+                n_other=$((n_other+1)) ;;
+        esac
+    done < <(find "${walk_paths[@]}" -type f -print0 2>/dev/null)
+
+    fi  # DO_COMMIT_WALK guard
+    if [ "$DO_COMMIT_WALK" = "1" ]; then
+        echo "  copied:      $n_copied"
+        echo "  identical:   $n_identical (drop-dup, no real conflict)"
+        echo "  kept-dest:   $n_kept"
+        echo "  sidecar:     $n_sidecar"
+        [ "$n_quarantined" -gt 0 ] && echo "  quarantined: $n_quarantined (to <dest>/legacy/$tag/quarantine/)"
+        echo "  skipped:     $n_skipped"
+        [ "$n_other" -gt 0 ] && echo "  other:       $n_other"
+
+        touch "$(source_sentinel "$tag")"
+        echo "  sentinel:    $(source_sentinel "$tag")"
+    fi
+
+    # Per Mini #design 2026-06-02 blocker #4: --delete-source must actually
+    # delete sources after sha verification. The two-phase pattern means
+    # phase 1 (no-delete) ships; phase 2 (--delete-source --backup-id <id>)
+    # cleans up after ~7d observation window of no straggler writes.
+    if [ "$DELETE_SOURCE" = "1" ]; then
+        local n_deleted=0 n_kept_unsafe=0
+        # Re-walk the surface; for each file that has a sha-matching dest
+        # landing, delete the source. Skip if no match (means content didn't
+        # land — keeping source is the safe default).
+        while IFS= read -r -d '' file; do
+            local rel_d="${file#"$src"/}"
+            case "$rel_d" in
+                .git/*) continue ;;
+                .DS_Store|*/.DS_Store|.gitkeep|*/.gitkeep) continue ;;
+            esac
+            local cls_d
+            cls_d="$(classify "$rel_d")"
+            # In-flight + ephemeral classes were never copied; don't delete.
+            # Per Mini new-blocker #3: quarantine IS copied (to
+            # <dest>/legacy/<tag>/quarantine/<rel>) — must be considered
+            # for sha-verified deletion alongside other classes.
+            case "$cls_d" in
+                skip-ephemeral|skip-unknown|inflight-guard)
+                    continue ;;
+            esac
+            # Find any dest landing whose content matches.
+            local matched=""
+            for cand in \
+                "$DEST_REAL/$rel_d" \
+                "$DEST_REAL/legacy/$tag/$rel_d" \
+                "$DEST_REAL/legacy/$tag/quarantine/$rel_d"; do
+                if [ -f "$cand" ] && sha_match "$file" "$cand"; then
+                    matched="$cand"; break
+                fi
+            done
+            # Per Mini new-blocker #1: any legacy-* sidecar (any tag) might
+            # hold this source's content (dest-prior naming uses overwriting
+            # source's tag, not original). Walk all and sha-compare.
+            if [ -z "$matched" ]; then
+                local g
+                for g in "$DEST_REAL/$rel_d.legacy-"*; do
+                    if [ -f "$g" ] && sha_match "$file" "$g"; then
+                        matched="$g"; break
+                    fi
+                done
+            fi
+            # For rehome-state class, the dest is renamed (state/auth/<base>
+            # or state/<base>); check those.
+            if [ -z "$matched" ] && [ "$cls_d" = "rehome-state" ]; then
+                local b="$(basename "$rel_d")"
+                for cand in "$DEST_REAL/state/auth/$b" "$DEST_REAL/state/$b"; do
+                    if [ -f "$cand" ] && sha_match "$file" "$cand"; then
+                        matched="$cand"; break
+                    fi
+                done
+            fi
+            if [ -n "$matched" ]; then
+                rm -f "$file" && n_deleted=$((n_deleted+1))
+            else
+                n_kept_unsafe=$((n_kept_unsafe+1))
+            fi
+        done < <(find "${walk_paths[@]}" -type f -print0 2>/dev/null)
+        echo "  deleted:     $n_deleted source files (sha verified at dest)"
+        [ "$n_kept_unsafe" -gt 0 ] && echo "  KEPT unsafe: $n_kept_unsafe source files (no matching dest content; investigate)"
+    fi
+}
+
+commit_main() {
+    # Mini's polish: --delete-source REQUIRES --backup-id pointer. Forces
+    # operator to reference a real backup before destructive op.
+    if [ "$DELETE_SOURCE" = "1" ] && [ -z "$ROLLBACK_ID" ]; then
+        echo "ERROR: --delete-source requires --backup-id <id> to reference a known backup." >&2
+        echo "  If you want to commit + delete in one step on a fresh state, run --commit first (no-delete)," >&2
+        echo "  observe ~7d for straggler writers, then re-run with --commit --delete-source --backup-id <id-from-step-1>." >&2
+        echo "  Available backups:" >&2
+        ls -1 "$DEST_REAL/state/migration-backup-"*.tar.gz 2>/dev/null | sed -E 's@.*migration-backup-(.+)\.tar\.gz@    \1@' >&2 || echo "    (none)" >&2
+        exit 2
+    fi
+
+    echo "sutando-migrate: COMMIT mode"
+    echo "  dest:       $DEST_REAL"
+    echo "  append:     $([ "$MERGE_APPEND" = "1" ] && echo "merge (Strategy B)" || echo "sidecar (Strategy C — default)")"
+    echo "  delete src: $([ "$DELETE_SOURCE" = "1" ] && echo "yes (backup-id=$ROLLBACK_ID)" || echo "no — sources preserved (default; matches workspace_m1_no_auto_commit)")"
+    echo
+
+    backup_dest
+    echo
+
+    # Order: C (richest) → A (merges atop C) → B (sentinel-deduped legacy)
+    [ -n "$C_REAL_OK" ] && include_src C && commit_source C "$C_REAL_OK"
+    [ -n "$A_REAL_OK" ] && include_src A && commit_source A "$A_REAL_OK"
+    [ -n "$B_REAL_OK" ] && include_src B && commit_source B "$B_REAL_OK"
+
+    # β rehome of source's .git → dest/.git is a SEPARATE step. See
+    # sutando-plus/scripts/sutando-migrate-sync.sh — runs AFTER this commit
+    # succeeds, only relevant to sutando-plus users who have a vault remote at
+    # the customized source location.
+
+    echo
+    echo "sutando-migrate: COMMIT complete. Verify with: bash scripts/sutando-migrate.sh verify"
+    echo "  rollback: bash scripts/sutando-migrate.sh rollback --backup-id $BACKUP_ID"
+    if [ "$DELETE_SOURCE" = "0" ]; then
+        # Mini's polish: explicit next-step messaging for the two-phase pattern.
+        echo "  Sources NOT deleted (default). After ~7d observing no source-side writes, run:"
+        echo "    bash scripts/sutando-migrate.sh commit --delete-source --backup-id $BACKUP_ID"
+        echo "  Two-phase pattern keeps the (b)-style reader-fallback bridge intact during transition."
+    fi
+}
+
+verify_main() {
+    # Per Mini #design 2026-06-02: verify must sha-compare content, not just
+    # check path existence. The previous version could pass even after a
+    # collision overwrote the source content. Now: for each indexed source
+    # file, locate its canonical dest landing OR sidecar, then sha-compare.
+    echo "sutando-migrate: VERIFY mode"
+    local pass=0 missing=0 mismatch=0
+    if [ ! -s "$XSRC_INDEX" ]; then
+        index_dest_for_collisions
+        [ -n "$A_REAL_OK" ] && include_src A && scan_source A "$A_REAL_OK" >/dev/null
+        [ -n "$B_REAL_OK" ] && include_src B && scan_source B "$B_REAL_OK" >/dev/null
+        [ -n "$C_REAL_OK" ] && include_src C && scan_source C "$C_REAL_OK" >/dev/null
+    fi
+    # Need an inverse map: from indexed (tag, rel) back to the absolute source path.
+    # The scan recorded rel relative to the source root + tag. Re-derive:
+    src_path_for_tag() {
+        case "$1" in
+            A) echo "$A_REAL_OK" ;;
+            B) echo "$B_REAL_OK" ;;
+            C) echo "$C_REAL_OK" ;;
+        esac
+    }
+    while IFS=$'\t' read -r rel tag cls mt sz; do
+        [ "$tag" = "DEST" ] && continue
+        case "$cls" in
+            skip-ephemeral|skip-unknown|inflight-guard)
+                pass=$((pass+1)); continue ;;
+        esac
+        # Per Mini #design 2026-06-02 new-blocker #3: quarantine MUST be
+        # sha-verified at its dest landing, not pass-no-check. The walk below
+        # checks dst_quarantine (=$DEST_REAL/legacy/$tag/quarantine/$rel) via
+        # the standard cands loop.
+        local src_root
+        src_root="$(src_path_for_tag "$tag")"
+        [ -z "$src_root" ] && { pass=$((pass+1)); continue; }
+        # The XSRC_INDEX stores POST-classification rel (e.g. rehome-state
+        # writes state/auth/cloud-auth.json but the source was at root). Try
+        # the index-rel first; if source doesn't exist there, try with the
+        # original surface mapping (basename for rehome classes).
+        local src_file="$src_root/$rel"
+        [ ! -f "$src_file" ] && src_file="$src_root/$(basename "$rel")"
+        [ ! -f "$src_file" ] && { missing=$((missing+1)); [ "$missing" -le 5 ] && echo "  MISSING-SRC: $tag/$rel ($cls)"; continue; }
+        # Candidate destinations to check (in order of likelihood per class).
+        local dst_canonical="$DEST_REAL/$rel"
+        local dst_sidecar_legacy="$DEST_REAL/legacy/$tag/$rel"
+        local dst_quarantine="$DEST_REAL/legacy/$tag/quarantine/$rel"
+        # Per Mini #design 2026-06-02 new-blocker #1: dest-prior sidecars are
+        # named after the OVERWRITING source, not the original-content source.
+        # E.g. C's content might be at <path>.legacy-prior-from-A-<ts> (because
+        # A overwrote it). Looking only at legacy-$tag-* / legacy-prior-from-$tag-*
+        # for source C would miss C's content there. Walk ALL legacy-*-* sidecars
+        # and sha-compare to find the source's content regardless of tag.
+        local landed=""
+        local cands=()
+        for c in "$dst_canonical" "$dst_sidecar_legacy" "$dst_quarantine"; do
+            cands+=("$c")
+        done
+        # All possible legacy-* sidecars at canonical-rel (any source tag).
+        for g in "$dst_canonical.legacy-"*; do
+            [ -f "$g" ] && cands+=("$g")
+        done
+        for cand in "${cands[@]}"; do
+            if [ -f "$cand" ]; then
+                if sha_match "$src_file" "$cand"; then
+                    landed="$cand"; break
+                fi
+            fi
+        done
+        if [ -n "$landed" ]; then
+            pass=$((pass+1))
+        elif [ -f "$dst_canonical" ] || [ -f "$dst_sidecar_legacy" ]; then
+            # A dest path exists but sha doesn't match — content mismatch.
+            mismatch=$((mismatch+1))
+            [ "$mismatch" -le 5 ] && echo "  MISMATCH: $tag/$rel ($cls) — dest content differs from source"
+        else
+            missing=$((missing+1))
+            [ "$missing" -le 5 ] && echo "  MISSING: $tag/$rel ($cls) — no dest path found"
+        fi
+    done < "$XSRC_INDEX"
+    echo
+    echo "verify summary: pass=$pass missing=$missing mismatch=$mismatch"
+    if [ "$missing" -gt 0 ] || [ "$mismatch" -gt 0 ]; then
+        echo "verify: FAIL — $missing missing + $mismatch sha mismatch. Inspect with --json or scripts/sutando-migrate.sh explain <path>."
+        exit 1
+    fi
+    echo "verify: OK (sha-256 content match confirmed for every indexed source file)"
+}
+
+rollback_main() {
+    # Disable set -e for rollback's cleanup walks — they tolerate per-file
+    # failures (rm of non-existent files, grep no-match, tar of empty).
+    set +e
+    [ -z "$ROLLBACK_ID" ] && {
+        echo "rollback: --backup-id <id> required. Available backups:" >&2
+        ls -1 "$DEST_REAL/state/migration-backup-"*.tar.gz 2>/dev/null | sed -E 's@.*migration-backup-(.+)\.tar\.gz@  \1@' >&2
+        exit 2
+    }
+    local backup_path="$DEST_REAL/state/migration-backup-$ROLLBACK_ID.tar.gz"
+    [ ! -f "$backup_path" ] && {
+        echo "rollback: backup $backup_path not found" >&2
+        exit 2
+    }
+    echo "sutando-migrate: ROLLBACK from $backup_path"
+    # Clear sentinels for that backup id (idempotency).
+    # Note: glob may match zero files; suppress set -e via || true.
+    rm -f "$DEST_REAL/state/.migrated-from-"*"-$ROLLBACK_ID" 2>/dev/null || true
+    # Untar into dest. BSD tar (macOS) overwrites by default; GNU tar (Linux)
+    # also overwrites by default. Workspace surface only — never touches
+    # state/migration-backup-*.tar.gz files (they're outside the tar).
+    # Empty backup (0-byte) means dest was empty at backup time; skip extract +
+    # rely solely on the cleanup walk below to restore to empty state.
+    if [ -s "$backup_path" ]; then
+        ( cd "$DEST_REAL" && tar -xzf "$backup_path" ) || {
+            echo "rollback: extract failed" >&2
+            exit 1
+        }
+    else
+        echo "rollback: empty backup (dest was bootstrap-only at backup time); skipping extract"
+    fi
+    # Clean files added since backup that are NOT in the backup tarball.
+    # Read tarball entries → reference set → find dest's surface files not in set → delete.
+    local tar_listing
+    tar_listing="$(mktemp -t sutando-rollback.XXXXXX)"
+    if [ -s "$backup_path" ]; then
+        tar -tzf "$backup_path" 2>/dev/null > "$tar_listing" || true
+    else
+        : > "$tar_listing"  # empty backup: nothing to preserve, everything is "added since"
+    fi
+    [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] tar_listing size=$(wc -l < "$tar_listing") backup_path size=$(stat -f %z "$backup_path")" >&2
+    local sd
+    [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] rollback walk: DEST_REAL=$DEST_REAL" >&2
+    for sd in "${WORKSPACE_SURFACE_DIRS[@]}" "${WORKSPACE_SURFACE_FILES[@]}"; do
+        [ ! -e "$DEST_REAL/$sd" ] && continue
+        [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] rollback walking $DEST_REAL/$sd" >&2
+        while IFS= read -r f; do
+            local rel="${f#"$DEST_REAL"/}"
+            # If this rel is NOT in the tar listing, it was added after backup → remove
+            if ! grep -q "^${rel}$" "$tar_listing" 2>/dev/null; then
+                [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] rollback rm $rel" >&2
+                rm -f "$f"
+            fi
+        done < <(find "$DEST_REAL/$sd" -type f 2>/dev/null)
+    done
+    rm -f "$tar_listing" || true
+    # Drop sentinels matching this backup id
+    rm -f "$DEST_REAL/state/.migrated-from-"*"-$ROLLBACK_ID" 2>/dev/null || true
+    # Drop legacy/<src-tag>/ sidecars (only the script ever writes there)
+    rm -rf "$DEST_REAL/legacy" 2>/dev/null || true
+    echo "rollback: OK — dest restored to backup $ROLLBACK_ID"
+}
+
+emit_json() {
+    # Reads XSRC_INDEX (TSV) + the resolved source paths/state and emits a
+    # machine-readable JSON dump for downstream tooling (dashboards, skill
+    # wrappers, the eventual --commit dry-run UI). Python3 is the bash-friendly
+    # path — sutando already requires it.
+    python3 - "$DEST_REAL" "$A_REAL_OK" "$B_REAL_OK" "$C_REAL_OK" "$XSRC_INDEX" <<'PY'
+import json, sys, os
+from collections import defaultdict
+dest, a, b, c, idx_path = sys.argv[1:6]
+entries = []
+if os.path.exists(idx_path):
+    with open(idx_path) as f:
+        for line in f:
+            rel, tag, cls, mt, sz = line.rstrip("\n").split("\t")
+            entries.append({"rel": rel, "tag": tag, "class": cls,
+                            "mtime": int(mt or 0), "size": int(sz or 0)})
+by_rel = defaultdict(list)
+for e in entries:
+    by_rel[e["rel"]].append(e)
+collisions = {k: v for k, v in by_rel.items() if len(v) > 1}
+identical = sum(1 for v in collisions.values()
+                if len({(e["mtime"], e["size"]) for e in v}) == 1)
+genuine = len(collisions) - identical
+by_class = defaultdict(int)
+for v in collisions.values():
+    by_class[v[0]["class"]] += 1
+def has_size_mismatch(entries):
+    """True if entries differ in size — real content divergence the user must reason about."""
+    return len({e["size"] for e in entries}) > 1
+def has_mtime_mismatch(entries):
+    return len({e["mtime"] for e in entries}) > 1
+# Sort by actionability: size-mismatch (real content conflict) first, then
+# mtime-only diff (commit's newest-mtime resolves it), then identical
+# (drop-dup). Tiebreak by class then rel.
+def sort_key(item):
+    k, v = item
+    sz_diff = has_size_mismatch(v)
+    mt_diff = has_mtime_mismatch(v)
+    # priority: 0=size-diff (real), 1=mtime-only, 2=identical
+    if sz_diff: prio = 0
+    elif mt_diff: prio = 1
+    else: prio = 2
+    return (prio, v[0]["class"], k)
+notable = [{"class": v[0]["class"], "rel": k,
+            "size_mismatch": has_size_mismatch(v),
+            "mtime_mismatch": has_mtime_mismatch(v),
+            "entries": [{"tag": e["tag"], "mtime": e["mtime"], "size": e["size"]} for e in v]}
+           for k, v in sorted(collisions.items(), key=sort_key)]
+size_diff = sum(1 for v in collisions.values() if has_size_mismatch(v))
+mtime_only = sum(1 for v in collisions.values() if not has_size_mismatch(v) and has_mtime_mismatch(v))
+out = {
+    "dest": dest,
+    "sources": {"A": a or None, "B": b or None, "C": c or None},
+    "totals": {
+        "unique_relpaths": len(by_rel),
+        "collisions": len(collisions),
+        "identical_content": identical,
+        "mtime_only_diff": mtime_only,  # commit's newest-mtime auto-resolves
+        "size_mismatch": size_diff,     # the actionable subset — real content conflicts
+        # Legacy "genuine_conflicts" kept for backward-compat; equals mtime_only + size_mismatch
+        "genuine_conflicts": genuine,
+        "by_class": dict(by_class),
+    },
+    "notable_collisions": notable[:50],
+}
+json.dump(out, sys.stdout, indent=2)
+print()
+PY
+}
+
+explain_main() {
+    # `explain <path>` — operator dev-aid. Walks CLASS_RULES in order, prints
+    # the first match + the class + the resulting destination + the rule rank.
+    # Per Mini #design 2026-06-02 dev-aid suggestion.
+    if [ "$#" -lt 1 ] && [ -z "${EXPLAIN_PATH:-}" ]; then
+        echo "explain: usage: bash scripts/sutando-migrate.sh explain <relpath>" >&2
+        echo "  e.g.: explain notes/foo.md" >&2
+        echo "        explain state/cores/MBP.alive" >&2
+        echo "        explain tasks/processed/old.txt" >&2
+        exit 2
+    fi
+    local rel="${EXPLAIN_PATH:-$1}"
+    local rank=0
+    for rule in "${CLASS_RULES[@]}"; do
+        rank=$((rank + 1))
+        local glob="${rule%%|*}"
+        local cls="${rule##*|}"
+        # shellcheck disable=SC2254
+        case "$rel" in
+            $glob)
+                echo "path:   $rel"
+                echo "match:  rule #$rank — glob \`$glob\`"
+                echo "class:  $cls"
+                # Show the commit-time destination for the class:
+                local dest_hint=""
+                case "$cls" in
+                    structural|collision-keep-both|newest-mtime|append)
+                        dest_hint="<dest>/$rel"
+                        [ "$cls" = "append" ] && dest_hint="$dest_hint  OR  <dest>/legacy/<src-tag>/$rel  (default sidecar; --merge-append concats)"
+                        ;;
+                    rehome-state)
+                        local base="$(basename "$rel")"
+                        case "$base" in
+                            cloud-auth.json|device.json) dest_hint="<dest>/state/auth/$base" ;;
+                            *) dest_hint="<dest>/state/$base" ;;
+                        esac
+                        ;;
+                    rehome-dated-snapshot) dest_hint="<dest>/notes/archive/$(basename "$rel")" ;;
+                    rehome-narrative-log) dest_hint="<dest>/logs/workspace-narrative.log  (renamed to dodge logs/conversation.log collision)" ;;
+                    inflight-guard) dest_hint="<dest>/$rel  (if >${INFLIGHT_GUARD_SEC}s old)  OR  <dest>/${rel%%/*}/archive/<src-tag>/$(basename "$rel")  (route-to-archive)" ;;
+                    skip-ephemeral|skip-unknown) dest_hint="(skipped — no write)" ;;
+                    *) dest_hint="<unknown>" ;;
+                esac
+                echo "dest:   $dest_hint"
+                return 0
+            ;;
+        esac
+    done
+    echo "path:  $rel"
+    echo "match: none — no rule fires"
+    echo "class: unknown (skipped at commit; no write)"
+    return 0
+}
+
+case "$MODE" in
+    explain)
+        explain_main "$@"
+        exit $?
+        ;;
+    scan)
+        REPORT_LINES=("Scan report (scan-only; no writes):")
+        index_dest_for_collisions
+        [ -n "$A_REAL_OK" ] && include_src A && scan_source A "$A_REAL_OK"
+        [ -n "$B_REAL_OK" ] && include_src B && scan_source B "$B_REAL_OK"
+        [ -n "$C_REAL_OK" ] && include_src C && scan_source C "$C_REAL_OK"
+        if [ "$JSON" = "1" ]; then
+            emit_json
+        else
+            report_cross_source
+            REPORT_LINES+=("")
+            REPORT_LINES+=("Recommended commit order: C (richest, do first) → A (merge atop C) → B (sentinel-deduped)")
+            REPORT_LINES+=("")
+            REPORT_LINES+=("Next: bash scripts/sutando-migrate.sh commit  (when ready)")
+            for line in "${REPORT_LINES[@]}"; do echo "$line"; done
+        fi
+        ;;
+    commit)
+        commit_main
+        ;;
+    verify)
+        verify_main
+        ;;
+    rollback)
+        rollback_main
+        ;;
+esac
