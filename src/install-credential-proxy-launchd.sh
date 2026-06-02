@@ -22,11 +22,24 @@ DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 SERVICE="$DOMAIN/$LABEL"
 
-if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+# Resolve runtime workspace via the shared post-M0 helper (PR #1395, single
+# source at src/workspace_resolve.sh). Defensive fallback for non-checkout
+# installs where the helper file isn't reachable.
+# Helper resolution: prefer $REPO/src/, fall back to script-sibling (cross-
+# checkout safety — see init.sh comment).
+__HELPER="$REPO/src/workspace_resolve.sh"
+[ -f "$__HELPER" ] || __HELPER="$(cd "$(dirname "$0")" && pwd)/workspace_resolve.sh"
+if [ -f "$__HELPER" ]; then
+  # shellcheck source=workspace_resolve.sh
+  source "$__HELPER"
+  resolve_workspace_or_die
+elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
   WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
 else
-  WORKSPACE="$HOME/.sutando/workspace"
+  echo "${0##*/}: cannot resolve workspace — workspace_resolve.sh not found and \$SUTANDO_WORKSPACE not set." >&2
+  exit 1
 fi
+unset __HELPER
 
 resolve_brew_bin() {
     if [ -d /opt/homebrew/bin ]; then

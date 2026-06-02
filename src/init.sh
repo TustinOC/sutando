@@ -13,36 +13,54 @@ set -e
 REPO="${SUTANDO_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 MODE="${1:-full}"
 
-# Resolve runtime workspace. Same resolution shape as src/workspace_default.py
-# and startup.sh: $SUTANDO_WORKSPACE override (tilde-expanded), fallback to
-# ~/.sutando/workspace/. Runtime state files (logs, state, tasks, results,
-# notes, data, pending-questions.md, …) live here; loose status .json files
-# (core-status.json, voice-state.json, …) live under state/. Repo stays for
-# the code + skills + the schedule-crons.json copy below.
-if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
-else
-  WORKSPACE="$HOME/.sutando/workspace"
-  # Surface the silent-fallback bug class (see PR #1367/#1368): if .env
-  # defines SUTANDO_WORKSPACE but this process never got it (e.g. init.sh
-  # invoked by a bootstrap path that skips startup.sh's .env-source), the
-  # fallback lands in ~/.sutando/workspace/ while the rest of the fleet
-  # uses the override → split-brain. One stderr line per init.sh run
-  # makes the miss visible. We do NOT auto-honor the .env value here —
-  # only surface the mismatch.
-  if [ -f "$REPO/.env" ]; then
-    _env_val=$(grep -E '^SUTANDO_WORKSPACE=' "$REPO/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//" -e "s|^~|$HOME|")
-    if [ -n "$_env_val" ] && [ "$_env_val" != "$WORKSPACE" ]; then
-      echo "workspace: SUTANDO_WORKSPACE is unset in process env, falling back to $WORKSPACE. NOTE: .env declares SUTANDO_WORKSPACE='$_env_val' which is NOT being honored here — source .env or export the var before this process to avoid split-brain with other services." >&2
-    fi
-    unset _env_val
-  fi
-fi
-
+# Validate mode BEFORE workspace resolution so a usage error doesn't get
+# masked by a workspace-resolution failure (which would surface a less
+# actionable message for the caller).
 case "$MODE" in
   --auto|--preflight|--full|full) ;;
   *) echo "Usage: bash src/init.sh [--auto | --preflight]"; exit 2;;
 esac
+
+# Resolve runtime workspace via the shared post-M0 helper (PR #1395).
+# Single source for the resolution pattern lives in src/workspace_resolve.sh
+# — replaces the previously-duplicated 3-way block in 5 scripts (Lucy's #1399
+# review nit). Defensive fallback to the env var for the rare case where the
+# helper file isn't reachable (non-checkout / extracted-tarball install /
+# minimized test fixture). Runtime state files (logs, state, tasks, results,
+# notes, data, pending-questions.md, …) live under the workspace; loose
+# status .json files (core-status.json, voice-state.json, …) live under state/.
+# Helper lives at $REPO/src/workspace_resolve.sh in normal layout. Fall back
+# to script-sibling for cross-checkout safety: when $SUTANDO_REPO_DIR points
+# to a different checkout (e.g. owner's sutando-plus submodule pin) that
+# doesn't yet contain this newly-added file, the script-local copy is
+# always reachable. Caught by an E2E pass against PR #1399 before merge.
+__HELPER="$REPO/src/workspace_resolve.sh"
+[ -f "$__HELPER" ] || __HELPER="$(cd "$(dirname "$0")" && pwd)/workspace_resolve.sh"
+if [ -f "$__HELPER" ]; then
+  # shellcheck source=workspace_resolve.sh
+  source "$__HELPER"
+  resolve_workspace_or_die
+elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+  WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
+else
+  echo "init.sh: cannot resolve workspace — workspace_resolve.sh not found at \$REPO/src/ or alongside this script, and \$SUTANDO_WORKSPACE is not set." >&2
+  exit 1
+fi
+unset __HELPER
+
+# Surface the silent-fallback bug class (see PR #1367/#1368): if .env defines
+# SUTANDO_WORKSPACE but this process never got it (e.g. init.sh invoked by a
+# bootstrap path that skips startup.sh's .env-source), the helper-resolved
+# value may differ from .env. One stderr line per init.sh run makes the miss
+# visible. M0's loud-warn-workspace-fallback (PR #1369) covers part of this
+# from the helper side; this is the init.sh-specific belt-and-suspenders.
+if [ -f "$REPO/.env" ]; then
+  _env_val=$(grep -E '^SUTANDO_WORKSPACE=' "$REPO/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//" -e "s|^~|$HOME|")
+  if [ -n "$_env_val" ] && [ "$_env_val" != "$WORKSPACE" ]; then
+    echo "workspace: .env declares SUTANDO_WORKSPACE='$_env_val' but the M0 helper resolves to '$WORKSPACE' — source .env or export the var before this process to avoid split-brain with other services." >&2
+  fi
+  unset _env_val
+fi
 
 log() {
   # Quiet under --auto unless we're actually creating something
@@ -228,15 +246,22 @@ tier1() {
   # below points users at the CLI when legacy state is detected.
   legacy_state_notice
 
-  # Directories
-  create_dir_if_missing "logs"
-  create_dir_if_missing "state"
-  create_dir_if_missing "tasks"
-  create_dir_if_missing "results"
-  create_dir_if_missing "results/archive"
-  create_dir_if_missing "results/calls"
-  create_dir_if_missing "notes"
-  create_dir_if_missing "data"
+  # Directories — canonical list lives in `scripts/sutando-config.sh subdirs`
+  # so the layout is a single source of truth across init.sh tier1 +
+  # `bootstrap` subcommand + docs. Falls back to the historical hardcoded
+  # set if the helper isn't reachable (non-checkout install). Convergent
+  # feedback from Mini + Lucy on PR #1399.
+  if [ -f "$REPO/scripts/sutando-config.sh" ]; then
+    while IFS= read -r _d; do
+      [ -n "$_d" ] && create_dir_if_missing "$_d"
+    done < <(bash "$REPO/scripts/sutando-config.sh" subdirs)
+    unset _d
+  else
+    for _d in logs state tasks results results/archive results/calls notes data; do
+      create_dir_if_missing "$_d"
+    done
+    unset _d
+  fi
 
   # Files — placeholders only, content added by the agent later.
   # build_log.md lives under $SUTANDO_WORKSPACE per workspace contract; seeded
