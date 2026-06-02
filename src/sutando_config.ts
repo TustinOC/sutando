@@ -29,18 +29,43 @@ const CONFIG_FILENAME = 'sutando.config.json';
 const LOCAL_FILENAME = 'sutando.config.local.json';
 
 /**
+ * Known top-level keys the loader understands. The matching JSON Schema
+ * declares `additionalProperties: false` for IDE strictness; the loader
+ * stays lenient (warn-only) so experimental/scratch keys don't break.
+ * Per Mini's review #8 on PR #1395.
+ */
+const KNOWN_TOP_LEVEL_KEYS = new Set(['workspace', 'vault']);
+
+/**
  * Walk upward from `start` until we find a directory containing
  * `sutando.config.json`. Returns undefined if not found within 6 hops.
  * Anchors on the config file rather than `.git/` so app bundles + symlinked
  * installs still resolve correctly.
+ *
+ * Emits a one-line stderr diagnostic on miss (gated by `SUTANDO_DEBUG=1` to
+ * keep happy-path noise out of normal runs). Helps users diagnose "why is
+ * Sutando using the baked-in default" without strace, per Mini's review #3
+ * on PR #1395.
  */
-function findRepoRoot(start?: string): string | undefined {
-	let cur = resolve(start ?? dirname(fileURLToPath(import.meta.url)));
+/** @internal Exported for tests; production callers go through loadConfig. */
+export function findRepoRoot(start?: string): string | undefined {
+	const initial = resolve(start ?? dirname(fileURLToPath(import.meta.url)));
+	let cur = initial;
 	for (let i = 0; i < 6; i++) {
 		if (existsSync(join(cur, CONFIG_FILENAME))) return cur;
 		const parent = dirname(cur);
-		if (parent === cur) return undefined;
+		if (parent === cur) break;
 		cur = parent;
+	}
+	// Strict equality to "1" so SUTANDO_DEBUG=0 / "false" / "" don't accidentally
+	// turn on the diagnostic. Mini called this out in the #1397 review — env
+	// truthiness in JS treats any non-empty string as truthy, which would
+	// silently emit on common "disable" values.
+	if (process.env.SUTANDO_DEBUG === '1') {
+		process.stderr.write(
+			`sutando config: findRepoRoot walked 6 hops from ${initial} ` +
+				`and did not find ${CONFIG_FILENAME}; falling back to baked-in default.\n`,
+		);
 	}
 	return undefined;
 }
@@ -146,6 +171,7 @@ let _cache: { [k: string]: Json } | undefined;
 let _cacheRepoRoot: string | undefined;
 let _legacyEnvWarnPrinted = false;
 let _dotenvDriftWarnPrinted = false;
+let _unknownKeysWarnPrinted = false;
 
 /** Test-only: clear the per-process cache. */
 export function resetCacheForTests(): void {
@@ -153,6 +179,22 @@ export function resetCacheForTests(): void {
 	_cacheRepoRoot = undefined;
 	_legacyEnvWarnPrinted = false;
 	_dotenvDriftWarnPrinted = false;
+	_unknownKeysWarnPrinted = false;
+}
+
+function warnUnknownTopLevelKeys(cfg: { [k: string]: Json }, path: string): void {
+	if (_unknownKeysWarnPrinted) return;
+	const extras = Object.keys(cfg)
+		.filter((k) => !KNOWN_TOP_LEVEL_KEYS.has(k))
+		.sort();
+	if (extras.length === 0) return;
+	_unknownKeysWarnPrinted = true;
+	process.stderr.write(
+		`sutando config: ${path} has top-level keys the loader does not read: ` +
+			`${extras.map((k) => `'${k}'`).join(', ')}. Known keys: ` +
+			`${[...KNOWN_TOP_LEVEL_KEYS].sort().join(', ')}. Typo? Or experimental key — ` +
+			`the loader will ignore it either way.\n`,
+	);
 }
 
 /**
@@ -180,6 +222,7 @@ export function loadConfig(repoRoot?: string): { [k: string]: Json } {
 	const expanded = expandVars(merged, root) as { [k: string]: Json };
 	_cache = expanded;
 	_cacheRepoRoot = root;
+	warnUnknownTopLevelKeys(expanded, join(root, CONFIG_FILENAME));
 	return expanded;
 }
 

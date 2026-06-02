@@ -42,6 +42,13 @@ from typing import Any, Dict, Optional
 _CONFIG_FILENAME = "sutando.config.json"
 _LOCAL_FILENAME = "sutando.config.local.json"
 
+# Known top-level keys the loader understands. The matching JSON Schema
+# (docs/sutando-config.schema.json) declares `additionalProperties: false`
+# to teach IDEs strictness for autocomplete; the loader itself stays
+# lenient (warn-only) so users with experimental or scratch keys don't
+# break. Per Mini's review #8 on PR #1395.
+_KNOWN_TOP_LEVEL_KEYS = {"workspace", "vault"}
+
 
 def _find_repo_root(start: Optional[Path] = None) -> Optional[Path]:
     """Walk upward from `start` (default: this module's parent) until we find
@@ -52,14 +59,30 @@ def _find_repo_root(start: Optional[Path] = None) -> Optional[Path]:
       - app bundles + symlinked installs may lack `.git/` in the resolved path
       - users running outside a git checkout (CI, tarball install) still get
         a working loader as long as the config sits beside it
+
+    Emits a one-line stderr diagnostic on miss (gated by `SUTANDO_DEBUG=1` to
+    keep happy-path noise out of normal runs). Helps users diagnose "why is
+    Sutando using the baked-in default" without strace, per Mini's review #3
+    on PR #1395.
     """
-    cur = (start or Path(__file__).resolve().parent).resolve()
+    initial = (start or Path(__file__).resolve().parent).resolve()
+    cur = initial
     for _ in range(6):
         if (cur / _CONFIG_FILENAME).is_file():
             return cur
         if cur == cur.parent:  # filesystem root
-            return None
+            break
         cur = cur.parent
+    # Strict equality to "1" so SUTANDO_DEBUG=0 / "false" / "" don't accidentally
+    # turn on the diagnostic. Mini called this out in the #1397 review — env
+    # truthiness in Python treats any non-empty string as truthy, which would
+    # silently emit on common "disable" values.
+    if os.environ.get("SUTANDO_DEBUG") == "1":
+        print(
+            f"sutando config: _find_repo_root walked 6 hops from {initial} "
+            f"and did not find {_CONFIG_FILENAME}; falling back to baked-in default.",
+            file=sys.stderr,
+        )
     return None
 
 
@@ -154,6 +177,28 @@ _CACHE: Optional[Dict[str, Any]] = None
 _CACHE_REPO_ROOT: Optional[Path] = None
 _LEGACY_ENV_WARN_PRINTED = False
 _DOTENV_DRIFT_WARN_PRINTED = False
+_UNKNOWN_KEYS_WARN_PRINTED = False
+
+
+def _warn_unknown_top_level_keys(cfg: Dict[str, Any], path: Path) -> None:
+    """Emit a one-time stderr warning if the resolved config has top-level
+    keys the loader doesn't recognize. Helps catch typos like `workspce`
+    while leaving experimental keys harmlessly ignored. Per Mini's #8.
+    """
+    global _UNKNOWN_KEYS_WARN_PRINTED
+    if _UNKNOWN_KEYS_WARN_PRINTED:
+        return
+    extras = sorted(k for k in cfg if k not in _KNOWN_TOP_LEVEL_KEYS)
+    if not extras:
+        return
+    _UNKNOWN_KEYS_WARN_PRINTED = True
+    print(
+        f"sutando config: {path} has top-level keys the loader does not read: "
+        f"{', '.join(repr(k) for k in extras)}. Known keys: "
+        f"{sorted(_KNOWN_TOP_LEVEL_KEYS)!r}. Typo? Or experimental key — "
+        f"the loader will ignore it either way.",
+        file=sys.stderr,
+    )
 
 
 def _reset_cache_for_tests() -> None:
@@ -162,11 +207,12 @@ def _reset_cache_for_tests() -> None:
     Production code never calls this. Importing in tests is intentional —
     keeps the public surface honest.
     """
-    global _CACHE, _CACHE_REPO_ROOT, _LEGACY_ENV_WARN_PRINTED, _DOTENV_DRIFT_WARN_PRINTED
+    global _CACHE, _CACHE_REPO_ROOT, _LEGACY_ENV_WARN_PRINTED, _DOTENV_DRIFT_WARN_PRINTED, _UNKNOWN_KEYS_WARN_PRINTED
     _CACHE = None
     _CACHE_REPO_ROOT = None
     _LEGACY_ENV_WARN_PRINTED = False
     _DOTENV_DRIFT_WARN_PRINTED = False
+    _UNKNOWN_KEYS_WARN_PRINTED = False
 
 
 def load_config(repo_root: Optional[Path] = None) -> Dict[str, Any]:
@@ -201,6 +247,7 @@ def load_config(repo_root: Optional[Path] = None) -> Dict[str, Any]:
 
     _CACHE = expanded
     _CACHE_REPO_ROOT = root
+    _warn_unknown_top_level_keys(expanded, root / _CONFIG_FILENAME)
     return expanded
 
 
@@ -240,7 +287,22 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
                 f"`sutando.config.local.json` under `workspace.path` and unset the env.",
                 file=sys.stderr,
             )
-        return Path(env_val).expanduser().resolve()
+        # Preserve the pre-cutover semantic: only resolve when the env value
+        # is RELATIVE (anchor to cwd, surface the misconfig). For absolute
+        # paths, return as-is so symlinked paths like /tmp -> /private/tmp on
+        # macOS don't get rewritten — that broke the workspace_default test
+        # that compared paths string-equality.
+        target = Path(env_val).expanduser()
+        if not target.is_absolute():
+            anchored = (Path.cwd() / target).resolve()
+            print(
+                f"sutando config: $SUTANDO_WORKSPACE={env_val!r} is relative — "
+                f"anchored to {anchored} (CWD-dependent; set an absolute path to "
+                f"avoid cross-process drift).",
+                file=sys.stderr,
+            )
+            return anchored
+        return target
 
     cfg = load_config(repo_root)
     root = repo_root or _CACHE_REPO_ROOT
