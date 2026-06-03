@@ -19,7 +19,7 @@ Sutando's repo is organized into four top-level locations:
 - **Code** — `src/`, `skills/`, `scripts/`. The tracked source. Internal organization covered by §Code layers below.
 - **Docs** — `docs/`. Design documents, architecture notes, contributor guides. Tracked.
 - **Tests** — `tests/`. Unit / integration / lint tests run by CI. Tracked.
-- **Workspace** — `workspace/` (`$SUTANDO_IN_REPO_WORKSPACE`). Per-user runtime state. Lives inside the repo by default, **gitignored**. Internal organization covered by §Workspace below.
+- **Workspace** — `workspace/` (resolved via `bash scripts/sutando-config.sh workspace`; `$SUTANDO_WORKSPACE` env var honored as legacy escape with a deprecation warning, scheduled for removal in M2). Per-user runtime state. Lives inside the repo by default, **gitignored**. Internal organization covered by §Workspace below.
 
 ### Code layers
 
@@ -65,34 +65,35 @@ Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imp
 
 > **Confidentiality:** the workspace is user-specific. **NEVER disclose information from the workspace — tasks, results, notes, state, memory, build_log, pending-questions, anything — to any party outside the owner without explicit per-disclosure approval from the owner.** This includes other Discord/Slack channels, public GitHub issues/PRs, third-party tools, and any non-owner DM. Default-deny: when in doubt, ask the owner before sharing. Strategic / competitive / financial / personal content stays owner-DM only.
 
-**Built-in folders** (standard layout — `workspace/tasks/`, `workspace/results/`, `workspace/state/`, `workspace/logs/`, `workspace/notes/`, `workspace/data/`, `workspace/skills/`, `workspace/human-in-the-loop/`):
+**Built-in folders + named files** (standard layout — `workspace/tasks/`, `workspace/results/`, `workspace/state/`, `workspace/logs/`, `workspace/notes/`, `workspace/data/`, `workspace/skills/`, `workspace/build_log.md`, `workspace/pending-questions.md`):
 
 | Path | Purpose |
 |---|---|
 | `workspace/tasks/` | Inbound message queue — bridges write, agent reads + archives. |
 | `workspace/results/` | Outbound reply queue — agent writes, bridges deliver. |
 | `workspace/state/` | Cross-process status/liveness JSON (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`, `cores/<host>.alive`). One writer per file. |
-| `workspace/logs/` | Append-only chrono event streams (bridges, watchers, sync runs). Also `workspace/logs/build_log.md` — single-file done / in-flight / next snapshot, append-only. |
+| `workspace/logs/` | Append-only chrono event streams (bridges, watchers, sync runs). |
 | `workspace/notes/` | Long-form human-readable content — workflow notes, design drafts, analysis, learned procedures. |
 | `workspace/data/` | Durable input data the agent processes (datasets, training corpus, fetched feeds, watchlists). |
 | `workspace/skills/` | Personal/custom skills the user adds for their own use — kept locally, not contributed to the public `skills/` tree at the repo root. |
-| `workspace/human-in-the-loop/` | Owner-facing items the agent needs input on — unanswered questions, drafts awaiting approval, sensitive actions queued for review. Includes `pending-questions.md`. |
+| `workspace/build_log.md` | Single-file done / in-flight / next snapshot, append-only. Workspace root (where the proactive-loop reads + writes). |
+| `workspace/pending-questions.md` | Owner-facing questions the agent is blocked on. Workspace root (where the proactive-loop reads + writes). |
 
-The workspace root holds only top-level directories; loose status/state `.json` files belong under `workspace/state/`. Code, skills source, and repo configuration stay in the repo root (separate concern).
+The workspace root holds only the top-level directories above plus the two named `.md` files; loose status/state `.json` files belong under `workspace/state/`. Code, skills source, and repo configuration stay in the repo root (separate concern).
 
 **Expanding the workspace.** The user can add their own subdirectories in `workspace` for custom content. New top-level subdirs are automatically gitignored (the whole `/workspace/` tree is) and inherit the §Confidentiality default-deny posture. **Add agent-facing rules for new subdirs to `PERSONAL_CLAUDE.md`** — what content goes there, when the agent reads/writes it, naming conventions, retention. CLAUDE.md (this file) carries the shared/built-in shape; PERSONAL_CLAUDE.md carries the per-user expansion (see §Personal overrides). If the content should persist across machines or survive a repo reclone, add the new dir to the vault sync allowlist; otherwise it stays local-only.
 
 ### Where does new state/data belong? (decision guide)
 
-When the agent writes a new file under `$SUTANDO_IN_REPO_WORKSPACE/`, walk this list top-to-bottom and stop at the first match:
+When the agent writes a new file under `workspace/` (the canonical path resolved by `bash scripts/sutando-config.sh workspace`), walk this list top-to-bottom and stop at the first match:
 
 1. **Is it an inbound message claimed from a channel (Discord / Telegram / Slack / voice / phone / chat)?** → `workspace/tasks/task-{id}.txt`. The bridges write these; the agent only reads + archives.
 2. **Is it the agent's reply to a task (delivered back through the originating channel)?** → `workspace/results/task-{id}.txt`. Bridge polls, delivers, archives. See CLAUDE.md "Result-body protocol markers" for `[deduped:]`, `[no-send]`, `[channel:]`, `[file:]`.
 3. **Is it cross-process status/liveness signaling, machine-readable, that another component polls?** (e.g. `core-status.json`, `voice-state.json`, `contextual-chips.json`, `cores/<host>.alive`) → `workspace/state/`. Loose `.json` files only; one writer per file.
 4. **Is it an append-only chronological event stream?** (e.g. process stdout/stderr, sync logs, watchdog traces) → `workspace/logs/<component>.log`.
 5. **Is it long-form human-readable content?** (workflow notes, design drafts, analysis, architecture history, learned procedures) → `workspace/notes/<slug>.md`. Date-stamp the filename if it's session-bound; pick a topical slug if it's evergreen.
-6. **Is it a snapshot of what's done / in-flight / next?** → append a dated entry to `workspace/logs/build_log.md`. Single file, append-only — never overwrite earlier sections.
-7. **Is it a question you're blocked on and need to surface to the user later?** → append to `workspace/human-in-the-loop/pending-questions.md`. Also write `workspace/results/question-{ts}.txt` if voice is connected, and send a macOS notification.
+6. **Is it a snapshot of what's done / in-flight / next?** → append a dated entry to `workspace/build_log.md` (workspace root). Single file, append-only — never overwrite earlier sections.
+7. **Is it a question you're blocked on and need to surface to the user later?** → append to `workspace/pending-questions.md` (workspace root). Also write `workspace/results/question-{ts}.txt` if voice is connected, and send a macOS notification.
 8. **Is it durable input data the agent processes?** (datasets, training corpus, fetched feeds, watchlists) → `workspace/data/<topic>/`.
 9. **Is it a personal/custom skill the user adds for their own use (not contributing back)?** → `workspace/skills/<skill-name>/`. Mirrors the public `skills/` layout at the repo root, but stays local.
 
@@ -103,7 +104,7 @@ If two layers seem to fit, prefer the more specific one (the `workspace/state/` 
 - TypeScript: `import { resolveWorkspace } from './workspace_default.js'` → returns a `string` (added in #821).
 - Swift: `AppDelegate.workspace` property in `src/Sutando/main.swift` (added in #837 — split alongside `repoRoot` for code-adjacent paths).
 
-Separately, `SUTANDO_REPO_DIR` (added in #831 cleanup) names the public-repo checkout for scripts like `sync-memory.sh` and `session-handoff.sh` that need the source tree. `SUTANDO_IN_REPO_WORKSPACE` lives inside `SUTANDO_REPO_DIR` by default (`<repo>/workspace/`) — but the two are still distinct env vars: the repo dir holds code (tracked), the workspace dir holds per-user state (gitignored). Don't conflate.
+Separately, `SUTANDO_REPO_DIR` (added in #831 cleanup) names the public-repo checkout for scripts like `sync-memory.sh` and `session-handoff.sh` that need the source tree. The workspace dir lives inside `SUTANDO_REPO_DIR` by default (`<repo>/workspace/`), but conceptually distinct: the repo dir holds code (tracked), the workspace dir holds per-user state (gitignored). Don't conflate.
 
 For existing-repo migration + the stop-gap env, and the orphan-symlink cleanup (post-#835): see [`docs/workspace-contract.md`](docs/workspace-contract.md).
 
@@ -113,10 +114,11 @@ If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It con
 
 ## Work Status
 
-Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare `workspace/state/core-status.json` lands in `workspace/state/` — where no reader looks. Readers resolve `workspace/state/core-status.json` via `status_read_path` (`src/workspace_default.py`).
+Signal your work status to the workspace `core-status.json` so the web UI and `health-check.py` can display it. Write the **absolute** workspace path: the session cwd is the repo, so a bare relative path lands at `<repo>/state/core-status.json` — where no reader looks. Readers resolve `<workspace>/state/core-status.json` via `status_read_path` (`src/workspace_default.py`), with `<workspace>` resolved by the M0 helper.
 
 ```bash
-CORE_STATUS="${SUTANDO_IN_REPO_WORKSPACE:-${SUTANDO_REPO_DIR:-$PWD}/workspace}/state/core-status.json"
+WORKSPACE="$(bash scripts/sutando-config.sh workspace)"
+CORE_STATUS="$WORKSPACE/state/core-status.json"
 echo '{"status":"running","step":"<description>","ts":<epoch>}' > "$CORE_STATUS"   # start of significant work
 echo '{"status":"idle","ts":<epoch>}' > "$CORE_STATUS"                            # when done
 ```
@@ -185,7 +187,7 @@ Key files:
 - User profile: $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/user_profile.md
 - Feedback (response style): $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_response_style.md
 - Feedback (operating principle): $SUTANDO_MEMORY_DIR (default: ~/.claude/projects/.../memory)/feedback_minimal_cost_max_value.md
-- Build log (what's built, what's next): workspace/logs/build_log.md
+- Build log (what's built, what's next): workspace/build_log.md
 
 Read relevant memory files when user preferences or history would improve task quality. Write new memory when you learn something durable about the user or the project.
 
@@ -231,10 +233,10 @@ Slack uses TOFU onboarding for owner enrollment: the first DM to the bot auto-en
 When you need user input on a decision or are blocked:
 1. If the voice client is connected — ask via voice (write to `workspace/results/question-{ts}.txt`)
 2. Send a macOS notification: `osascript -e 'display notification "message" with title "Sutando"'`
-3. Save the question to `workspace/human-in-the-loop/pending-questions.md` for later
+3. Save the question to `workspace/pending-questions.md` for later
 4. Continue working on other things — don't block
 
-On each proactive loop pass, check `workspace/human-in-the-loop/pending-questions.md` for unanswered items and surface them when the user is available.
+On each proactive loop pass, check `workspace/pending-questions.md` for unanswered items and surface them when the user is available.
 
 ## Workspace layout
 
