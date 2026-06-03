@@ -1027,16 +1027,22 @@ commit_one() {
                     return 0
                 fi
                 # Append with divider header. Concat in canonical order.
+                # Per-command RC capture (same template as --merge-append block
+                # below). Brace-overall exit only catches the last command's
+                # failure; per-command bitmask catches earlier-step failures
+                # (e.g. cat-dst disappearing mid-merge).
+                # Bitmask: 1=cat-dst  2=hdr-blank  4=hdr-line  8=trailer-blank  16=cat-src
+                local _aerr=0
                 {
-                    cat "$dst_path"
-                    echo ""
-                    echo "=== migrated from source $tag (mtime $src_mt, size ${src_sz}B) ==="
-                    echo ""
-                    cat "$src_file"
-                } > "$_tmp" || _redirect_rc=$?
-                if [ "$_redirect_rc" -ne 0 ]; then
+                    cat "$dst_path"                                                          || _aerr=$((_aerr|1))
+                    echo ""                                                                  || _aerr=$((_aerr|2))
+                    echo "=== migrated from source $tag (mtime $src_mt, size ${src_sz}B) ===" || _aerr=$((_aerr|4))
+                    echo ""                                                                  || _aerr=$((_aerr|8))
+                    cat "$src_file"                                                          || _aerr=$((_aerr|16))
+                } > "$_tmp"
+                if [ "$_aerr" -ne 0 ]; then
                     rm -f "$_tmp"
-                    echo "append-failed-redirect" >&2
+                    echo "append-failed-inner $_aerr" >&2
                     return 1
                 fi
                 mv -f "$_tmp" "$dst_path" || {
@@ -1047,19 +1053,22 @@ commit_one() {
                 echo "appended"
             else
                 # First write — include header so future appends slot in cleanly.
+                # Per-command RC capture; bitmask 4=hdr-line  8=trailer-blank  16=cat-src
+                # (no cat-dst since dst doesn't exist yet).
+                local _afferr=0
                 {
-                    echo "=== migrated from source $tag (mtime $src_mt, size ${src_sz}B) ==="
-                    echo ""
-                    cat "$src_file"
-                } > "$_tmp" || _redirect_rc=$?
-                if [ "$_redirect_rc" -ne 0 ]; then
+                    echo "=== migrated from source $tag (mtime $src_mt, size ${src_sz}B) ===" || _afferr=$((_afferr|4))
+                    echo ""                                                                  || _afferr=$((_afferr|8))
+                    cat "$src_file"                                                          || _afferr=$((_afferr|16))
+                } > "$_tmp"
+                if [ "$_afferr" -ne 0 ]; then
                     rm -f "$_tmp"
-                    echo "append-failed-redirect" >&2
+                    echo "append-fresh-failed-inner $_afferr" >&2
                     return 1
                 fi
                 mv -f "$_tmp" "$dst_path" || {
                     rm -f "$_tmp"
-                    echo "append-failed-mv" >&2
+                    echo "append-fresh-failed-mv" >&2
                     return 1
                 }
                 echo "appended-fresh"
@@ -1073,13 +1082,38 @@ commit_one() {
                 dst_path="$DEST_REAL/$rel"
                 mkdir -p "$(dirname "$dst_path")"
                 if [ -e "$dst_path" ]; then
+                    # IMPORTANT: split the compound-redirect + mv + echo "merged"
+                    # into separate statements with explicit error returns.
+                    # Per `feedback_bash_and_compound_breaks_set_e` + Mini's
+                    # PR #1424 review #1: capture RC PER-COMMAND inside the
+                    # brace group, not just the brace's overall exit. A brace
+                    # group's exit code = the last command's exit; an early
+                    # `cat "$dst_path"` failure (e.g. file disappeared between
+                    # check + read, permission flip) gets silently swallowed
+                    # if the later `cat "$src_file"` returns 0. That would
+                    # commit a PARTIAL merge (dst_path content missing) +
+                    # print "merged" — invisible data loss.
+                    #
+                    # Bitmask captures which step(s) failed for stderr triage:
+                    #   1=cat-dst  2=hdr-blank  4=hdr-line  8=trailer-blank  16=cat-src
+                    local _err=0
                     {
-                        cat "$dst_path"
-                        echo ""
-                        echo "=== migrated from source $tag at $BACKUP_ID ==="
-                        echo ""
-                        cat "$src_file"
-                    } > "$dst_path.merge.$$" && mv -f "$dst_path.merge.$$" "$dst_path"
+                        cat "$dst_path"                                || _err=$((_err|1))
+                        echo ""                                        || _err=$((_err|2))
+                        echo "=== migrated from source $tag at $BACKUP_ID ===" || _err=$((_err|4))
+                        echo ""                                        || _err=$((_err|8))
+                        cat "$src_file"                                || _err=$((_err|16))
+                    } > "$dst_path.merge.$$"
+                    if [ "$_err" -ne 0 ]; then
+                        rm -f "$dst_path.merge.$$"
+                        echo "merge-append-failed-inner $_err" >&2
+                        return 1
+                    fi
+                    mv -f "$dst_path.merge.$$" "$dst_path" || {
+                        rm -f "$dst_path.merge.$$"
+                        echo "merge-append-failed-mv" >&2
+                        return 1
+                    }
                     echo "merged"
                 else
                     copy_preserving_mtime "$src_file" "$dst_path"

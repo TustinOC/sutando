@@ -24,6 +24,14 @@
 #   bash scripts/sutando-shell-setup.sh --migrate      # rsync ~/.claude → <workspace>/.claude-sutando (idempotent, non-destructive)
 #   bash scripts/sutando-shell-setup.sh --repair-paths # re-pin hardcoded SOURCE_DIR paths in runtime files to CLAUDE_DIR (idempotent)
 #
+# Modifier flags (can combine with any MODE-setting flag):
+#   --force         # override the "user-defined claude-sutando() function detected" guard in --commit
+#   --from=<PATH>   # for --migrate / --repair-paths: ALSO rewrite this OLD claude-config-dir
+#                   # location (in addition to the default SOURCE_CLAUDE_CONFIG_DIR / ~/.claude).
+#                   # Use when the workspace was moved: previously-rewritten paths point at the
+#                   # old workspace's .claude-sutando; --from re-pins them to the current target.
+#                   # Note: uses `=`-joined form (--from=/path), not space-separated.
+#
 # Idempotency: --commit grep-guards on the alias key `^alias claude-sutando=`,
 # not the body. If the workspace path changes (config edit or repo relocate),
 # re-running --commit cleanly REPLACES the line with the new resolved path.
@@ -39,10 +47,28 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODE="dry-run"
+FORCE=0
+FROM_DIR=""
 
-# Parse args (one-shot; multiple flags are ignored — first wins).
+# Parse args in two passes so modifiers (`--force`, `--from=PATH`) get
+# parsed regardless of where they appear relative to the MODE-setting flag.
+# The MODE-setting flags `break;` (first wins, by existing convention) and
+# would otherwise eat any modifier that appears after them on the command
+# line (e.g. `--repair-paths --from=/x` would not set FROM_DIR).
+#
+# Pass 1: scan ALL args for modifiers. Doesn't break.
 for arg in "$@"; do
   case "$arg" in
+    --force)   FORCE=1 ;;
+    --from=*)  FROM_DIR="${arg#--from=}" ;;
+  esac
+done
+# Pass 2: find the FIRST mode-setting flag and stop. Original behavior.
+# Modifiers already consumed by pass 1 — silently no-op them here so the
+# unknown-arg arm doesn't fire on a legit modifier.
+for arg in "$@"; do
+  case "$arg" in
+    --force|--from=*) ;;  # consumed by pass 1
     --commit)  MODE="commit"; break ;;
     --auto)    MODE="auto"; break ;;
     --check)   MODE="check"; break ;;
@@ -166,19 +192,58 @@ legacy_alias_present() {
   [ -f "$RC_FILE" ] && grep -qE '^alias claude-sutando=' "$RC_FILE"
 }
 
+# Helper: detect a user-defined `claude-sutando` function OUTSIDE our
+# managed marker block. Set up because --commit otherwise appends the
+# managed block alongside any pre-existing function, and bash's
+# last-definition-wins makes the user's function dead code with no warning
+# (Mini PR #1415 review #6 → issue #1418).
+#
+# Per Mini PR #1424 review #3: regex expanded to catch all common
+# function-definition shapes, including the `function NAME { ... }`
+# syntax and leading-whitespace variants:
+#   - `claude-sutando()`              (POSIX function, column 0)
+#   - `  claude-sutando()`            (leading whitespace — common in
+#                                       rc-files with conditional blocks)
+#   - `claude-sutando ()`             (space before parens)
+#   - `function claude-sutando`       (keyword form, no parens)
+#   - `function claude-sutando {`     (keyword form, brace on same line)
+#   - `function claude-sutando () {`  (keyword form + parens)
+#   - leading-whitespace variants of any of the above
+#
+# Awk strips the managed block first so we don't false-positive on our
+# own injected function. Grep alternation covers both shapes.
+user_defined_function_present() {
+  [ -f "$RC_FILE" ] || return 1
+  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+    $0 == b { inblk=1; next }
+    $0 == e { inblk=0; next }
+    !inblk { print }
+  ' "$RC_FILE" | grep -qE '^[[:space:]]*(claude-sutando[[:space:]]*\(\)|function[[:space:]]+claude-sutando([[:space:]]|\(|\{|$))'
+}
+
 # Helper: rewrite hardcoded SOURCE_DIR/ → CLAUDE_DIR/ in runtime-critical
 # files under CLAUDE_DIR. Shared by --migrate (post-rsync) and --repair-paths
 # (standalone re-pin without rsync — useful when the workspace moves).
 #
-# Why an allowlist instead of recursive sed:
+# Why an allowlist (+globbed patterns) instead of recursive sed:
 #   - The migrated tree contains immutable history (`projects/*/*.jsonl`,
 #     `history.jsonl`), per-migration backups (`*.before-migrate.*`), shell
 #     snapshots (`shell-snapshots/`), and edit-history blobs (`file-history/`).
 #     Rewriting THOSE would corrupt frozen-truth records.
-#   - The list below is the audited set of files claude-code reads at runtime
-#     to make decisions (hooks, plugin manifests, slash-commands with literal
-#     paths). A new file with embedded paths gets caught by the next allowlist
-#     update — known maintenance load, not silent-corruption risk.
+#   - The set below is the audited set of files claude-code reads at runtime
+#     to make decisions (hooks, plugin manifests, slash-commands, skill
+#     bodies/scripts with literal paths). Two layers:
+#       (a) Explicit-file list — files we know exist by name at runtime.
+#       (b) Globbed-by-pattern  — commands/*.md and skills/**/* for files
+#           whose existence depends on what the user has installed. Each
+#           candidate is filtered through `grep -q source_dir` before sed
+#           fires, so absent paths just no-op rather than churn empty files.
+#
+# Issue #1416 (Mini PR #1415 review #2): expanded from a 4-file explicit
+# allowlist to (a)+(b) so user-installed slash-commands + third-party skills
+# with hardcoded ~/.claude paths don't slip through. Still allowlist-shaped
+# (vs full recursive sed) — keeps the contract grep'able and avoids touching
+# the immutable surfaces above.
 #
 # Idempotency: rewriting destpath → destpath is a no-op, so this is safe to
 # run repeatedly. Uses `|` as the sed delimiter so the `/` in paths doesn't
@@ -188,18 +253,74 @@ legacy_alias_present() {
 # stock sed and GNU sed. We delete the .bak immediately after.
 _rewrite_runtime_paths() {
   local source_dir="${SOURCE_CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  # Layer (a) — known-by-name runtime files.
   local runtime_files=(
     "$CLAUDE_DIR/settings.json"
     "$CLAUDE_DIR/plugins/installed_plugins.json"
     "$CLAUDE_DIR/plugins/known_marketplaces.json"
-    "$CLAUDE_DIR/commands/openacp:handoff.md"
   )
+  # Layer (b) — globbed patterns. Enumerate to absolute paths and append.
+  # Commands: every .md file under commands/ (slash-command bodies may
+  # embed literal hook/bash paths — openacp:handoff.md was the original
+  # known case; this covers any future commands the user installs).
+  if [ -d "$CLAUDE_DIR/commands" ]; then
+    while IFS= read -r f; do
+      runtime_files+=("$f")
+    done < <(find "$CLAUDE_DIR/commands" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+  fi
+  # Skills: SKILL.md (the prompt) + any scripts/ folder shell/python/ts/js.
+  # Skip plugins/cache/ (vendored plugin source; already covered by
+  # known_marketplaces.json + installed_plugins.json rewriting).
+  if [ -d "$CLAUDE_DIR/skills" ]; then
+    while IFS= read -r f; do
+      runtime_files+=("$f")
+    done < <(find "$CLAUDE_DIR/skills" -type f \( -name 'SKILL.md' -o -name '*.sh' -o -name '*.py' -o -name '*.ts' -o -name '*.js' \) 2>/dev/null)
+  fi
   local sed_script="s|${source_dir}/|${CLAUDE_DIR}/|g"
   local rewrote=0 unchanged=0 missing=0
+  # Mini PR #1415 review #3 → issue #1417: support --from=<old-path> for
+  # workspace-move scenarios. When set, rewrite BOTH source_dir → CLAUDE_DIR
+  # (the default) AND from_dir → CLAUDE_DIR (the move-from). Two passes per
+  # file so a file containing both old strings ends up fully re-pinned.
+  #
+  # Validation (Mini PR #1424 review #2): a typo or empty value would be
+  # catastrophic. `--from=/` builds `s|/|$CLAUDE_DIR/|g` which rewrites
+  # EVERY slash in every candidate file. Reject before sed:
+  #   - empty / "/" / root-ish paths
+  #   - paths that don't end in /.claude or /.claude-sutando (the only
+  #     two shapes we ever rehome from)
+  #   - paths that don't exist on disk (typo guard)
+  local from_sed_script=""
+  if [ -n "$FROM_DIR" ]; then
+    local _from_norm="${FROM_DIR%/}"
+    if [ -z "$_from_norm" ] || [ "$_from_norm" = "" ]; then
+      echo "--from= cannot be empty or root" >&2
+      return 1
+    fi
+    case "$_from_norm" in
+      */.claude|*/.claude-sutando|*/.claude.*)
+        : ;;  # accepted shapes
+      *)
+        echo "--from=$FROM_DIR rejected — must end in /.claude or /.claude-sutando" >&2
+        echo "  (guard against typos: --from=/ would rewrite every slash in every candidate file)" >&2
+        return 1
+        ;;
+    esac
+    if [ ! -d "$_from_norm" ]; then
+      echo "--from=$FROM_DIR rejected — directory does not exist" >&2
+      echo "  (guard against typos: silent no-op vs explicit failure)" >&2
+      return 1
+    fi
+    from_sed_script="s|${_from_norm}/|${CLAUDE_DIR}/|g"
+  fi
   echo
   echo "  Re-pinning hardcoded paths:"
-  echo "    source : ${source_dir}/"
-  echo "    target : ${CLAUDE_DIR}/"
+  echo "    source    : ${source_dir}/"
+  if [ -n "$FROM_DIR" ]; then
+    echo "    move-from : ${FROM_DIR%/}/  (also re-pinned to target)"
+  fi
+  echo "    target    : ${CLAUDE_DIR}/"
+  echo "    candidates: ${#runtime_files[@]} files (explicit + commands/*.md + skills/**/{SKILL.md,scripts})"
   local f
   for f in "${runtime_files[@]}"; do
     if [ ! -f "$f" ]; then
@@ -207,8 +328,16 @@ _rewrite_runtime_paths() {
       missing=$((missing + 1))
       continue
     fi
+    local touched=0
     if grep -q "${source_dir}/" "$f" 2>/dev/null; then
       sed -i.bak "$sed_script" "$f" && rm -f "$f.bak"
+      touched=1
+    fi
+    if [ -n "$from_sed_script" ] && grep -q "${FROM_DIR%/}/" "$f" 2>/dev/null; then
+      sed -i.bak "$from_sed_script" "$f" && rm -f "$f.bak"
+      touched=1
+    fi
+    if [ $touched -eq 1 ]; then
       echo "    rewrote               ${f#${CLAUDE_DIR}/}"
       rewrote=$((rewrote + 1))
     else
@@ -308,6 +437,38 @@ EOF
     # mkdir THIS checkout's target so first `claude-sutando` here works cleanly.
     # Function resolves per-cwd at runtime, but bootstrapping this one is helpful.
     mkdir -p "$CLAUDE_DIR"
+
+    # Mini PR #1415 review #6 → issue #1418: refuse if a user-defined
+    # `claude-sutando` function exists OUTSIDE our managed block. Without
+    # this guard, --commit appends our managed block alongside the user's
+    # function — bash's last-definition-wins makes their function dead code
+    # silently. `--force` overrides for users who explicitly want our block
+    # to win — BUT prints an explicit "OVERWRITING" warning so a user who
+    # passed --force without thinking about the consequence sees what's
+    # about to happen (Mini PR #1424 review #3).
+    if user_defined_function_present; then
+      if [ "$FORCE" != "1" ]; then
+        echo "sutando-shell-setup: refusing to overwrite — $RC_FILE already contains a user-defined" >&2
+        echo "  \`claude-sutando\` function outside the managed marker block." >&2
+        echo "  Adding our managed block here would make your function dead code" >&2
+        echo "  (last definition wins in bash; the managed block goes after)." >&2
+        echo "" >&2
+        echo "  Options:" >&2
+        echo "    1. Remove your existing claude-sutando definition from $RC_FILE, then re-run." >&2
+        echo "    2. Pass --force to commit the managed block anyway (your function will be shadowed)." >&2
+        echo "    3. Leave as-is if your function does what you want; --commit isn't required." >&2
+        exit 1
+      else
+        # --force was passed. Print an explicit overwrite warning so the
+        # consequence is on-screen, not buried in a man-page.
+        echo "sutando-shell-setup: ⚠ --force — OVERWRITING user-defined claude-sutando function" >&2
+        echo "  in $RC_FILE. Your function will be DEAD CODE after this commit (the managed" >&2
+        echo "  block is appended after yours; bash's last-definition-wins resolves to ours)." >&2
+        echo "  If this wasn't intended: Ctrl+C now, remove --force, and read the refusal" >&2
+        echo "  message for the 3 options. Continuing in 2s if no interrupt..." >&2
+        sleep 2 2>/dev/null || true
+      fi
+    fi
 
     # Apply (idempotent): handles four states.
     #   1. Managed block present + current → no-op
