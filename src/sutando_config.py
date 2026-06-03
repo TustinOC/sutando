@@ -299,6 +299,15 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
     global _LEGACY_ENV_WARN_PRINTED, _DOTENV_DRIFT_WARN_PRINTED
 
     env_val = os.environ.get("SUTANDO_WORKSPACE", "").strip()
+
+    # Test-only escape hatch: when `SUTANDO_TEST_MODE=1` is set, honor
+    # `$SUTANDO_WORKSPACE` silently. This preserves the v0.8 contract for
+    # end users (no env override; warning + ignore) while letting the test
+    # suite redirect workspace to per-test tmp dirs without rewriting every
+    # test fixture. Production code MUST NOT set `SUTANDO_TEST_MODE`.
+    if env_val and os.environ.get("SUTANDO_TEST_MODE") == "1":
+        return Path(env_val).expanduser().resolve()
+
     if env_val and not _LEGACY_ENV_WARN_PRINTED:
         _LEGACY_ENV_WARN_PRINTED = True
         # The warning intentionally OMITS the env value. Embedding a path

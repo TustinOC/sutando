@@ -270,6 +270,16 @@ const HARDCODED_WORKSPACE_DEFAULT_REL = 'workspace';
  */
 export function resolveWorkspace(repoRoot?: string): string {
 	const envVal = process.env.SUTANDO_WORKSPACE?.trim();
+
+	// Test-only escape hatch: when `SUTANDO_TEST_MODE=1` is set, honor
+	// `$SUTANDO_WORKSPACE` silently. This preserves the v0.8 contract for
+	// end users (no env override; warning + ignore) while letting the test
+	// suite redirect workspace to per-test tmp dirs without rewriting every
+	// test fixture. Production code MUST NOT set `SUTANDO_TEST_MODE`.
+	if (envVal && process.env.SUTANDO_TEST_MODE === '1') {
+		return resolve(envVal.replace(/^~/, homedir()));
+	}
+
 	if (envVal && !_legacyEnvWarnPrinted) {
 		_legacyEnvWarnPrinted = true;
 		process.stderr.write(
