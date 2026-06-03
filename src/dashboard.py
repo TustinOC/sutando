@@ -116,8 +116,13 @@ def get_pending_count() -> dict:
     if not pending_file.exists():
         return {"open": 0, "done": 0}
     content = pending_file.read_text()
-    open_count = len(re.findall(r'\*\*Status:\*\* Waiting', content))
-    done_count = len(re.findall(r'\*\*Status:\*\* Answered', content))
+    # Questions are free-form `## ` sections (no `**Status:**` field — see #1265/#1404);
+    # resolved ones live below a top-level `# Resolved` divider (#1402). Count `## ` sections
+    # per region instead of `**Status:** Waiting/Answered` markers the file never writes
+    # (the old regex matched neither → always {open:0, done:0}). Mirrors #1405.
+    active, _, resolved = content.partition('\n# Resolved')
+    open_count = len(re.findall(r'^## ', active, flags=re.MULTILINE))
+    done_count = len(re.findall(r'^## ', resolved, flags=re.MULTILINE))
     return {"open": open_count, "done": done_count}
 
 

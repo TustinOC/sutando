@@ -13,6 +13,7 @@ Output: results/friction-{date}.txt
 
 import json
 import os
+import re
 import sys
 import subprocess
 from datetime import datetime, timedelta
@@ -55,12 +56,24 @@ def check_pending_questions():
     current_asked = None
     current_status = None
 
+    resolved_statuses = {"resolved", "answered", "done", "complete"}
+
     def flush():
-        if current_title and current_status == "unanswered":
+        # A `## ` section is an OPEN question unless it carries an explicit resolved status.
+        # Free-form sections have NO `**Status:**` field (see #1265/#1404) — the old
+        # `== "unanswered"` gate dropped every one of them, so friction-detector silently
+        # never alerted on a genuinely-stale free-form question (#1404).
+        if current_title and current_status not in resolved_statuses:
+            # Age: prefer an explicit `**Asked:**`, else a `[YYYY-MM-DD]` stamp in the title.
+            asked = current_asked
+            if not asked:
+                m = re.search(r'\[(\d{4}-\d{2}-\d{2})\]', current_title)
+                if m:
+                    asked = m.group(1)
             age_str = ""
-            if current_asked:
+            if asked:
                 try:
-                    asked_date = datetime.fromisoformat(current_asked).date()
+                    asked_date = datetime.fromisoformat(asked).date()
                     age_days = (today - asked_date).days
                     age_str = f" ({age_days}d old)"
                 except ValueError:
@@ -69,6 +82,12 @@ def check_pending_questions():
 
     for line in content.split("\n"):
         stripped = line.strip()
+        # Honor the `# Resolved` divider (#1402) — everything below it is answered. Flush the
+        # last active question, then stop counting.
+        if stripped == "# Resolved" or stripped.startswith("# Resolved "):
+            flush()
+            current_title = None
+            break
         if stripped.startswith("## "):
             flush()
             current_title = stripped[3:].strip()

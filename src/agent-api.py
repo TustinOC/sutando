@@ -395,18 +395,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if pq_file.exists():
                 import re
                 content = pq_file.read_text()
-                # Split into sections by ## headers
+                # Honor the `# Resolved` divider (#1402) — answered questions live below it.
+                content = re.split(r'^#\s+Resolved\b', content, maxsplit=1, flags=re.MULTILINE)[0]
+                # Split into sections by ## headers. sections[0] is the preamble before the
+                # first `## ` (skipped via i == 0 below).
                 sections = re.split(r'^## ', content, flags=re.MULTILINE)
                 for i, section in enumerate(sections):
-                    if not section.strip():
+                    # Free-form `## ` sections ARE questions — they carry no `**Status:**` /
+                    # `**Options:**` field (see #1265/#1404). The old gate required one of those
+                    # and silently dropped every free-form entry → 0 questions in the web UI.
+                    if i == 0 or not section.strip():
                         continue
                     lines = section.strip().split('\n')
                     title = lines[0].strip()
                     body = '\n'.join(lines[1:])
-                    # Skip preamble (sections without question metadata)
-                    if '**Status:**' not in body and '**Options:**' not in body:
-                        continue
-                    # Skip resolved/answered questions
+                    # Skip questions with an explicit resolved/answered inline status (legacy format)
                     if re.search(r'\*\*Status:\*\*\s*(resolved|answered|done|complete)', body, re.IGNORECASE):
                         continue
                     # Extract question text — use body before first metadata field
