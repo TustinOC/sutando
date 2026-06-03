@@ -18,6 +18,7 @@ Optional first arg is an hour window for time-bounded sections (default 3). `/ca
 
 ## What it pulls together
 
+0. **Relay notes from prior session(s)** — `workspace/relay/relay-*.md` (written by `/relay`). **Read FIRST** because the narrative continuity encodes intent + judgment the structured snapshot below can't carry. See the §Relay-note read-and-archive flow below for details.
 1. **Last session checkpoint** — `session-state.md` (written by `src/session-handoff.sh` on context compaction)
 2. **Open PRs** — `gh pr list --author liususan091219 --state open`
 3. **In-flight tasks** — `workspace/tasks/task-*.txt`
@@ -31,12 +32,36 @@ Optional first arg is an hour window for time-bounded sections (default 3). `/ca
 
 Sections that come up empty print a short "(none)" rather than getting dropped, so it's obvious whether nothing happened vs whether the lookup failed.
 
+## Relay-note read-and-archive flow
+
+The relay folder layout (mirrors `workspace/tasks/` + `workspace/results/`):
+
+```
+workspace/relay/
+├── relay-{epoch}.md       # pending — written by /relay during prior session(s)
+└── processed/
+    └── relay-{epoch}.md   # archived after this catchup invocation reads them
+```
+
+**Catchup-after-startup MUST:**
+
+1. `mkdir -p "$WORKSPACE/relay/processed"` (idempotent — handles first-ever invocation).
+2. List `"$WORKSPACE/relay/"relay-*.md` in **filename order** (epoch in the filename → chronological creation order). Skip the `processed/` subdirectory. Note: we sort by filename, NOT mtime, because `/relay --append` updates the mtime of an existing note while keeping the original filename — mtime-sort would shuffle an appended note to the end (newest), whereas name-sort preserves the original creation thread oldest-first.
+3. For each unprocessed file, in order:
+   - **Claim-by-mv FIRST.** Attempt `mv "$file" "$WORKSPACE/relay/processed/$(basename "$file")"`. If the mv succeeds, this catchup invocation has won the claim on this file; proceed to step (b). If the mv fails (file no longer at the source path — a concurrent catchup already consumed it), `continue` silently. `mv` within one filesystem is a single `rename(2)` syscall and is the atomic primitive here; do NOT condition the print step on the file being present at the source path (that's the TOCTOU race).
+   - **Then read the moved file.** `cat "$WORKSPACE/relay/processed/$(basename "$file")"` under a "📡 Relay note from prior session" header that includes the file's mtime as a human-readable age (e.g. `_(written 2h ago)_`), before any of the structured sections (1-10) below. The age annotation is a stale-note guard — a relay note that sat undrained for 3 days because no catchup fired shouldn't get taken as current context.
+4. If no unprocessed relay files exist (none surviving the claim-by-mv loop), print "(no relay notes from prior session — consider invoking /relay before ending sessions going forward)" under the same header and proceed to section 1.
+
+The atomicity guarantee comes from the `mv` claim being the FIRST action per file, not the LAST — `mv` is the rename(2) syscall, which the kernel guarantees is atomic for paths on the same filesystem. The pre-mv `[ -f "$file" ]` existence check in the impl is a cheap fast-path; the authoritative race-loss signal is the mv's non-zero exit status. Two concurrent catchups can race the same file's mv, but exactly one will win — the loser sees the file already moved and continues. This mirrors the same atomic-claim pattern the result-watcher drain already uses on `task-*.txt`.
+
+**Phase 2 caveat — cross-host fleet sync.** Syncing *unprocessed* `relay-*.md` (i.e. the source-path directory, not just `processed/`) across multiple cores via memory-sync would reintroduce a cross-host consume race: two cores' catchups could each claim the same file locally before the sync converges. Phase 1 is single-host only (relay folder lives under the per-host workspace) so this doesn't bite. If/when fleet sync of pending relay notes lands, the cross-host claim needs a different primitive (advisory lock file, per-host ownership tag in the note, or push-only-to-`processed/` semantics) — flagged here so Phase 2 doesn't accidentally lose the atomicity guarantee.
+
 ## Steps
 
 1. Run `bash scripts/catchup-after-startup.sh [hours]`. Defaults to a 3-hour window via `CATCHUP_HOURS=3`.
-2. Read the output into the conversation context. Do NOT discard sections silently — they shape decisions made next (which PR to push, which task is stale, which channel the conversation was in).
+2. Read the output into the conversation context. Do NOT discard sections silently — they shape decisions made next (which PR to push, which task is stale, which channel the conversation was in). **Read the relay note FIRST and treat it as the narrative ground truth before validating against the structured snapshot.**
 3. If the user's first prompt references something the catchup briefing doesn't cover (e.g. "what happened yesterday"), widen the window: `/catchup-after-startup 24` and re-read.
-4. Cite specific recovered items as the basis for the next action (e.g. "Per the briefing, PR #1051 is open with a review from qingyun — addressing first.").
+4. Cite specific recovered items as the basis for the next action (e.g. "Per the relay note, PR #1051 was just merged and the next step is X — addressing that first.").
 
 ## Setup (one-time, recommended)
 
