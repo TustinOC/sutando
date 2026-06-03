@@ -27,6 +27,7 @@ class TestHeartbeatWrite(unittest.TestCase):
         self._saved_env = os.environ.get("SUTANDO_WORKSPACE")
         self.tmp = Path(tempfile.mkdtemp(prefix="core-heartbeat-"))
         os.environ["SUTANDO_WORKSPACE"] = str(self.tmp)
+        os.environ["SUTANDO_TEST_MODE"] = "1"  # v0.8: opt-in env-honor
         # Force re-import so module picks up the new env.
         sys.modules.pop("core_heartbeat", None)
 
