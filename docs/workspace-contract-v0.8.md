@@ -2,6 +2,8 @@
 
 **Status**: design proposal, 2026-06-01 simplified pass. Supersedes the earlier v0.8 draft (which still carried v0.7 host/room/tier machinery). The host/room sync layer is **out of scope** here — that's the vault-design doc, not the workspace contract.
 
+> **Implementation status (2026-06-03):** v0.8 is the **target contract**, not yet shipped end-to-end. Today's M0 resolver (`src/workspace_default.{py,ts}`) still honors `$SUTANDO_WORKSPACE` as a **deprecation-warned legacy escape hatch** — exactly the override this spec retires. Wherever this doc says "retired" / "no env override" / "no env check," read it as the post-Path-B target. The Path B code change that makes v0.8 true is tracked in a follow-up PR off `staging-workspace-revamp` (links here once opened). Until then, the resolver retains the legacy escape with a one-time stderr warning.
+
 **One-sentence summary**: The workspace is `<repo>/workspace/`, period. It is gitignored, computed (no env override), and ephemeral; durability is a separate concern handled by the vault.
 
 ---
