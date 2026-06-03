@@ -40,24 +40,27 @@ if [ -f "$__HELPER" ]; then
   # shellcheck source=workspace_resolve.sh
   source "$__HELPER"
   resolve_workspace_or_die
-elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
 else
-  echo "init.sh: cannot resolve workspace — workspace_resolve.sh not found at \$REPO/src/ or alongside this script, and \$SUTANDO_WORKSPACE is not set." >&2
+  echo "init.sh: cannot resolve workspace — workspace_resolve.sh not found at \$REPO/src/ or alongside this script." >&2
   exit 1
 fi
 unset __HELPER
 
-# Surface the silent-fallback bug class (see PR #1367/#1368): if .env defines
-# SUTANDO_WORKSPACE but this process never got it (e.g. init.sh invoked by a
-# bootstrap path that skips startup.sh's .env-source), the helper-resolved
-# value may differ from .env. One stderr line per init.sh run makes the miss
-# visible. M0's loud-warn-workspace-fallback (PR #1369) covers part of this
-# from the helper side; this is the init.sh-specific belt-and-suspenders.
+# v0.8 deprecation nag (init.sh-side belt-and-suspenders for the resolver
+# warning). If `.env` declares a SUTANDO_WORKSPACE line, it's no longer
+# honored — surface once per init.sh run so the operator cleans up. The
+# resolver fires its own bold-red warning when the env var is set in the
+# process environment; this catches the `.env` declaration case for boot
+# paths that don't source .env into the env (launchd, cron, direct invokes).
 if [ -f "$REPO/.env" ]; then
   _env_val=$(grep -E '^SUTANDO_WORKSPACE=' "$REPO/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//" -e "s|^~|$HOME|")
-  if [ -n "$_env_val" ] && [ "$_env_val" != "$WORKSPACE" ]; then
-    echo "workspace: .env declares SUTANDO_WORKSPACE='$_env_val' but the M0 helper resolves to '$WORKSPACE' — source .env or export the var before this process to avoid split-brain with other services." >&2
+  if [ -n "$_env_val" ]; then
+    if [ -t 2 ]; then
+      printf '\033[1;31m%s\033[0m\n' \
+        "workspace: .env declares SUTANDO_WORKSPACE='$_env_val' but the env var is no longer honored (removed in v0.8). Delete the .env line, and if needed move the value to sutando.config.local.json under workspace.path. The M0 helper resolves to '$WORKSPACE'." >&2
+    else
+      echo "workspace: .env declares SUTANDO_WORKSPACE='$_env_val' but the env var is no longer honored (removed in v0.8). Delete the .env line, and if needed move the value to sutando.config.local.json under workspace.path. The M0 helper resolves to '$WORKSPACE'." >&2
+    fi
   fi
   unset _env_val
 fi

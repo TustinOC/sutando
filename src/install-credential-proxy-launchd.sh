@@ -33,10 +33,8 @@ if [ -f "$__HELPER" ]; then
   # shellcheck source=workspace_resolve.sh
   source "$__HELPER"
   resolve_workspace_or_die
-elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
 else
-  echo "${0##*/}: cannot resolve workspace — workspace_resolve.sh not found and \$SUTANDO_WORKSPACE not set." >&2
+  echo "${0##*/}: cannot resolve workspace — workspace_resolve.sh not found. v0.8 contract requires the helper; \$SUTANDO_WORKSPACE is no longer honored." >&2
   exit 1
 fi
 unset __HELPER
