@@ -47,7 +47,7 @@ _LOCAL_FILENAME = "sutando.config.local.json"
 # to teach IDEs strictness for autocomplete; the loader itself stays
 # lenient (warn-only) so users with experimental or scratch keys don't
 # break. Per Mini's review #8 on PR #1395.
-_KNOWN_TOP_LEVEL_KEYS = {"workspace", "vault"}
+_KNOWN_TOP_LEVEL_KEYS = {"workspace", "claude_sutando_config_dir", "vault"}
 
 
 def _find_repo_root(start: Optional[Path] = None) -> Optional[Path]:
@@ -281,10 +281,18 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
     if env_val:
         if not _LEGACY_ENV_WARN_PRINTED:
             _LEGACY_ENV_WARN_PRINTED = True
+            # The warning intentionally OMITS the env value. Embedding a path
+            # in the message string makes the warning "path-shaped": a caller
+            # that mishandles stderr (`$(... 2>&1)` then `mkdir -p "$captured"`)
+            # would build a nested folder tree because bash tokenizes the `/`
+            # chars inside the value. Discovered 2026-06-02 — rogue folder at
+            # <repo>/sutando config: $SUTANDO_WORKSPACE is set ('/var/folders/.../...,
+            # full diagnosis in workspace/results/task-1780442649943.txt.
+            # Users debugging the value can `echo $SUTANDO_WORKSPACE`.
             print(
-                f"sutando config: $SUTANDO_WORKSPACE is set ({env_val!r}); honoring "
-                f"as legacy escape hatch. To silence, move the value into "
-                f"`sutando.config.local.json` under `workspace.path` and unset the env.",
+                "sutando config: $SUTANDO_WORKSPACE is set; honoring "
+                "as legacy escape hatch. To silence, move the value into "
+                "sutando.config.local.json under workspace.path and unset the env.",
                 file=sys.stderr,
             )
         # Preserve the pre-cutover semantic: only resolve when the env value
@@ -295,10 +303,12 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
         target = Path(env_val).expanduser()
         if not target.is_absolute():
             anchored = (Path.cwd() / target).resolve()
+            # Same path-shape risk as the main `is set` warning above —
+            # values omitted. Users debugging can `echo $SUTANDO_WORKSPACE`
+            # and `pwd` to reconstruct what got anchored to where.
             print(
-                f"sutando config: $SUTANDO_WORKSPACE={env_val!r} is relative — "
-                f"anchored to {anchored} (CWD-dependent; set an absolute path to "
-                f"avoid cross-process drift).",
+                "sutando config: $SUTANDO_WORKSPACE is relative — "
+                "anchored to CWD (cross-process drift; set an absolute path).",
                 file=sys.stderr,
             )
             return anchored
@@ -328,12 +338,15 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
         _DOTENV_DRIFT_WARN_PRINTED = True
         dotenv_val = detect_env_workspace_in_dotenv(repo_root)
         if dotenv_val and Path(dotenv_val).resolve() != resolved:
+            # Same path-shape risk — values omitted. Users debugging can
+            # `grep SUTANDO_WORKSPACE .env` and `bash scripts/sutando-config.sh
+            # workspace` to compare.
             print(
-                f"sutando config: .env declares SUTANDO_WORKSPACE={dotenv_val!r}, but "
-                f"resolved workspace is {resolved} (config-driven). The .env line is "
-                f"NOT honored by the new loader — move the value to "
-                f"`sutando.config.local.json` under `workspace.path` and delete the .env "
-                f"line, or `source .env` before launching processes that need the override.",
+                "sutando config: .env declares SUTANDO_WORKSPACE but the resolved "
+                "workspace differs (config-driven). The .env line is NOT honored by "
+                "the new loader — move the value to sutando.config.local.json under "
+                "workspace.path and delete the .env line, or `source .env` before "
+                "launching processes that need the override.",
                 file=sys.stderr,
             )
 
@@ -365,6 +378,59 @@ def resolve_vault(repo_root: Optional[Path] = None) -> Dict[str, Any]:
     vault["sync"] = sync
     vault.setdefault("interval_seconds", 1800)
     return vault
+
+
+_DEFAULT_CLAUDE_SUTANDO_SUBDIR = ".claude-sutando"
+
+
+def resolve_claude_sutando_config_dir(repo_root: Optional[Path] = None) -> Path:
+    """Resolve the CLAUDE_CONFIG_DIR target for the `claude-sutando` shell alias.
+
+    The path is always a sub-folder of `resolve_workspace()` — the M2 vault sync
+    engine relies on this invariant to include the Claude config tree via a single
+    workspace-relative glob. Absolute paths and `..` escapes in the config are
+    rejected at load (schema pattern) AND asserted again here (defense in depth).
+
+    Resolution order:
+      1. `claude_sutando_config_dir.subdir` in sutando.config.{local,}.json
+      2. Default: `.claude-sutando`
+
+    Returns the absolute Path. Does NOT create the directory — callers (e.g.
+    `scripts/sutando-shell-setup.sh`) are responsible for mkdir as part of the
+    alias-setup flow.
+    """
+    cfg = load_config(repo_root)
+    block = dict(cfg.get("claude_sutando_config_dir") or {})
+    subdir = block.get("subdir") or _DEFAULT_CLAUDE_SUTANDO_SUBDIR
+
+    # Defense in depth: re-validate the invariants the schema already enforces
+    # at load time, in case config bypassed validation or was hand-edited.
+    if not subdir or subdir.startswith("/") or ".." in Path(subdir).parts:
+        raise ValueError(
+            f"claude_sutando_config_dir.subdir={subdir!r} violates the "
+            f"workspace-sub-folder invariant — must be a non-absolute, "
+            f"non-escaping relative path (M2 sync coherence depends on this)."
+        )
+
+    workspace = resolve_workspace(repo_root)
+    final = workspace / subdir
+
+    # Final-path check — resolve() follows symlinks, so the CANONICAL form of
+    # the result must still be inside the CANONICAL form of the workspace tree.
+    # We use .resolve() ONLY for this invariant check; the returned path stays
+    # in its un-canonicalized form so callers get a string prefix consistent
+    # with resolve_workspace() (e.g. on macOS, `/tmp/...` doesn't become
+    # `/private/tmp/...` just because we passed through .resolve()).
+    try:
+        final.resolve().relative_to(workspace.resolve())
+    except ValueError:
+        raise ValueError(
+            f"claude_sutando_config_dir.subdir={subdir!r} resolves outside "
+            f"the workspace ({final.resolve()} not under {workspace.resolve()}). "
+            f"Likely a symlink escape; reject."
+        )
+
+    return final
 
 
 def detect_env_workspace_in_dotenv(repo_root: Optional[Path] = None) -> Optional[str]:

@@ -14,6 +14,32 @@ cd "$REPO"
 # $SUTANDO_ROOT.
 export SUTANDO_ROOT="$REPO"
 
+# Export workspace-scoped CLAUDE_CONFIG_DIR before services launch. Without it,
+# init.sh + the bridge-launcher blocks below (L~262 proxy, L~429 telegram,
+# L~449 discord, L~473 slack) probe `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` and
+# fall back to legacy `~/.claude/` when the env var is unset — meaning bridges
+# read tokens / access lists from the pre-migration location even after a
+# successful `claude-sutando --migrate`. Mirrors scripts/start-cli.sh:38-51
+# (Sutando.app's tmux-wrapped CLI launcher) — same machine-spawn pattern.
+#
+# Defense in depth (matches start-cli):
+#   - Helper missing → silent fallback (legacy install).
+#   - Helper present + config valid → export.
+#   - Helper present + config invalid → refuse to start (don't scatter state).
+if [ -x "$REPO/scripts/sutando-config.sh" ]; then
+  _ccd_err="$(mktemp -t startup-ccd.XXXXXX)"
+  if _ccd="$(bash "$REPO/scripts/sutando-config.sh" claude-sutando-config-dir 2>"$_ccd_err")"; then
+    mkdir -p "$_ccd"
+    export CLAUDE_CONFIG_DIR="$_ccd"
+  else
+    echo "startup: claude_sutando_config_dir invalid — refusing to start" >&2
+    cat "$_ccd_err" >&2
+    rm -f "$_ccd_err"
+    exit 1
+  fi
+  rm -f "$_ccd_err"
+fi
+
 # Git committer attribution: REMOVED (2026-05-21). This block used to set
 # committer.name/committer.email from stand-identity.json so `git log %cn`
 # showed which fleet host crafted a commit. But git 2.31+ honors committer.*
@@ -199,6 +225,18 @@ fi
 mkdir -p "$WORKSPACE/logs" "$WORKSPACE/tasks" "$WORKSPACE/results" "$WORKSPACE/data" "$WORKSPACE/state"
 LOGS_DIR="$WORKSPACE/logs"
 
+# Offer to set up the `claude-sutando` shell alias once per host. The helper
+# resolves CLAUDE_CONFIG_DIR via `bash scripts/sutando-config.sh claude-sutando-config-dir`
+# (driven by `claude_sutando_config_dir.subdir` in sutando.config.json; default
+# `.claude-sutando` under workspace), drift-detects an existing alias, and
+# either appends or in-place rewrites the rc file. --auto guards via a
+# per-host sentinel at $WORKSPACE/state/.shell-setup-prompted-<hostname> so
+# this never re-pesters after the user's initial yes/no.
+# Failures are non-fatal — startup.sh continues regardless.
+if [ -x "$REPO/scripts/sutando-shell-setup.sh" ]; then
+  bash "$REPO/scripts/sutando-shell-setup.sh" --auto || true
+fi
+
 # Reap any stale watch-tasks-stream watcher from a prior session. The
 # in-session Stop hook (.claude/settings.json) handles clean shutdown, but
 # a hard crash (SIGKILL, panic, force-quit, power loss) skips it and leaves
@@ -218,9 +256,13 @@ if [ -f "$WATCHER_PID_FILE" ]; then
   rm -f "$WATCHER_PID_FILE"
 fi
 
-# Legacy repo-root tasks/results/data still created for back-compat with
-# scripts that haven't migrated yet; safe no-op once everything's switched.
-mkdir -p tasks results data
+# Post-M0: repo-root tasks/results/data are NOT created. Pre-M0 this block
+# ran `mkdir -p tasks results data` as back-compat for unmigrated scripts —
+# but with everything routed through $WORKSPACE/{tasks,results,data} via the
+# M0 helper, those empty repo-root dirs were just noise that polluted
+# `git status` after every startup. If a stale script still writes to a bare
+# relative path, that's a bug to fix in the script (grep `mkdir.*\btasks\b`
+# under src/ + scripts/ + skills/), not a reason to keep this here.
 
 # Archive stale results/*.txt (>24h) BEFORE any service starts iterating
 # results/. Prevents the 2026-04-15 DM-flood class of incidents where a
@@ -243,7 +285,7 @@ fi
 # 0. Credential proxy for quota tracking (port 7846)
 if ! lsof -i :7846 > /dev/null 2>&1; then
   echo "  Starting credential proxy (port 7846)..."
-  npx tsx ~/.claude/skills/quota-tracker/scripts/credential-proxy.ts > /tmp/credential-proxy.log 2>&1 &
+  npx tsx "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/quota-tracker/scripts/credential-proxy.ts" > /tmp/credential-proxy.log 2>&1 &
   sleep 1
   if lsof -i :7846 > /dev/null 2>&1; then
     echo "  ✓ credential proxy"
@@ -410,7 +452,7 @@ echo ""
 # 6. Telegram bridge (optional — needs TELEGRAM_BOT_TOKEN, skip with SKIP_TELEGRAM=1)
 if [ "${SKIP_TELEGRAM:-}" = "1" ]; then
   echo "  ~ telegram bridge (skipped via SKIP_TELEGRAM)"
-elif [ -f "$HOME/.claude/channels/telegram/.env" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$HOME/.claude/channels/telegram/.env" 2>/dev/null; then
+elif _TG_ENV="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels/telegram/.env"; [ -f "$_TG_ENV" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$_TG_ENV" 2>/dev/null; then
   if ! pgrep -f "telegram-bridge" > /dev/null 2>&1; then
     echo "  Starting Telegram bridge..."
     python3 src/telegram-bridge.py > "$LOGS_DIR/telegram-bridge.log" 2>&1 &
@@ -430,7 +472,7 @@ fi
 # right one in the first place avoids the wasted process + traceback noise.
 # Probe a fixed list of candidates in priority order; first one with discord.py
 # wins. Same probe is also what's used in the bridge's rescue fallback.
-if [ -f "$HOME/.claude/channels/discord/.env" ] && grep -q "DISCORD_BOT_TOKEN=" "$HOME/.claude/channels/discord/.env" 2>/dev/null; then
+if _DC_ENV="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels/discord/.env"; [ -f "$_DC_ENV" ] && grep -q "DISCORD_BOT_TOKEN=" "$_DC_ENV" 2>/dev/null; then
   PYTHON_WITH_DISCORD=""
   for _p in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
     if command -v "$_p" >/dev/null 2>&1 && "$_p" -c "import discord" 2>/dev/null; then
@@ -454,7 +496,7 @@ fi
 # 7b. Slack bridge (optional — needs SLACK_BOT_TOKEN + SLACK_APP_TOKEN + slack_bolt)
 # Probes the same Python-interpreter candidates as the discord bridge so a
 # fresh-install miniconda env doesn't silently miss slack_bolt.
-if [ -f "$HOME/.claude/channels/slack/.env" ] && grep -q "SLACK_BOT_TOKEN=" "$HOME/.claude/channels/slack/.env" 2>/dev/null; then
+if _SL_ENV="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels/slack/.env"; [ -f "$_SL_ENV" ] && grep -q "SLACK_BOT_TOKEN=" "$_SL_ENV" 2>/dev/null; then
   PYTHON_WITH_SLACK=""
   for _p in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
     if command -v "$_p" >/dev/null 2>&1 && "$_p" -c "import slack_bolt" 2>/dev/null; then
@@ -467,7 +509,7 @@ if [ -f "$HOME/.claude/channels/slack/.env" ] && grep -q "SLACK_BOT_TOKEN=" "$HO
   elif ! pgrep -f "slack-bridge" > /dev/null 2>&1; then
     echo "  Starting Slack bridge with $PYTHON_WITH_SLACK..."
     # Source the env file so SLACK_BOT_TOKEN / SLACK_APP_TOKEN reach the child.
-    set -a; . "$HOME/.claude/channels/slack/.env"; set +a
+    set -a; . "$_SL_ENV"; set +a
     "$PYTHON_WITH_SLACK" src/slack-bridge.py > "$LOGS_DIR/slack-bridge.log" 2>&1 &
     echo "  ✓ slack bridge"
   else

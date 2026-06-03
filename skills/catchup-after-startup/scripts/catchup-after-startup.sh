@@ -11,31 +11,45 @@
 set -u
 set -o pipefail   # so `cmd | grep ... || say "(none)"` actually fires when cmd fails
 
-# REPO: env wins, else probe common layouts for a sutando checkout
-# (CLAUDE.md + skills/ + .git signature, same heuristic session-handoff.sh
-# uses), else fall back to the convention path. Probing means a checkout
-# at $HOME/Desktop/sutando OR $HOME/Documents/sutando/sutando OR $(pwd)
+# REPO: env wins IF it's a valid M0 checkout, else probe common layouts.
+# Validity check is M0-aware (scripts/sutando-config.sh must exist) — without
+# it, the catchup script blindly trusted SUTANDO_REPO_DIR pointing at a
+# stale submodule pin (e.g. sutando-plus/sutando) that pre-dated M0, then
+# fell through to the legacy $HOME/.sutando/workspace fallback for WS.
+# Symptom: catchup briefing listed tasks under ~/.sutando/workspace/tasks/
+# while the running session was reading the in-repo workspace.
+# Probing means a checkout at $HOME/Desktop/sutando OR $HOME/Documents/sutando/sutando OR $(pwd)
 # all Just Work without per-user env. (Was a hardcoded /Users/xueqingliu/...
 # path pre-review; fixed per qingyun-wu + Mini's #1056 review.)
-if [ -n "${SUTANDO_REPO_DIR:-}" ]; then
+_repo_valid() {
+  [ -f "$1/CLAUDE.md" ] && [ -d "$1/skills" ] && [ -e "$1/.git" ] && [ -f "$1/scripts/sutando-config.sh" ]
+}
+REPO=""
+if [ -n "${SUTANDO_REPO_DIR:-}" ] && _repo_valid "$SUTANDO_REPO_DIR"; then
   REPO="$SUTANDO_REPO_DIR"
-else
-  REPO=""
-  for _cand in "$HOME/Desktop/sutando" "$HOME/Documents/sutando/sutando" "$HOME/Documents/sutando" "$HOME/sutando" "$(pwd)"; do
-    # -e not -d: in a submodule/worktree checkout `.git` is a file (gitdir
-    # pointer), not a directory, so -d would reject an otherwise-valid repo.
-    if [ -f "$_cand/CLAUDE.md" ] && [ -d "$_cand/skills" ] && [ -e "$_cand/.git" ]; then
-      REPO="$_cand"; break
-    fi
-  done
-  REPO="${REPO:-$HOME/Desktop/sutando}"   # falls through to the conventional path if probe finds nothing
 fi
-# Workspace resolution goes through the canonical loader (M0 cutover).
-# Falls back to the legacy inline default only if the wrapper script
-# isn't present (e.g. catchup invoked from outside the repo).
+if [ -z "$REPO" ]; then
+  # Probe (pwd first so an invocation from the canonical checkout wins over
+  # a stale $HOME/Desktop/sutando left by an earlier install).
+  for _cand in "$(pwd)" "$HOME/Documents/github/sutando" "$HOME/Desktop/sutando" "$HOME/Documents/sutando/sutando" "$HOME/Documents/sutando" "$HOME/sutando"; do
+    if _repo_valid "$_cand"; then REPO="$_cand"; break; fi
+  done
+  if [ -z "$REPO" ] && [ -n "${SUTANDO_REPO_DIR:-}" ]; then
+    # SUTANDO_REPO_DIR was set but failed the M0-valid check, and no probe hit.
+    # Fall back to the env value with a warning so the operator can fix.
+    echo "  ⚠ SUTANDO_REPO_DIR=$SUTANDO_REPO_DIR is missing scripts/sutando-config.sh (stale pin?); workspace section may be wrong" >&2
+    REPO="$SUTANDO_REPO_DIR"
+  fi
+  REPO="${REPO:-$HOME/Desktop/sutando}"   # last-ditch convention
+fi
+# Workspace resolution goes through the canonical M0 loader. We just gated
+# REPO on having the helper, so the else-branch is for the unusual case where
+# the env-fallback above accepted an invalid SUTANDO_REPO_DIR.
 if [ -f "$REPO/scripts/sutando-config.sh" ]; then
   WS="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
 else
+  # No M0 helper reachable. Honor SUTANDO_WORKSPACE if explicitly set,
+  # otherwise fall back to the pre-M0 canonical default (legacy installs).
   WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 fi
 # Hours window: positional arg wins (so /catchup-after-startup 12 works as
@@ -50,7 +64,7 @@ HOURS="${1:-${CATCHUP_HOURS:-3}}"
 # need to re-run install-hook.sh after the rename event. Idempotent + quiet
 # when nothing to migrate. The same script is also called from install-hook.sh.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$HERE/migrate-settings-hooks.py" "$HOME/.claude/settings.json" 2>&1 | sed 's/^/  /' >&2 || true
+python3 "$HERE/migrate-settings-hooks.py" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>&1 | sed 's/^/  /' >&2 || true
 
 print_section() { echo; echo "## $1"; echo; }
 say() { echo "$@"; }
@@ -96,7 +110,7 @@ fi
 # the source of truth for "what was happening last session".
 print_section "Previous-session transcript (last $HOURS h)"
 proj_slug=$(echo "$REPO" | sed 's|/|-|g')
-proj_dir="$HOME/.claude/projects/$proj_slug"
+proj_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$proj_slug"
 if [ -d "$proj_dir" ]; then
   # Most-recent .jsonl untouched in the last minute — skips the CURRENT
   # session's transcript (which the live process is still writing to).
