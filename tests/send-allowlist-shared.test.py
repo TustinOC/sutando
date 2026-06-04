@@ -117,21 +117,24 @@ def test_send_allowlist_module_has_documented_set():
     quietly break the echo skill's file delivery — make a tightening
     update this test deliberately."""
     src = (SRC / "send_allowlist.py").read_text()
+    # Post-#1442 the module-level `_REPO` capture is gone; the roots are
+    # built inside `send_allowed_roots(workspace)` via `workspace / "..."`.
+    # Accept either the legacy `_REPO / "..."` form or the new
+    # `workspace / "..."` form so the test works against both shapes.
+    def has_root(name: str) -> bool:
+        return f'_REPO / "{name}"' in src or f'workspace / "{name}"' in src
+
     must_appear = [
         # Prefixes
         '"/tmp/sutando-"',
         '"/private/tmp/sutando-"',
         '"/tmp/echo-"',
         '"/private/tmp/echo-"',
-        # Roots — checking the path components since the literals are
-        # built via `str(_REPO / "results")` etc.
-        '_REPO / "results"',
-        '_REPO / "notes"',
-        '_REPO / "docs"',
         '"Desktop"',
         '"Documents"',
     ]
     missing = [s for s in must_appear if s not in src]
+    missing += [f'<root>/{n}' for n in ('results', 'notes', 'docs') if not has_root(n)]
     assert missing == [], (
         f"send_allowlist.py missing documented allowlist entries: {missing}. "
         f"If you intentionally tightened the policy, update this test."
