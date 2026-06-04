@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 _DEFAULT_SUBPATH = (".sutando", "workspace")
@@ -480,3 +481,53 @@ def resolve_workspace(migrate: bool = True) -> Path:
             pass  # never break resolution
 
     return target
+
+
+# Process-scoped workspace cache. Workspace is NOT dynamically switchable
+# in normal Sutando operation — one process, one repo, one workspace. The
+# cache pays the ~14us resolve cost once on first use, then returns the
+# cached Path on subsequent calls (module-level var lookup, ~20ns).
+#
+# Tests override two ways:
+#  - explicit per-call: my_function(workspace=tmp_ws)
+#  - process-wide reset: _reset_workspace_cache_for_tests() in setUp
+#
+# Both bypass the cache without env hacks. Production code never calls
+# _reset_workspace_cache_for_tests().
+_PROCESS_WORKSPACE: Optional[Path] = None
+
+
+def get_workspace(workspace: Optional[Path] = None) -> Path:
+    """Process-scoped workspace getter for the `Lazy config access` pattern.
+
+    Functions that need a workspace path accept an optional keyword-only
+    `workspace` argument and resolve it via this helper:
+
+        def my_function(*, workspace: Optional[Path] = None) -> int:
+            workspace = get_workspace(workspace)
+            ...
+
+    Behavior:
+      - `workspace=None` (production callers): returns the process-scoped
+        cached value, resolving once on first call.
+      - `workspace=<path>` (tests / special callers): returns the passed-in
+        path verbatim, bypassing the cache.
+
+    Workspace is process-scoped, not dynamically switchable. See
+    CONTRIBUTING.md "Lazy config access" for the full pattern.
+    """
+    global _PROCESS_WORKSPACE
+    if workspace is not None:
+        return workspace
+    if _PROCESS_WORKSPACE is None:
+        _PROCESS_WORKSPACE = resolve_workspace()
+    return _PROCESS_WORKSPACE
+
+
+def _reset_workspace_cache_for_tests() -> None:
+    """Test helper. Clears the process-scoped workspace cache so the next
+    `get_workspace()` call resolves afresh (typically against a tmp-dir
+    `sutando.config.local.json` written by the test setUp). Production code
+    MUST NOT call this."""
+    global _PROCESS_WORKSPACE
+    _PROCESS_WORKSPACE = None

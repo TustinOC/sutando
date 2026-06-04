@@ -30,18 +30,19 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import get_workspace  # noqa: E402
 
-# results/ is per-user runtime state — lives under $SUTANDO_WORKSPACE
-# (default ~/.sutando/workspace/), not the repo checkout. Pre-#762 this
+# results/ is per-user runtime state — lives under the v0.8 workspace
+# (default <repo>/workspace/), not the repo checkout. Pre-#762 this
 # resolved to <repo>/results/ which doesn't exist post-migration; the
-# archiver silently no-op'd because `if not RESULTS.is_dir()` short-circuits
+# archiver silently no-op'd because `if not results.is_dir()` short-circuits
 # the whole sweep. The DM-flood prevention this script was built for was
-# defeated until this fix.
-WORKSPACE = resolve_workspace()
-RESULTS = WORKSPACE / "results"
+# defeated until this fix. Workspace is resolved via the optional `workspace`
+# argument on `main()` (hybrid DI pattern, per CONTRIBUTING.md "Lazy config
+# access") — defaults to the process-scoped cache, tests inject directly.
 
 RETENTION_HOURS = int(os.environ.get("RETENTION_HOURS", "24"))
 # Case-insensitive compare — without `.lower()`, `DRY_RUN=No` or `DRY_RUN=FALSE`
@@ -50,18 +51,20 @@ RETENTION_HOURS = int(os.environ.get("RETENTION_HOURS", "24"))
 DRY_RUN = os.environ.get("DRY_RUN", "").strip().lower() not in ("", "0", "false", "no")
 
 
-def main() -> int:
-    if not RESULTS.is_dir():
+def main(*, workspace: Optional[Path] = None) -> int:
+    workspace = get_workspace(workspace)
+    results = workspace / "results"
+    if not results.is_dir():
         print("  [retention] results/ missing — nothing to do")
         return 0
 
     cutoff = time.time() - RETENTION_HOURS * 3600
     archive_name = datetime.now().strftime("archive-%Y-%m-%d")
-    archive_dir = RESULTS / archive_name
+    archive_dir = results / archive_name
 
     moved = 0
     errors = 0
-    for f in RESULTS.iterdir():
+    for f in results.iterdir():
         if not f.is_file():
             continue
         if f.suffix != ".txt":

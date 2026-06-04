@@ -51,6 +51,54 @@ See existing skills for examples. Install with `bash skills/install.sh`.
 - **web-client.ts**: The entire web UI is an inline HTML template literal. Do NOT use TypeScript-only syntax (like `as Type` casts) inside the embedded `<script>` block — the browser runs it as plain JS.
 - All scripts should work from a fresh clone with minimal setup
 
+### Lazy config access
+
+**Workspace is process-scoped — resolved once at first use, stable for the lifetime of the process.** Do not capture it at module-import time (eager top-of-file `WORKSPACE_DIR = resolve_workspace()` is forbidden), and do not re-resolve it on every call inside hot loops (that's overkill — `resolve_workspace()` costs ~14µs per call, the process-scoped cache costs ~20ns).
+
+**Use `get_workspace()` from `workspace_default` for every workspace access.** It returns the cached process workspace, or accepts an explicit override for tests/special callers.
+
+❌ Eager module-level capture (forbidden):
+```python
+WORKSPACE_DIR = resolve_workspace()          # captured once at import
+def archive_old():
+    if not (WORKSPACE_DIR / "results").is_dir(): ...
+```
+
+✅ Hybrid keyword-only DI (preferred):
+```python
+from workspace_default import get_workspace
+
+def archive_old(*, workspace: Optional[Path] = None) -> int:
+    workspace = get_workspace(workspace)
+    results = workspace / "results"
+    ...
+```
+
+```typescript
+import { getWorkspace } from './workspace_default.js';
+
+export async function archiveOld(opts: { workspace?: string } = {}): Promise<void> {
+    const workspace = getWorkspace(opts.workspace);
+    const results = join(workspace, 'results');
+    ...
+}
+```
+
+**Why this pattern:**
+- **Process-scoped semantics**: workspace doesn't change mid-process in normal operation, so resolve once + cache. No `WorkspaceContext` framework, no per-call resolve, no env hacks.
+- **Function signature documents the dependency**: an AI agent reading `def archive_old(*, workspace: Optional[Path] = None)` immediately knows this function needs a workspace and can be redirected.
+- **Zero callsite diff**: production callers omit the argument (`archive_old()`) and get the cached default. No call site update churn.
+- **Tests inject directly**: `archive_old(workspace=tmp_ws)` for per-call override, or `_reset_workspace_cache_for_tests()` in setUp + write `sutando.config.local.json` for process-wide reset. No `$SUTANDO_WORKSPACE` env hacks.
+- **`*` makes `workspace` keyword-only**: prevents positional misuse, keeps the parameter contract crystal clear.
+
+**Entry points** (CLI `main()`, daemon startup): same hybrid signature. The script's `__main__` block calls `main()` without arguments → default-from-config. Tests call `main(workspace=tmp_ws)`.
+
+**Library helpers imported across modules**: same hybrid signature. The optional `workspace` arg makes the dependency explicit at the import site.
+
+**Audit before submitting:**
+- `grep -n "= resolve_workspace()" <file>` and `grep -n "= resolveWorkspace()" <file>` — should return zero module-level matches. Only `get_workspace()` calls inside function bodies are allowed.
+- Module-level constants like `WORKSPACE_DIR`, `RESULTS_DIR`, `STATE_DIR` derived from `resolve_workspace()` are forbidden.
+
 ## Before starting a PR
 
 The goal of this phase is to confirm the PR is necessary at all. In rough order of "what kills the PR earliest":
