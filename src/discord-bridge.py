@@ -119,9 +119,13 @@ OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 # drift, even with "keep in sync" comments).
 from send_allowlist import (  # noqa: E402
     SEND_ALLOWED_PREFIXES,
-    SEND_ALLOWED_ROOTS,
     is_path_sendable as _is_path_sendable_shared,
 )
+# Note: `SEND_ALLOWED_ROOTS` was a module-level tuple pre-#1442; now it is
+# the function `send_allowed_roots(workspace)` (workspace-derived, lazy-
+# resolved). Discord-bridge doesn't read the tuple directly — file allowlist
+# checks go through `_is_path_sendable_shared(path)` which calls the function
+# internally.
 
 
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
