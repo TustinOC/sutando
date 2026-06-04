@@ -7,10 +7,13 @@ go through `load_config()` so that the contract is enforced in one place
 rather than re-implemented per-service.
 
 Resolution order (highest layer wins):
-  1. `$SUTANDO_WORKSPACE` env var (legacy escape hatch; warn on use)
-  2. `sutando.config.local.json` (per-clone override, gitignored)
-  3. `sutando.config.json` (tracked defaults at repo root)
-  4. Baked-in default (`{repo_root}/workspace`)
+  1. `sutando.config.local.json` (per-clone override, gitignored)
+  2. `sutando.config.json` (tracked defaults at repo root)
+  3. Baked-in default (`{repo_root}/workspace`)
+
+`$SUTANDO_WORKSPACE` is no longer honored (removed in v0.8). If set, a
+one-time stderr warning fires pointing at `scripts/sutando-migrate.sh`
+for relocation of any data still living at the env-pointed path.
 
 Deep-merge semantics: `.local.json` is merged over the tracked defaults.
 Dicts deep-merge; arrays REPLACE wholesale (not unioned). This matches the
@@ -180,6 +183,25 @@ _DOTENV_DRIFT_WARN_PRINTED = False
 _UNKNOWN_KEYS_WARN_PRINTED = False
 
 
+def _color_warn(msg: str) -> str:
+    """Wrap `msg` in bold-red ANSI when stderr is a TTY; pass through otherwise.
+
+    Keeps the v0.8 deprecation warnings (`$SUTANDO_WORKSPACE no longer honored`,
+    `.env declares stale SUTANDO_WORKSPACE`) eye-catching in interactive
+    terminals so operators actually notice and migrate, while keeping log
+    captures (`script`, `tee`, journald, GitHub Actions) free of escape
+    sequences. `NO_COLOR=1` honored as a hard opt-out (see no-color.org).
+    """
+    if os.environ.get("NO_COLOR"):
+        return msg
+    try:
+        if sys.stderr.isatty():
+            return f"\033[1;31m{msg}\033[0m"
+    except Exception:
+        pass
+    return msg
+
+
 def _warn_unknown_top_level_keys(cfg: Dict[str, Any], path: Path) -> None:
     """Emit a one-time stderr warning if the resolved config has top-level
     keys the loader doesn't recognize. Helps catch typos like `workspce`
@@ -262,57 +284,52 @@ _HARDCODED_WORKSPACE_DEFAULT_REL = "workspace"  # relative to repo root
 def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
     """Resolve the workspace directory per the canonical contract.
 
-    Order:
-      1. `$SUTANDO_WORKSPACE` env var (legacy escape hatch; warn once).
-      2. `sutando.config.{json,local.json}` → `workspace.path` (deep-merged).
-      3. `{repo_root}/workspace` baked-in default.
+    Order (v0.8 — `$SUTANDO_WORKSPACE` env override removed):
+      1. `sutando.config.{json,local.json}` → `workspace.path` (deep-merged).
+      2. `{repo_root}/workspace` baked-in default.
 
     Does NOT create the directory; the caller decides. Returns an absolute
     `Path`.
 
-    The env-var warning fires at most once per process so log noise is
-    bounded. The warning is informational — env still wins, so existing
-    users don't break on the switch. Migration path: copy the env value
-    into `sutando.config.local.json` → `workspace.path` and unset the env.
+    If `$SUTANDO_WORKSPACE` is set in the environment, fires a one-time
+    stderr migration-nag warning pointing at `scripts/sutando-migrate.sh`
+    but does NOT honor the env value (the legacy escape hatch was removed
+    in v0.8 per `docs/workspace-contract-v0.8.md`).
     """
     global _LEGACY_ENV_WARN_PRINTED, _DOTENV_DRIFT_WARN_PRINTED
 
     env_val = os.environ.get("SUTANDO_WORKSPACE", "").strip()
-    if env_val:
-        if not _LEGACY_ENV_WARN_PRINTED:
-            _LEGACY_ENV_WARN_PRINTED = True
-            # The warning intentionally OMITS the env value. Embedding a path
-            # in the message string makes the warning "path-shaped": a caller
-            # that mishandles stderr (`$(... 2>&1)` then `mkdir -p "$captured"`)
-            # would build a nested folder tree because bash tokenizes the `/`
-            # chars inside the value. Discovered 2026-06-02 — rogue folder at
-            # <repo>/sutando config: $SUTANDO_WORKSPACE is set ('/var/folders/.../...,
-            # full diagnosis in workspace/results/task-1780442649943.txt.
-            # Users debugging the value can `echo $SUTANDO_WORKSPACE`.
-            print(
-                "sutando config: $SUTANDO_WORKSPACE is set; honoring "
-                "as legacy escape hatch. To silence, move the value into "
-                "sutando.config.local.json under workspace.path and unset the env.",
-                file=sys.stderr,
-            )
-        # Preserve the pre-cutover semantic: only resolve when the env value
-        # is RELATIVE (anchor to cwd, surface the misconfig). For absolute
-        # paths, return as-is so symlinked paths like /tmp -> /private/tmp on
-        # macOS don't get rewritten — that broke the workspace_default test
-        # that compared paths string-equality.
-        target = Path(env_val).expanduser()
-        if not target.is_absolute():
-            anchored = (Path.cwd() / target).resolve()
-            # Same path-shape risk as the main `is set` warning above —
-            # values omitted. Users debugging can `echo $SUTANDO_WORKSPACE`
-            # and `pwd` to reconstruct what got anchored to where.
-            print(
-                "sutando config: $SUTANDO_WORKSPACE is relative — "
-                "anchored to CWD (cross-process drift; set an absolute path).",
-                file=sys.stderr,
-            )
-            return anchored
-        return target
+
+    # Test-only escape hatch: when `SUTANDO_TEST_MODE=1` is set, honor
+    # `$SUTANDO_WORKSPACE` silently. This preserves the v0.8 contract for
+    # end users (no env override; warning + ignore) while letting the test
+    # suite redirect workspace to per-test tmp dirs without rewriting every
+    # test fixture. Production code MUST NOT set `SUTANDO_TEST_MODE`.
+    if env_val and os.environ.get("SUTANDO_TEST_MODE") == "1":
+        return Path(env_val).expanduser().resolve()
+
+    if env_val and not _LEGACY_ENV_WARN_PRINTED:
+        _LEGACY_ENV_WARN_PRINTED = True
+        # The warning intentionally OMITS the env value. Embedding a path
+        # in the message string makes the warning "path-shaped": a caller
+        # that mishandles stderr (`$(... 2>&1)` then `mkdir -p "$captured"`)
+        # would build a nested folder tree because bash tokenizes the `/`
+        # chars inside the value. Discovered 2026-06-02 — rogue folder at
+        # <repo>/sutando config: $SUTANDO_WORKSPACE is set ('/var/folders/.../...,
+        # full diagnosis in workspace/results/task-1780442649943.txt.
+        # Users debugging the value can `echo $SUTANDO_WORKSPACE`.
+        print(
+            _color_warn(
+                "sutando config: $SUTANDO_WORKSPACE is set but NO LONGER HONORED "
+                "(removed in v0.8). Workspace resolves only from "
+                "sutando.config.{json,local.json} or the {repoRoot}/workspace "
+                "baked-in default. If existing workspace data lives at the "
+                "$SUTANDO_WORKSPACE path, run `bash scripts/sutando-migrate.sh "
+                "--dry-run` then `--commit` to relocate. Unset the env to "
+                "silence this warning."
+            ),
+            file=sys.stderr,
+        )
 
     cfg = load_config(repo_root)
     root = repo_root or _CACHE_REPO_ROOT
@@ -328,25 +345,24 @@ def resolve_workspace(repo_root: Optional[Path] = None) -> Path:
     else:
         resolved = (root / _HARDCODED_WORKSPACE_DEFAULT_REL).resolve()
 
-    # M0 .env-drift warning: if the env var is UNSET but `.env` declares one,
-    # the user has a stale `.env` line that the new contract bypasses. Surface
-    # once per process so they migrate to `sutando.config.local.json` and
-    # delete the `.env` line. Loader does NOT honor `.env` values — only the
-    # process env. This is the "Detect SUTANDO_WORKSPACE from .env file and
-    # give warning" bullet from Milestone 0.
+    # .env-drift warning: if `.env` still carries a stale SUTANDO_WORKSPACE
+    # line, surface it once per process so the operator can clean it up.
+    # (v0.8: the env var is no longer honored regardless of whether it's set
+    # in the shell or in .env; the warning is purely cleanup guidance.)
     if not _DOTENV_DRIFT_WARN_PRINTED:
         _DOTENV_DRIFT_WARN_PRINTED = True
         dotenv_val = detect_env_workspace_in_dotenv(repo_root)
-        if dotenv_val and Path(dotenv_val).resolve() != resolved:
+        if dotenv_val:
             # Same path-shape risk — values omitted. Users debugging can
             # `grep SUTANDO_WORKSPACE .env` and `bash scripts/sutando-config.sh
             # workspace` to compare.
             print(
-                "sutando config: .env declares SUTANDO_WORKSPACE but the resolved "
-                "workspace differs (config-driven). The .env line is NOT honored by "
-                "the new loader — move the value to sutando.config.local.json under "
-                "workspace.path and delete the .env line, or `source .env` before "
-                "launching processes that need the override.",
+                _color_warn(
+                    "sutando config: .env declares SUTANDO_WORKSPACE but the env var "
+                    "is no longer honored (removed in v0.8). Workspace resolves "
+                    "config-driven. Delete the .env line and, if needed, move the "
+                    "value to sutando.config.local.json under workspace.path."
+                ),
                 file=sys.stderr,
             )
 

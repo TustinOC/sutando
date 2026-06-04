@@ -10,13 +10,11 @@
 # install-health-check-launchd.sh, session-handoff.sh. Factored out per
 # Lucy's PR #1399 review nit #1.
 #
-# Resolution order:
-#   1. scripts/sutando-config.sh helper (M0 default = <repo>/workspace/, env
-#      var honored internally as legacy escape hatch)
-#   2. $SUTANDO_WORKSPACE env var (only when helper is unreachable —
-#      non-checkout / extracted-tarball install)
-#   3. Fail loud with exit 1 + diagnostic. Refuses to silently write to a
-#      hardcoded legacy default.
+# Resolution order (v0.8 — env override removed):
+#   1. scripts/sutando-config.sh helper (<repo>/workspace/ resolved via
+#      sutando.config.{json,local.json} or the baked-in default).
+#   2. Fail loud with exit 1 + diagnostic. Refuses to silently write to a
+#      hardcoded legacy default OR a now-unhonored env var.
 #
 # Self-locating: looks for scripts/sutando-config.sh relative to THIS file's
 # own location (${BASH_SOURCE[0]}), NOT $REPO. This makes the function
@@ -33,10 +31,8 @@ resolve_workspace_or_die() {
       echo "${0##*/}: scripts/sutando-config.sh workspace exited non-zero." >&2
       exit 1
     fi
-  elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-    WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
   else
-    echo "${0##*/}: cannot resolve workspace — neither $helper exists nor \$SUTANDO_WORKSPACE is set." >&2
+    echo "${0##*/}: cannot resolve workspace — $helper does not exist. v0.8 contract requires the helper; \$SUTANDO_WORKSPACE is no longer honored." >&2
     exit 1
   fi
   if [ -z "$WORKSPACE" ]; then

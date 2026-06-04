@@ -61,16 +61,23 @@ describe('sutando_config loader', () => {
 	};
 
 	// ------------------------------------------------------------------ //
-	//  1. Env var precedence over .local.json                            //
+	//  1. v0.8: env var IGNORED; .local.json wins                         //
 	// ------------------------------------------------------------------ //
 
-	it('env var takes precedence over .local.json', () => {
+	it('env var is ignored in favor of .local.json (v0.8)', () => {
+		// v0.8 contract: `$SUTANDO_WORKSPACE` is no longer honored.
+		// Setting it must NOT override `sutando.config.local.json`; the
+		// resolver emits a one-time deprecation warning and returns the
+		// config-resolved path. Test guards against accidental re-enable of
+		// the legacy precedence (v0.7 / M0 / M1 behavior).
 		writeConfig(repo, 'sutando.config.json', { workspace: { path: '${REPO_DIR}/workspace' } });
 		writeConfig(repo, 'sutando.config.local.json', { workspace: { path: '/from/local' } });
 		process.env.SUTANDO_WORKSPACE = '/from/env';
+		// SUTANDO_TEST_MODE must not be set — we test the production code path.
+		delete process.env.SUTANDO_TEST_MODE;
 		try {
 			const resolved = resolveWorkspace(repo);
-			assert.equal(resolved, resolve('/from/env'));
+			assert.equal(resolved, resolve('/from/local'));
 		} finally {
 			restoreEnvAndRepo();
 		}

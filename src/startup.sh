@@ -77,6 +77,101 @@ else
 fi
 if [ $missing -eq 1 ]; then echo ""; echo "Fix the above and try again."; exit 1; fi
 
+# v0.8 auto-migration helpers (PR #1440 safety hardening — Mini review).
+# Sourced from a sibling file so the four guard functions (_realpath,
+# _same_inode, _is_unsafe_for_migration, _color_warn) can be unit-tested
+# without driving the full startup sequence. See tests/migration-safety-helpers.test.sh.
+# shellcheck source=migration_safety_helpers.sh
+source "$REPO/src/migration_safety_helpers.sh"
+
+# v0.8 auto-migration: $SUTANDO_WORKSPACE is no longer honored by the resolver.
+# If still set (shell rc, .env, launchd plist), detect any data at the env-
+# pointed path and relocate to the new default before services start.
+#
+# Sentinel guard: state/auth/migrated-from-env.txt under the NEW workspace
+# records a successful migration so a re-run doesn't retry. Sentinel is in
+# state/auth/ specifically because that subtree is exempt from transient-state
+# cleanup (per CLAUDE.md "Durable per-host install state").
+#
+# Safety layers (PR #1440 review — Mini):
+#   B1: realpath + inode equality guard — skip if env == resolved workspace.
+#   B2: archive BEFORE migrate, so the tarball is a true pre-migration snapshot.
+#   B3: deny-list check — refuse rm -rf if env points at /, $HOME, repo, etc.
+#   B4: NO_COLOR honored in the red banner (see _color_warn above).
+#
+# Failure mode: if sutando-migrate.sh --commit exits non-zero (collision that
+# can't be auto-resolved, etc.), startup ABORTS — refusing to proceed with
+# split state. Operator runs `bash scripts/sutando-migrate.sh --dry-run` to
+# diagnose. The pre-migration archive is preserved for recovery.
+if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
+  _ws_legacy="${SUTANDO_WORKSPACE/#\~/$HOME}"
+  _ws_new="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null || true)"
+  _migrate_sentinel="${_ws_new}/state/auth/migrated-from-env.txt"
+
+  if [ -n "$_ws_new" ] && [ ! -f "$_migrate_sentinel" ] \
+     && [ -d "$_ws_legacy" ] && [ -n "$(ls -A "$_ws_legacy" 2>/dev/null)" ]; then
+
+    _legacy_real="$(_realpath "$_ws_legacy")"
+    _new_real="$(_realpath "$_ws_new")"
+
+    if [ -n "$_legacy_real" ] && [ -n "$_new_real" ] && [ "$_legacy_real" = "$_new_real" ]; then
+      # B1: realpath equality — env points at the resolved workspace. No-op.
+      echo "ℹ️  \$SUTANDO_WORKSPACE already points at the resolved workspace — no migration needed." >&2
+    elif _same_inode "$_ws_legacy" "$_ws_new"; then
+      # B1: same inode (symlink-equivalent) — no-op.
+      echo "ℹ️  \$SUTANDO_WORKSPACE is symlink-equivalent to the resolved workspace — no migration needed." >&2
+    elif _is_unsafe_for_migration "$_ws_legacy"; then
+      # B3: deny-list — refuse to touch unsafe paths.
+      echo "❌ refusing to auto-migrate \$SUTANDO_WORKSPACE — the path matches the deny-list" >&2
+      echo "   (denies: /, system dirs, \$HOME and top-level subdirs, repo root, paths with '..')." >&2
+      echo "   Likely a malformed \$SUTANDO_WORKSPACE in your shell/.env. Inspect + fix manually, then restart." >&2
+      exit 1
+    else
+      _color_warn "📦 sutando v0.8 auto-migration: \$SUTANDO_WORKSPACE points at $_ws_legacy with data; relocating to $_ws_new (one-shot)."
+
+      # B2: archive BEFORE migrate. Captures the pre-migration state so the
+      # tarball is a genuine recovery snapshot. If --commit moves data first,
+      # the tarball would only catch the residual / empty post-migrate dir.
+      _legacy_archive="${_ws_legacy%/}-pre-v0.8-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+      if ! tar -czf "$_legacy_archive" -C "$(dirname "$_ws_legacy")" "$(basename "$_ws_legacy")" 2>/dev/null; then
+        echo "❌ pre-migration archive of $_ws_legacy failed — aborting auto-migration." >&2
+        echo "   Without a recovery snapshot, refusing the destructive migrate-and-delete." >&2
+        exit 1
+      fi
+      echo "📦 pre-migration snapshot → $_legacy_archive" >&2
+
+      if bash "$REPO/scripts/sutando-migrate.sh" --commit; then
+        mkdir -p "$(dirname "$_migrate_sentinel")"
+        printf 'migrated_from=%s\nmigrated_at=%s\nhostname=%s\narchive=%s\n' \
+          "$_ws_legacy" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" "$_legacy_archive" \
+          > "$_migrate_sentinel"
+        echo "✅ auto-migration complete — data moved into $_ws_new/" >&2
+
+        # B3 second layer: re-verify deny-list before destructive rm. If
+        # _ws_legacy somehow mutated between the initial check and now
+        # (symlink swapped, env var rewritten), refuse rm + preserve archive.
+        if _is_unsafe_for_migration "$_ws_legacy"; then
+          echo "⚠️  refusing rm -rf on $_ws_legacy (failed deny-list re-check). Recovery archive preserved." >&2
+        else
+          rm -rf "$_ws_legacy"
+          echo "🗑  removed legacy directory" >&2
+          echo "   to restore: tar -xzf '$_legacy_archive' -C $(dirname "$_ws_legacy")" >&2
+        fi
+      else
+        echo "❌ auto-migration failed — refusing to start with split state." >&2
+        echo "   Recovery archive preserved at $_legacy_archive" >&2
+        echo "   Diagnose: bash scripts/sutando-migrate.sh --dry-run" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  # Whether migrated or not, unset $SUTANDO_WORKSPACE so child processes
+  # (init.sh, bridges, voice-agent, etc.) get the v0.8 contract directly and
+  # the resolver's deprecation nag stops firing on every subprocess spawn.
+  unset SUTANDO_WORKSPACE
+fi
+
 # Exercise the new config loader as a startup banner. Surfaces:
 #   • $SUTANDO_WORKSPACE legacy-escape-hatch warning (if env is set)
 #   • .env-drift warning (if .env declares a value but config resolves differently)
@@ -206,21 +301,18 @@ echo ""
 bash "$REPO/skills/install.sh" 2>/dev/null || true
 
 # Resolve the runtime workspace via the canonical loader (M0 cutover).
-# The loader implements the full resolution order:
-#   1. $SUTANDO_WORKSPACE env var (legacy escape hatch; warn once)
-#   2. sutando.config.local.json -> workspace.path (per-clone override)
-#   3. sutando.config.json -> workspace.path (tracked defaults)
-#   4. ${REPO_DIR}/workspace baked-in default
+# The loader (v0.8 — env override removed) implements:
+#   1. sutando.config.local.json -> workspace.path (per-clone override)
+#   2. sutando.config.json -> workspace.path (tracked defaults)
+#   3. ${REPO_DIR}/workspace baked-in default
 # Inline fallback retained for the rare case where the wrapper isn't
 # present (extracted-tarball install, etc.). All service logs + tasks/
 # results land under $WORKSPACE/logs etc. instead of the repo-root legacy
 # paths. health-check + dashboard already read from $WORKSPACE/logs.
 if [ -f "$REPO/scripts/sutando-config.sh" ]; then
   WORKSPACE="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
-elif [ -n "${SUTANDO_WORKSPACE:-}" ]; then
-  WORKSPACE="${SUTANDO_WORKSPACE/#\~/$HOME}"
 else
-  WORKSPACE="$HOME/.sutando/workspace"
+  WORKSPACE="$REPO/workspace"
 fi
 mkdir -p "$WORKSPACE/logs" "$WORKSPACE/tasks" "$WORKSPACE/results" "$WORKSPACE/data" "$WORKSPACE/state"
 LOGS_DIR="$WORKSPACE/logs"

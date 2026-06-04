@@ -7,11 +7,14 @@
  * Python services (bridges, health-check) and TS services (voice-agent,
  * task-bridge) land in the same workspace.
  *
- * Resolution order (highest layer wins):
- *   1. `$SUTANDO_WORKSPACE` env var (legacy escape hatch; warn on use)
- *   2. `sutando.config.local.json` (per-clone override, gitignored)
- *   3. `sutando.config.json` (tracked defaults at repo root)
- *   4. Baked-in default (`{repo_root}/workspace`)
+ * Resolution order (highest layer wins, v0.8 — env override removed):
+ *   1. `sutando.config.local.json` (per-clone override, gitignored)
+ *   2. `sutando.config.json` (tracked defaults at repo root)
+ *   3. Baked-in default (`{repo_root}/workspace`)
+ *
+ * `$SUTANDO_WORKSPACE` is no longer honored. If set in the environment,
+ * a one-time stderr warning fires pointing at `scripts/sutando-migrate.sh`
+ * for relocation of any data still living at the env-pointed path.
  *
  * No external deps — stdlib only.
  */
@@ -173,6 +176,25 @@ let _legacyEnvWarnPrinted = false;
 let _dotenvDriftWarnPrinted = false;
 let _unknownKeysWarnPrinted = false;
 
+/**
+ * Wrap `msg` in bold-red ANSI when stderr is a TTY; pass through otherwise.
+ *
+ * Keeps the v0.8 deprecation warnings ($SUTANDO_WORKSPACE no longer honored,
+ * .env declares stale SUTANDO_WORKSPACE) eye-catching in interactive terminals
+ * so operators actually notice and migrate, while keeping log captures (script,
+ * tee, journald, GitHub Actions) free of escape sequences. `NO_COLOR=1` honored
+ * as a hard opt-out (see no-color.org).
+ */
+function _colorWarn(msg: string): string {
+	if (process.env.NO_COLOR) return msg;
+	try {
+		if (process.stderr.isTTY) return `\x1b[1;31m${msg}\x1b[0m`;
+	} catch {
+		// ignore
+	}
+	return msg;
+}
+
 /** Test-only: clear the per-process cache. */
 export function resetCacheForTests(): void {
 	_cache = undefined;
@@ -235,25 +257,45 @@ const HARDCODED_WORKSPACE_DEFAULT_REL = 'workspace';
 /**
  * Resolve the workspace directory per the canonical contract.
  *
- * Order:
- *   1. `$SUTANDO_WORKSPACE` env var (legacy escape hatch; warn once).
- *   2. `sutando.config.{json,local.json}` → `workspace.path` (deep-merged).
- *   3. `{repoRoot}/workspace` baked-in default.
+ * Order (v0.8 — `$SUTANDO_WORKSPACE` no longer honored):
+ *   1. `sutando.config.{json,local.json}` → `workspace.path` (deep-merged).
+ *   2. `{repoRoot}/workspace` baked-in default.
+ *
+ * If `$SUTANDO_WORKSPACE` is set in the environment, prints a one-time
+ * migration-nag warning pointing at `scripts/sutando-migrate.sh` but does
+ * NOT honor the env value (the legacy escape hatch was removed in v0.8
+ * per `docs/workspace-contract-v0.8.md`).
  *
  * Returns an absolute path. Does NOT create the directory.
  */
 export function resolveWorkspace(repoRoot?: string): string {
 	const envVal = process.env.SUTANDO_WORKSPACE?.trim();
-	if (envVal) {
-		if (!_legacyEnvWarnPrinted) {
-			_legacyEnvWarnPrinted = true;
-			process.stderr.write(
-				`sutando config: $SUTANDO_WORKSPACE is set ('${envVal}'); honoring as legacy escape ` +
-					`hatch. To silence, move the value into \`sutando.config.local.json\` under ` +
-					`\`workspace.path\` and unset the env.\n`,
-			);
-		}
+
+	// Test-only escape hatch: when `SUTANDO_TEST_MODE=1` is set, honor
+	// `$SUTANDO_WORKSPACE` silently. This preserves the v0.8 contract for
+	// end users (no env override; warning + ignore) while letting the test
+	// suite redirect workspace to per-test tmp dirs without rewriting every
+	// test fixture. Production code MUST NOT set `SUTANDO_TEST_MODE`.
+	if (envVal && process.env.SUTANDO_TEST_MODE === '1') {
 		return resolve(envVal.replace(/^~/, homedir()));
+	}
+
+	if (envVal && !_legacyEnvWarnPrinted) {
+		_legacyEnvWarnPrinted = true;
+		// PR #1440 B4: drop the literal `'${envVal}'` interpolation (parity with
+		// Python's c58270d safety pass). Embedding /-bearing path values in
+		// stderr was the trigger for the caller-side `mkdir -p "$captured"`
+		// regression that created a rogue folder tree from a tokenized warning.
+		process.stderr.write(
+			_colorWarn(
+				`sutando config: $SUTANDO_WORKSPACE is set but NO LONGER HONORED ` +
+					`(removed in v0.8). The workspace now resolves from sutando.config.{json,local.json} ` +
+					`or the {repoRoot}/workspace baked-in default. If you have existing workspace data at ` +
+					`the env-pointed path, run \`bash scripts/sutando-migrate.sh --dry-run\` to preview a ` +
+					`relocation, then \`--commit\`. Unset $SUTANDO_WORKSPACE in your shell + .env to silence ` +
+					`this warning.`,
+			) + '\n',
+		);
 	}
 
 	const cfg = loadConfig(repoRoot);
@@ -268,18 +310,24 @@ export function resolveWorkspace(repoRoot?: string): string {
 		resolved = resolve(join(root, HARDCODED_WORKSPACE_DEFAULT_REL));
 	}
 
-	// M0 .env-drift warning: if the env var is UNSET but `.env` declares one,
-	// surface the stale .env line once per process. See sutando_config.py for
-	// the design rationale — this is the TS twin of the same behavior.
+	// .env-drift warning: if `.env` still carries a stale SUTANDO_WORKSPACE line,
+	// surface it once per process so the operator can clean it up.
+	// (v0.8: the env var is no longer honored regardless of whether it's set in
+	// the shell or in .env; the warning is purely cleanup guidance.)
 	if (!_dotenvDriftWarnPrinted) {
 		_dotenvDriftWarnPrinted = true;
 		const dotenvVal = detectEnvWorkspaceInDotenv(repoRoot);
-		if (dotenvVal && resolve(dotenvVal) !== resolved) {
+		if (dotenvVal) {
+			// PR #1440 B4: drop literal `'${dotenvVal}'` and `${resolved}` path
+			// interpolations (parity with Python's c58270d safety pass).
 			process.stderr.write(
-				`sutando config: .env declares SUTANDO_WORKSPACE='${dotenvVal}', but resolved workspace ` +
-					`is ${resolved} (config-driven). The .env line is NOT honored by the new loader — ` +
-					`move the value to \`sutando.config.local.json\` under \`workspace.path\` and delete the ` +
-					`.env line, or \`source .env\` before launching processes that need the override.\n`,
+				_colorWarn(
+					`sutando config: .env declares SUTANDO_WORKSPACE but the env var is no longer honored ` +
+						`(removed in v0.8). The resolved workspace is config-driven ` +
+						`(sutando.config.{json,local.json} or {repoRoot}/workspace default). ` +
+						`Delete the .env line and, if needed, move the value to \`sutando.config.local.json\` ` +
+						`under \`workspace.path\`.`,
+				) + '\n',
 			);
 		}
 	}

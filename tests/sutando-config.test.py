@@ -74,17 +74,25 @@ class TestSutandoConfig(unittest.TestCase):
         self._tmp.cleanup()
 
     # ------------------------------------------------------------------ #
-    #  1. Env var precedence over .local.json                            #
+    #  1. v0.8: env var IGNORED; .local.json wins                         #
     # ------------------------------------------------------------------ #
 
-    def test_env_var_precedence_over_local_json(self):
+    def test_env_var_ignored_in_favor_of_local_json(self):
+        # v0.8 contract: `$SUTANDO_WORKSPACE` is no longer honored.
+        # Setting it must NOT override `sutando.config.local.json`; the
+        # resolver emits a one-time deprecation warning and returns the
+        # config-resolved path. Test guards against accidental re-enable of
+        # the legacy precedence (which was the v0.7 / M0 / M1 behavior).
         _write_config(self.repo, "sutando.config.json",
                       {"workspace": {"path": "${REPO_DIR}/workspace"}})
         _write_config(self.repo, "sutando.config.local.json",
                       {"workspace": {"path": "/from/local"}})
         os.environ["SUTANDO_WORKSPACE"] = "/from/env"
+        # SUTANDO_TEST_MODE is NOT set here — we test the production code
+        # path that ignores the env var.
+        os.environ.pop("SUTANDO_TEST_MODE", None)
         resolved = resolve_workspace(repo_root=self.repo)
-        self.assertEqual(str(resolved), str(Path("/from/env").resolve()))
+        self.assertEqual(str(resolved), str(Path("/from/local").resolve()))
 
     # ------------------------------------------------------------------ #
     #  2. Deep-merge: dicts merge, arrays REPLACE                        #
@@ -309,23 +317,26 @@ class TestSutandoConfig(unittest.TestCase):
             resolve_claude_sutando_config_dir(repo_root=self.repo)
         self.assertIn("workspace-sub-folder invariant", str(cm.exception))
 
-    def test_claude_sutando_config_dir_honors_env_workspace_override(self):
-        # Owner-raised: if user sets $SUTANDO_WORKSPACE to a custom path,
-        # the returned ccd path must be `<custom>/.claude-sutando` (string-prefix
-        # consistent with resolve_workspace's return value, not the symlink-
-        # canonicalized form). Regression test: pre-fix code returned
-        # `/private/tmp/.../.claude-sutando` on macOS when env pointed to /tmp.
+    def test_claude_sutando_config_dir_lands_at_config_workspace(self):
+        # v0.8: `$SUTANDO_WORKSPACE` is no longer honored. The previous
+        # version of this test asserted ccd followed the env-overridden
+        # workspace; now it must follow the config-resolved workspace.
+        # The string-prefix invariant the caller relies on (ccd is always
+        # `<workspace>/.claude-sutando`) still holds.
         with tempfile.TemporaryDirectory() as ws_dir:
             old_env = os.environ.get("SUTANDO_WORKSPACE")
-            os.environ["SUTANDO_WORKSPACE"] = ws_dir
+            os.environ["SUTANDO_WORKSPACE"] = ws_dir  # set, but should be ignored
+            os.environ.pop("SUTANDO_TEST_MODE", None)
             try:
                 _write_config(self.repo, "sutando.config.json", {})
                 _reset_cache_for_tests()
                 ws = resolve_workspace(repo_root=self.repo)
                 ccd = resolve_claude_sutando_config_dir(repo_root=self.repo)
-                # The exact behavior the owner asked about:
+                # Workspace falls back to the baked-in default (env ignored):
+                self.assertEqual(str(ws), str((self.repo / "workspace").resolve()))
+                # Ccd lands under the resolved workspace, not env:
                 self.assertEqual(str(ccd), str(ws / ".claude-sutando"))
-                # And the string-prefix invariant the caller relies on:
+                # String-prefix invariant the caller relies on:
                 self.assertTrue(str(ccd).startswith(str(ws)))
             finally:
                 if old_env is None:

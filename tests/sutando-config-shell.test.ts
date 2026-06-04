@@ -22,7 +22,7 @@ const SCRIPT = join(REPO_ROOT, 'scripts', 'sutando-config.sh');
 
 function runShell(subcmd: string, ws: string): string {
 	const proc = spawnSync('bash', [SCRIPT, subcmd], {
-		env: { ...process.env, SUTANDO_WORKSPACE: ws },
+		env: { ...process.env, SUTANDO_WORKSPACE: ws, SUTANDO_TEST_MODE: '1' },
 		encoding: 'utf-8',
 	});
 	if (proc.status !== 0) {
@@ -37,7 +37,7 @@ function runPyResolve(ws: string): string {
 		['-c', 'import sys; sys.path.insert(0, ".."); from importlib import import_module; m = import_module("src.sutando_config"); print(m.resolve_workspace(), end="")'],
 		{
 			cwd: REPO_ROOT,
-			env: { ...process.env, SUTANDO_WORKSPACE: ws },
+			env: { ...process.env, SUTANDO_WORKSPACE: ws, SUTANDO_TEST_MODE: '1' },
 			encoding: 'utf-8',
 		},
 	);
@@ -66,7 +66,7 @@ describe('sutando-config.sh wrapper', () => {
 		const proc = spawnSync(
 			'python3',
 			['-c', 'import sys; sys.path.insert(0, "."); from src.sutando_config import resolve_workspace; print(resolve_workspace(), end="")'],
-			{ cwd: REPO_ROOT, env: { ...process.env, SUTANDO_WORKSPACE: ws }, encoding: 'utf-8' },
+			{ cwd: REPO_ROOT, env: { ...process.env, SUTANDO_WORKSPACE: ws, SUTANDO_TEST_MODE: '1' }, encoding: 'utf-8' },
 		);
 		assert.equal(proc.status, 0, `py loader failed: ${proc.stderr}`);
 		assert.equal(shellOut, proc.stdout, 'shell wrapper diverges from py loader');
@@ -114,7 +114,7 @@ describe('sutando-config.sh wrapper', () => {
 
 		// Second run — must be a no-op (idempotent)
 		const second = spawnSync('bash', [SCRIPT, 'bootstrap'], {
-			env: { ...process.env, SUTANDO_WORKSPACE: ws },
+			env: { ...process.env, SUTANDO_WORKSPACE: ws, SUTANDO_TEST_MODE: '1' },
 			encoding: 'utf-8',
 		});
 		assert.equal(second.status, 0, `second bootstrap exit ${second.status}: ${second.stderr}`);
