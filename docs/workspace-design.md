@@ -24,7 +24,7 @@ If you can't place a path on this flowchart in 5 seconds, the path probably want
 |---|---|---|---|---|
 | **Code** | Source of truth for behavior | `$SUTANDO_REPO_DIR` (git checkout) | Public git (`sonichi/sutando`) | Persistent; updated by `git pull` |
 | **State** | Per-user runtime, mostly machine-local | `$SUTANDO_WORKSPACE` (default `<repo>/workspace/`) | None — per-machine | Ephemeral; rebuildable; rotates |
-| **Memory** | User-content the user reads + edits | `$SUTANDO_PRIVATE_DIR` (proposed rename → `SUTANDO_MEMORY_DIR`) | Private git per fleet (`<user>-sutando-memory.git`) | Persistent; user-authored |
+| **Memory** | User-content the user reads + edits | `$SUTANDO_MEMORY_DIR` (legacy alias `$SUTANDO_PRIVATE_DIR` honored for one release per #870) | Private git per fleet (`<user>-sutando-memory.git`) | Persistent; user-authored |
 
 Within Memory, two flavors:
 - **Shared** (top-level): one copy across the fleet. Examples: `notes/`, `build_log.md`, `memory/*.md`.
