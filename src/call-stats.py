@@ -21,18 +21,19 @@ import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
-from workspace_default import resolve_workspace  # noqa: E402
-
-CALLS_FILE = resolve_workspace() / "results" / "calls" / "calls.jsonl"
+from workspace_default import get_workspace  # noqa: E402
 
 
-def load_calls():
-    if not CALLS_FILE.exists():
+def load_calls(*, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
+    calls_file = workspace / "results" / "calls" / "calls.jsonl"
+    if not calls_file.exists():
         return []
     calls = []
-    for line in CALLS_FILE.read_text().splitlines():
+    for line in calls_file.read_text().splitlines():
         if not line.strip():
             continue
         try:
@@ -150,14 +151,14 @@ def format_text(stats, window_label):
     return "\n".join(lines)
 
 
-def main():
+def main(*, workspace: Optional[Path] = None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=7, help="Window in days (default 7)")
     ap.add_argument("--all", action="store_true", help="All time (overrides --days)")
     ap.add_argument("--json", action="store_true", help="JSON output")
     args = ap.parse_args()
 
-    calls = load_calls()
+    calls = load_calls(workspace=workspace)
     if args.all:
         filtered = calls
         window = "all time"

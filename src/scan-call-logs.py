@@ -11,13 +11,18 @@ Usage:
 import json, re, sys, os
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import get_workspace  # noqa: E402
 
-_WORKSPACE = resolve_workspace()
-CALLS_FILE = _WORKSPACE / "results" / "calls" / "calls.jsonl"
-STATE_FILE = _WORKSPACE / "results" / "calls" / ".scan-state.json"
+
+def _calls_file(workspace: Path) -> Path:
+    return workspace / "results" / "calls" / "calls.jsonl"
+
+
+def _state_file(workspace: Path) -> Path:
+    return workspace / "results" / "calls" / ".scan-state.json"
 
 # --- Detection patterns ---
 
@@ -356,23 +361,29 @@ def scan_entry(entry: dict):
     }
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
+def load_state(*, workspace: Optional[Path] = None) -> dict:
+    workspace = get_workspace(workspace)
+    state_file = _state_file(workspace)
+    if state_file.exists():
+        return json.loads(state_file.read_text())
     return {"last_scanned_index": 0}
 
 
-def save_state(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+def save_state(state: dict, *, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
+    state_file = _state_file(workspace)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state, indent=2))
 
 
-def main():
-    if not CALLS_FILE.exists():
+def main(*, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
+    calls_file = _calls_file(workspace)
+    if not calls_file.exists():
         print("No call logs found.")
         return
 
-    entries = [json.loads(l) for l in CALLS_FILE.read_text().strip().split('\n') if l.strip()]
+    entries = [json.loads(l) for l in calls_file.read_text().strip().split('\n') if l.strip()]
     as_json = "--json" in sys.argv
     scan_all = "--all" in sys.argv
 
@@ -384,7 +395,7 @@ def main():
         n = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 10
         start = max(0, len(entries) - n)
     else:
-        state = load_state()
+        state = load_state(workspace=workspace)
         start = state.get("last_scanned_index", 0)
 
     to_scan = entries[start:]
@@ -402,7 +413,7 @@ def main():
             results.append(result)
 
     # Save state
-    save_state({"last_scanned_index": len(entries), "last_scan": datetime.now().isoformat()})
+    save_state({"last_scanned_index": len(entries), "last_scan": datetime.now().isoformat()}, workspace=workspace)
 
     if as_json:
         print(json.dumps({"scanned": len(to_scan), "with_issues": len(results), "results": results}, indent=2))
@@ -422,13 +433,15 @@ def main():
                 print()
 
 
-def summary():
+def summary(*, workspace: Optional[Path] = None):
     """Print a quality trend summary grouped by date."""
-    if not CALLS_FILE.exists():
+    workspace = get_workspace(workspace)
+    calls_file = _calls_file(workspace)
+    if not calls_file.exists():
         print("No call logs found.")
         return
 
-    entries = [json.loads(l) for l in CALLS_FILE.read_text().strip().split('\n') if l.strip()]
+    entries = [json.loads(l) for l in calls_file.read_text().strip().split('\n') if l.strip()]
     from collections import Counter
 
     by_date = {}
