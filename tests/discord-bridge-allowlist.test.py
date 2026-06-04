@@ -56,8 +56,10 @@ def main() -> int:
     # inline in discord-bridge.py (legacy) or in src/send_allowlist.py
     # (post-refactor, PR #1029) — both shapes satisfy the contract. We
     # scan both sources and use whichever has the function definition.
+    # Accept either the legacy `(fpath: str)` signature or the post-#1442
+    # Hybrid C signature `(fpath: str, *, workspace: Optional[Path] = None)`.
     HELPER_RE = re.compile(
-        r"def (?:_)?is_path_sendable\(fpath:\s*str\)\s*->\s*bool:\s*\n([\s\S]{0,2000}?)(?=\n\ndef |\n\n[A-Z]|\Z)",
+        r"def (?:_)?is_path_sendable\(fpath:\s*str(?:,\s*\*,\s*workspace:[^)]*)?\)\s*->\s*bool:\s*\n([\s\S]{0,2000}?)(?=\n\ndef |\n\n[A-Z]|\Z)",
     )
     helper_body = None
     found_in = None
@@ -99,10 +101,14 @@ def main() -> int:
             helper_body,
         )
 
-    # 3. Both ROOTS and PREFIXES consulted
-    if "SEND_ALLOWED_ROOTS" not in helper_body or "SEND_ALLOWED_PREFIXES" not in helper_body:
+    # 3. Both ROOTS and PREFIXES consulted. Post-#1442 the legacy module-
+    # level `SEND_ALLOWED_ROOTS` tuple is the workspace-derived function
+    # `send_allowed_roots(workspace)`; accept either shape.
+    has_roots = ("SEND_ALLOWED_ROOTS" in helper_body or "send_allowed_roots(" in helper_body)
+    if not has_roots or "SEND_ALLOWED_PREFIXES" not in helper_body:
         return fail(
-            "_is_path_sendable must check both SEND_ALLOWED_ROOTS and SEND_ALLOWED_PREFIXES",
+            "_is_path_sendable must check both SEND_ALLOWED_ROOTS (or send_allowed_roots(workspace)) "
+            "and SEND_ALLOWED_PREFIXES",
             helper_body,
         )
 
