@@ -54,6 +54,7 @@
 #   bash scripts/sutando-migrate.sh --json                # scan, JSON output
 #   bash scripts/sutando-migrate.sh --source A,B          # restrict sources scanned
 #   bash scripts/sutando-migrate.sh commit                # do it (writes to dest)
+#   bash scripts/sutando-migrate.sh --commit              # alias for commit
 #   bash scripts/sutando-migrate.sh commit --merge-append # Strategy B (concat with divider)
 #                                                          # instead of sidecar (Strategy C default)
 #   bash scripts/sutando-migrate.sh verify                # post-migration check
@@ -591,6 +592,10 @@ EXPLAIN_PATH=""
 while [ $# -gt 0 ]; do
     case "$1" in
         scan|commit|verify|rollback) MODE="$1"; shift ;;
+        --scan) MODE="scan"; shift ;;
+        --commit) MODE="commit"; shift ;;
+        --verify) MODE="verify"; shift ;;
+        --rollback) MODE="rollback"; shift ;;
         explain)
             MODE="explain"
             shift
