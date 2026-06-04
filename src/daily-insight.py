@@ -11,23 +11,19 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from util_paths import shared_personal_path  # noqa: E402
-from workspace_default import resolve_workspace  # noqa: E402
-
-WORKSPACE = resolve_workspace()
-CALLS_FILE = WORKSPACE / "results" / "calls" / "calls.jsonl"
-RESULTS_DIR = WORKSPACE / "results"
-STATE_DIR = WORKSPACE / "state"
-NOTES_DIR = Path(shared_personal_path("notes", WORKSPACE))
+from workspace_default import get_workspace  # noqa: E402
 
 
-def load_calls():
-    if not CALLS_FILE.exists():
+def load_calls(workspace: Path):
+    calls_file = workspace / "results" / "calls" / "calls.jsonl"
+    if not calls_file.exists():
         return []
     calls = []
-    for line in CALLS_FILE.read_text().splitlines():
+    for line in calls_file.read_text().splitlines():
         if line.strip():
             try:
                 calls.append(json.loads(line))
@@ -89,9 +85,10 @@ def analyze_topics(calls):
     return topics.most_common(10)
 
 
-def analyze_task_patterns():
+def analyze_task_patterns(workspace: Path):
     """Look at recent task results for patterns."""
-    task_files = sorted(RESULTS_DIR.glob("task-*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
+    results_dir = workspace / "results"
+    task_files = sorted(results_dir.glob("task-*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
     sources = Counter()
     for f in task_files[:50]:
         content = f.read_text()
@@ -106,9 +103,10 @@ def analyze_task_patterns():
     return sources
 
 
-def analyze_note_activity():
+def analyze_note_activity(workspace: Path):
     """Check note creation patterns."""
-    notes = list(NOTES_DIR.glob("*.md"))
+    notes_dir = Path(shared_personal_path("notes", workspace))
+    notes = list(notes_dir.glob("*.md"))
     recent = [n for n in notes if n.stat().st_mtime > (datetime.now().timestamp() - 7 * 86400)]
     tags = Counter()
     for n in notes:
@@ -123,8 +121,8 @@ def analyze_note_activity():
     return {"total": len(notes), "recent_7d": len(recent), "top_tags": tags.most_common(5)}
 
 
-def generate_insight():
-    calls = load_calls()
+def generate_insight(workspace: Path):
+    calls = load_calls(workspace)
     insights = []
 
     if calls:
@@ -158,7 +156,7 @@ def generate_insight():
                 f"Setting a timer or agenda could reclaim significant time."
             )
 
-    note_stats = analyze_note_activity()
+    note_stats = analyze_note_activity(workspace)
     if note_stats["recent_7d"] > 5:
         insights.append(
             f"You've created {note_stats['recent_7d']} notes in the last 7 days "
@@ -171,7 +169,7 @@ def generate_insight():
             f"You were actively noting ideas before — might be worth capturing what you're learning this week."
         )
 
-    task_sources = analyze_task_patterns()
+    task_sources = analyze_task_patterns(workspace)
     if task_sources:
         top_source = task_sources.most_common(1)[0]
         insights.append(
@@ -187,14 +185,16 @@ def generate_insight():
     return best
 
 
-def main():
+def main(*, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
     today = datetime.now().strftime("%Y-%m-%d")
-    output_path = RESULTS_DIR / f"insight-{today}.txt"
+    output_path = workspace / "results" / f"insight-{today}.txt"
     # Sentinel survives discord-bridge's `dm-fallback` unlink of the
     # results file, so repeat invocations (morning-briefing, cron, manual
     # test) on the same day don't regenerate + re-DM the insight.
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    sentinel = STATE_DIR / f"daily-insight-{today}.sentinel"
+    state_dir = workspace / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = state_dir / f"daily-insight-{today}.sentinel"
 
     if sentinel.exists():
         cached = sentinel.read_text()
@@ -202,7 +202,7 @@ def main():
         print(cached)
         return
 
-    insight = generate_insight()
+    insight = generate_insight(workspace)
     output_path.write_text(insight)
     sentinel.write_text(insight)
     print(f"Daily insight → {output_path}")

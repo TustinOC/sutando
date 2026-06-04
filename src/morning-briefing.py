@@ -16,16 +16,12 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from urllib.request import urlopen
 from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).parent))
-from workspace_default import resolve_workspace  # noqa: E402
-
-WORKSPACE = resolve_workspace()
-RESULTS_DIR = WORKSPACE / "results"
-LOGS_DIR = WORKSPACE / "logs"
-STATE_DIR = WORKSPACE / "state"
+from workspace_default import get_workspace  # noqa: E402
 
 # Weather codes → one-word description
 WEATHER_CODES = {
@@ -182,9 +178,9 @@ def get_reminders() -> list[str]:
         return []
 
 
-def get_overnight_discord() -> list[str]:
+def get_overnight_discord(workspace: Path) -> list[str]:
     """Read last 8 hours of Discord DMs from the bridge log."""
-    log = LOGS_DIR / "discord-bridge.log"
+    log = workspace / "logs" / "discord-bridge.log"
     if not log.exists():
         return []
     try:
@@ -204,9 +200,9 @@ def get_overnight_discord() -> list[str]:
         return []
 
 
-def get_pending_questions() -> list[str]:
+def get_pending_questions(workspace: Path) -> list[str]:
     """Return unanswered questions from pending-questions.md."""
-    pq = WORKSPACE / "pending-questions.md"
+    pq = workspace / "pending-questions.md"
     if not pq.exists():
         return []
     content = pq.read_text()
@@ -225,7 +221,7 @@ def get_pending_questions() -> list[str]:
     return questions
 
 
-def get_health_issues() -> list[str]:
+def get_health_issues(workspace: Path) -> list[str]:
     """Run health check and return only the failed/warn items, concisely."""
     hc = Path(__file__).parent / "health-check.py"
     if not hc.exists():
@@ -234,7 +230,7 @@ def get_health_issues() -> list[str]:
         r = subprocess.run(
             [sys.executable, str(hc)],
             capture_output=True, text=True, timeout=30,
-            cwd=str(WORKSPACE)
+            cwd=str(workspace)
         )
         issues = []
         for line in r.stdout.splitlines():
@@ -254,10 +250,10 @@ def get_health_issues() -> list[str]:
         return []
 
 
-def get_daily_insight() -> str | None:
+def get_daily_insight(workspace: Path) -> str | None:
     """Get today's behavioral insight from daily-insight.py (cached via sentinel)."""
     today = datetime.now().strftime("%Y-%m-%d")
-    sentinel = STATE_DIR / f"daily-insight-{today}.sentinel"
+    sentinel = workspace / "state" / f"daily-insight-{today}.sentinel"
     if sentinel.exists():
         return sentinel.read_text().strip() or None
     # Not yet generated — run it
@@ -268,7 +264,7 @@ def get_daily_insight() -> str | None:
         r = subprocess.run(
             [sys.executable, str(hc)],
             capture_output=True, text=True, timeout=20,
-            cwd=str(WORKSPACE)
+            cwd=str(workspace)
         )
         if r.returncode == 0 and sentinel.exists():
             return sentinel.read_text().strip() or None
@@ -339,10 +335,14 @@ def synthesize(weather, events, reminders, discord_msgs, pending_qs, health_issu
     return " ".join(parts)
 
 
-def main():
+def main(*, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
+    state_dir = workspace / "state"
+    results_dir = workspace / "results"
+
     # Check sentinel — don't repeat if already run today
     today = datetime.now().strftime("%Y-%m-%d")
-    sentinel = STATE_DIR / f"morning-briefing-{today}.sentinel"
+    sentinel = state_dir / f"morning-briefing-{today}.sentinel"
     if sentinel.exists() and "--force" not in sys.argv:
         print(f"Morning briefing already delivered today ({today}). Use --force to re-run.")
         return
@@ -359,16 +359,16 @@ def main():
     reminders = get_reminders()
     print(f"  reminders: {len(reminders)} due")
 
-    discord_msgs = get_overnight_discord()
+    discord_msgs = get_overnight_discord(workspace)
     print(f"  discord overnight: {len(discord_msgs)} messages")
 
-    insight = get_daily_insight()
+    insight = get_daily_insight(workspace)
     print(f"  insight: {'yes' if insight else 'none'}")
 
-    pending_qs = get_pending_questions()
+    pending_qs = get_pending_questions(workspace)
     print(f"  pending questions: {len(pending_qs)}")
 
-    health_issues = get_health_issues()
+    health_issues = get_health_issues(workspace)
     print(f"  health issues: {len(health_issues)}")
 
     # Synthesize
@@ -376,13 +376,13 @@ def main():
 
     # Write voice result
     ts = int(time.time() * 1000)
-    result_file = RESULTS_DIR / f"proactive-morning-{ts}.txt"
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    result_file = results_dir / f"proactive-morning-{ts}.txt"
+    results_dir.mkdir(parents=True, exist_ok=True)
     result_file.write_text(narrative)
     print(f"  → {result_file.name}")
 
     # Mark as done today
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
     sentinel.write_text(datetime.now().isoformat())
 
     print(f"\nBriefing delivered:\n{narrative}")

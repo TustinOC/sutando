@@ -17,16 +17,14 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from util_paths import personal_path, shared_personal_path  # noqa: E402
-from workspace_default import resolve_workspace  # noqa: E402
-
-WORKSPACE = resolve_workspace()
-RESULTS_DIR = WORKSPACE / "results"
+from workspace_default import get_workspace  # noqa: E402
 
 
-def check_pending_questions():
+def check_pending_questions(workspace: Path):
     """Find questions unanswered for >24h.
 
     pending-questions.md uses sections like:
@@ -39,7 +37,7 @@ def check_pending_questions():
     which never matched the actual format, so it always returned an empty
     list and friction-detector silently missed every unanswered question.
     """
-    pq = Path(personal_path("pending-questions.md", WORKSPACE))
+    pq = Path(personal_path("pending-questions.md", workspace))
     if not pq.exists():
         return []
     content = pq.read_text()
@@ -92,10 +90,10 @@ def check_pending_questions():
     return issues
 
 
-def check_stale_tasks():
+def check_stale_tasks(workspace: Path):
     """Find task files older than 1 hour (should be processed within minutes)."""
     issues = []
-    tasks_dir = WORKSPACE / "tasks"
+    tasks_dir = workspace / "tasks"
     if not tasks_dir.exists():
         return []
     now = datetime.now().timestamp()
@@ -127,11 +125,11 @@ def check_github_issues():
     return issues
 
 
-def check_overdue_reminders():
+def check_overdue_reminders(workspace: Path):
     """Check macOS Reminders for overdue items."""
     issues = []
     try:
-        script = WORKSPACE.parent.parent / ".claude" / "skills" / "macos-tools" / "scripts" / "reminders.py"
+        script = workspace.parent.parent / ".claude" / "skills" / "macos-tools" / "scripts" / "reminders.py"
         if not script.exists():
             return []
         # Use sys.executable: friction-detector runs via cron (launchd-managed);
@@ -156,10 +154,10 @@ def check_stale_results():
     return []
 
 
-def check_notes_without_follow_up():
+def check_notes_without_follow_up(workspace: Path):
     """Find notes tagged 'action' or 'todo' that are >7 days old."""
     issues = []
-    notes_dir = Path(shared_personal_path("notes", WORKSPACE))
+    notes_dir = Path(shared_personal_path("notes", workspace))
     if not notes_dir.exists():
         return []
     now = datetime.now().timestamp()
@@ -203,9 +201,10 @@ def check_notes_without_follow_up():
     return issues
 
 
-def main():
+def main(*, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
     today = datetime.now().strftime("%Y-%m-%d")
-    output_path = RESULTS_DIR / f"friction-{today}.txt"
+    output_path = workspace / "results" / f"friction-{today}.txt"
 
     # Don't regenerate if already done today
     if output_path.exists():
@@ -214,11 +213,11 @@ def main():
         return
 
     all_issues = []
-    all_issues.extend(check_pending_questions())
-    all_issues.extend(check_stale_tasks())
+    all_issues.extend(check_pending_questions(workspace))
+    all_issues.extend(check_stale_tasks(workspace))
     all_issues.extend(check_github_issues())
-    all_issues.extend(check_overdue_reminders())
-    all_issues.extend(check_notes_without_follow_up())
+    all_issues.extend(check_overdue_reminders(workspace))
+    all_issues.extend(check_notes_without_follow_up(workspace))
 
     if not all_issues:
         summary = "No friction detected today. Everything is clean."
