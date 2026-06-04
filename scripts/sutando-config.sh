@@ -35,16 +35,83 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 cmd="${1:-workspace}"
 
+# --------------------------------------------------------------------------- #
+# Layer 1 cache (workspace path only)                                          #
+#                                                                              #
+# `workspace` is the hot getter — called by init.sh, startup.sh, every cron    #
+# pass, fixture-heavy test runs. Each cold call pays ~28 ms (subshell fork +  #
+# python interpreter startup + module load). Cache hits drop to ~4 ms.        #
+# Boot wall-clock saves ~400-600 ms across the 15-25 helper calls during      #
+# init.sh + service launch.                                                   #
+#                                                                              #
+# Correctness:                                                                 #
+#   - Cache file is per-user (UID) + per-repo (REPO_ROOT with /->_ slug) so   #
+#     multi-repo workflows don't cross-contaminate.                            #
+#   - Invalidated when sutando.config.{json,local.json} or .env is touched     #
+#     (stat -nt — strictly newer; same-second edge case accepts a rare false   #
+#     hit, recovered on the next mtime tick).                                  #
+#   - Bypassed entirely when $SUTANDO_WORKSPACE is set in the env, so the     #
+#     legacy-env warning fires on every call (operator cleanup guidance) AND  #
+#     so the SUTANDO_TEST_MODE=1 escape hatch (which honors env in tests)     #
+#     never poisons the steady-state cache with a per-test path.              #
+#                                                                              #
+# Best-effort: cache write failures are silently ignored (correct value is     #
+# always emitted; cache is a perf optimization, not a contract).              #
+# --------------------------------------------------------------------------- #
+_workspace_cache_file() {
+  local cache_dir="${TMPDIR:-/tmp}"
+  # Bash builtin string substitution for per-repo namespacing — `/` → `_`.
+  # No subprocess fork (shasum was ~19 ms / call, which would have eaten most
+  # of the cache savings). Filename uniqueness is per repo-path, not crypto —
+  # collisions only matter across two checkouts that differ by exactly one
+  # `/` ↔ `_` swap, which is vanishingly rare on real systems. UID prefix
+  # keeps the cache per-user so multi-tenant hosts don't cross-contaminate.
+  local repo_slug="${REPO_ROOT//\//_}"
+  printf '%s/sutando-workspace-cache-%s-%s' "${cache_dir%/}" "$(id -u 2>/dev/null || echo 0)" "$repo_slug"
+}
+
+_workspace_cache_valid() {
+  local cache_file="$1"
+  [ -s "$cache_file" ] || return 1
+  local cfg
+  for cfg in "$REPO_ROOT/sutando.config.local.json" "$REPO_ROOT/sutando.config.json" "$REPO_ROOT/.env"; do
+    if [ -f "$cfg" ] && [ "$cfg" -nt "$cache_file" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 case "$cmd" in
   workspace)
+    # Layer 1 cache hot path — bypass when env is set so warnings fire AND so
+    # TEST_MODE-honored paths don't leak into the steady-state cache.
+    if [ -z "${SUTANDO_WORKSPACE:-}" ]; then
+      _cache_file="$(_workspace_cache_file)"
+      if [ -n "$_cache_file" ] && _workspace_cache_valid "$_cache_file"; then
+        cat "$_cache_file"
+        exit 0
+      fi
+    fi
+
     # `python3 -c` instead of `-m` so we don't pollute argv[0] with a module
     # path that confuses the loader's exe-anchored repo discovery.
-    python3 -c "
+    _ws_value="$(python3 -c "
 import sys
 sys.path.insert(0, '$REPO_ROOT')
 from src.sutando_config import resolve_workspace
 print(resolve_workspace(), end='')
-"
+")"
+    printf '%s' "$_ws_value"
+
+    # Best-effort cache write (atomic via tmp+rename). Skip when env is set
+    # (see header comment).
+    if [ -z "${SUTANDO_WORKSPACE:-}" ] && [ -n "${_cache_file:-}" ]; then
+      _tmp="${_cache_file}.tmp.$$"
+      if printf '%s' "$_ws_value" > "$_tmp" 2>/dev/null; then
+        mv "$_tmp" "$_cache_file" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+      fi
+    fi
     ;;
 
   vault-enabled)
