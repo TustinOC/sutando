@@ -43,31 +43,39 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import get_workspace  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
 
-_REPO = resolve_workspace()
 
-# Owner-relative + machine-local roots. Files under these roots are
-# delivered to Discord as attachments without further checks.
-SEND_ALLOWED_ROOTS: tuple[str, ...] = (
-    str(_REPO / "results"),
-    str(_REPO / "notes"),
-    # Notes canonical home (private dir) — once saved by save_note,
-    # paths reference the private location. Both old and new paths
-    # allowed during the transition; resolver picks whichever exists.
-    str(shared_personal_path("notes", _REPO)),
-    str(_REPO / "docs"),
-    str(Path.home() / "Desktop" / "iclr-backups"),
-    str(Path.home() / "Documents" / "sutando-launch-assets"),
-)
+def send_allowed_roots(workspace: Path) -> tuple[str, ...]:
+    """Owner-relative + machine-local roots. Files under these roots are
+    delivered to Discord as attachments without further checks.
+
+    Computed per-call from the active workspace (lazy-resolve, per
+    CONTRIBUTING.md "Lazy config access"). Pre-#1442 this was a module-
+    level tuple captured at import time.
+    """
+    return (
+        str(workspace / "results"),
+        str(workspace / "notes"),
+        # Notes canonical home (private dir) — once saved by save_note,
+        # paths reference the private location. Both old and new paths
+        # allowed during the transition; resolver picks whichever exists.
+        str(shared_personal_path("notes", workspace)),
+        str(workspace / "docs"),
+        str(Path.home() / "Desktop" / "iclr-backups"),
+        str(Path.home() / "Documents" / "sutando-launch-assets"),
+    )
+
 
 # Prefix forms — files whose realpath starts with any of these strings
 # are deliverable. Covers temp-file artifacts the agent generates
 # (`/tmp/sutando-recording-*.mov`, `/tmp/echo-screenshot-*.png`, etc.)
-# without needing to enumerate every filename.
+# without needing to enumerate every filename. Static — no workspace
+# dependency, so kept as a module-level constant.
 SEND_ALLOWED_PREFIXES: tuple[str, ...] = (
     "/tmp/sutando-",
     "/private/tmp/sutando-",
@@ -76,10 +84,10 @@ SEND_ALLOWED_PREFIXES: tuple[str, ...] = (
 )
 
 
-def is_path_sendable(fpath: str) -> bool:
+def is_path_sendable(fpath: str, *, workspace: Optional[Path] = None) -> bool:
     """True iff `fpath` is a regular file AND its `realpath` resolves
-    under one of ``SEND_ALLOWED_ROOTS`` or starts with one of
-    ``SEND_ALLOWED_PREFIXES``.
+    under one of the workspace-derived allowed roots or starts with one
+    of ``SEND_ALLOWED_PREFIXES``.
 
     Single source of truth for the file-attachment-delivery policy.
     Mirrors the shape used by ``_is_path_sendable`` in both call sites
@@ -90,13 +98,14 @@ def is_path_sendable(fpath: str) -> bool:
     allowed root/prefix all return False. Callers should fail-closed
     on False (log + skip; never deliver the file).
     """
+    workspace = get_workspace(workspace)
     if not os.path.isfile(fpath):
         return False
     try:
         real = os.path.realpath(fpath)
     except OSError:
         return False
-    for root in SEND_ALLOWED_ROOTS:
+    for root in send_allowed_roots(workspace):
         root_real = os.path.realpath(root)
         if real == root_real or real.startswith(root_real + os.sep):
             return True

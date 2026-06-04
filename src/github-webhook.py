@@ -27,16 +27,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 # Two separate concerns (per qingyun review on PR #775):
-# - REPO  = source tree (this file's parent.parent) — for loading .env from
-#           the checkout root. Stays anchored regardless of SUTANDO_WORKSPACE.
-# - WORKSPACE_DIR = runtime state (resolve_workspace()) — for tasks/ writes so
-#           the workspace-aware watcher picks them up.
+# - REPO         = source tree (this file's parent.parent) — for loading .env from
+#                  the checkout root. Stays anchored.
+# - tasks dir    = runtime state via `get_workspace() / "tasks"` — resolved lazily
+#                  per the v0.8 `Lazy config access` pattern (CONTRIBUTING.md).
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import get_workspace  # noqa: E402
 
-WORKSPACE_DIR = resolve_workspace()
-TASKS_DIR = WORKSPACE_DIR / "tasks"
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7847
 
 # Load .env from the repo root (not workspace) so launchctl / systemd managed
@@ -151,8 +149,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if task_text:
             task_id = f"task-gh-{int(time.time() * 1000)}"
             task_content = f"id: {task_id}\ntimestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\ntask: {task_text}\nsource: github\n"
-            TASKS_DIR.mkdir(exist_ok=True)
-            (TASKS_DIR / f"{task_id}.txt").write_text(task_content)
+            tasks_dir = get_workspace() / "tasks"
+            tasks_dir.mkdir(exist_ok=True)
+            (tasks_dir / f"{task_id}.txt").write_text(task_content)
             print(f"[{time.strftime('%H:%M:%S')}] {event_type}/{payload.get('action', '')} → {task_id}")
 
         self.send_response(200)

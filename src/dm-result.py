@@ -51,9 +51,12 @@ import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
 from send_allowlist import (  # noqa: E402
     is_path_sendable as _is_path_sendable,
-    SEND_ALLOWED_PREFIXES as _SEND_ALLOWED_PREFIXES,
-    SEND_ALLOWED_ROOTS as _SEND_ALLOWED_ROOTS,
 )
+# Note: SEND_ALLOWED_PREFIXES + SEND_ALLOWED_ROOTS are referenced as bare
+# identifiers in the rejected-files log string at line ~386 below, not
+# read as values. Post-#1442 SEND_ALLOWED_ROOTS is now a function
+# (`send_allowed_roots(workspace)`); the log line keeps the old names for
+# operator continuity.
 
 
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
