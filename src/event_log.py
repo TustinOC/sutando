@@ -48,13 +48,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-__all__ = ["log_event", "get_log_path", "LOGS_DIR"]
+__all__ = ["log_event", "get_log_path"]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workspace_default import resolve_workspace  # noqa: E402
-
-WORKSPACE_DIR = resolve_workspace()
-LOGS_DIR = WORKSPACE_DIR / "logs"
+from workspace_default import get_workspace  # noqa: E402
 
 _CACHED_MACHINE: str | None = None
 
@@ -68,7 +65,7 @@ def _machine_id() -> str:
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from util_paths import personal_path
-        identity = personal_path("stand-identity.json", workspace=WORKSPACE_DIR)
+        identity = personal_path("stand-identity.json", workspace=get_workspace())
         if identity.exists():
             _CACHED_MACHINE = json.loads(identity.read_text()).get("machine", "") or "unknown"
         else:
@@ -85,7 +82,7 @@ def get_log_path(when: float | None = None) -> Path:
     Sutando's human-readable logging."""
     ts = when if when is not None else time.time()
     date = time.strftime("%Y-%m-%d", time.localtime(ts))
-    return LOGS_DIR / f"events-{date}.jsonl"
+    return get_workspace() / "logs" / f"events-{date}.jsonl"
 
 
 def log_event(kind: str, **fields: Any) -> None:
@@ -113,8 +110,8 @@ def log_event(kind: str, **fields: Any) -> None:
             except (TypeError, ValueError):
                 event[k] = repr(v)
 
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
         path = get_log_path(now)
+        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
         # Single write() for atomicity on POSIX.
         with path.open("ab") as fh:

@@ -13,29 +13,24 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from util_paths import personal_path  # noqa: E402
-from workspace_default import resolve_workspace  # noqa: E402
-
-WORKSPACE = resolve_workspace()
-PQ_FILE = Path(personal_path("pending-questions.md", WORKSPACE))
-RESULTS_DIR = WORKSPACE / "results"
-LAST_NOTIFY_FILE = WORKSPACE / ".last-pq-notify"
-VOICE_LOG = WORKSPACE / "logs" / "voice-agent.log"
-PRESENTER_SENTINEL = WORKSPACE / "state" / "presenter-mode.sentinel"
+from workspace_default import get_workspace  # noqa: E402
 
 
-def presenter_mode_active():
+def presenter_mode_active(workspace: Path):
     """True if scripts/presenter-mode.sh has been started and the expiry
     timestamp in the sentinel is still in the future. Silences all
     notifications for the ICLR talk window. Stale sentinels (past-expiry)
     are ignored and return False — the next `status` / `stop` call will
     remove the file."""
-    if not PRESENTER_SENTINEL.exists():
+    presenter_sentinel = workspace / "state" / "presenter-mode.sentinel"
+    if not presenter_sentinel.exists():
         return False
     try:
-        expire_iso = PRESENTER_SENTINEL.read_text().strip()
+        expire_iso = presenter_sentinel.read_text().strip()
         # Require an ISO-8601-ish prefix (starts with a digit). Without
         # this guard, malformed sentinel content like "garbage" compares
         # LESS than any real now_iso ("2" < "g" in ASCII) and the mode
@@ -50,15 +45,16 @@ def presenter_mode_active():
         return False
 
 
-def voice_client_connected():
+def voice_client_connected(workspace: Path):
     """True if the most recent [Health] line in voice-agent.log shows client=true.
     When the voice client is offline, dm-fallback already delivers question-*.txt
     files via Discord DM — writing one would double-DM with notify_discord_dm."""
-    if not VOICE_LOG.exists():
+    voice_log = workspace / "logs" / "voice-agent.log"
+    if not voice_log.exists():
         return False
     try:
         # Read the tail efficiently: open at end, walk back ~16KB
-        with VOICE_LOG.open('rb') as f:
+        with voice_log.open('rb') as f:
             f.seek(0, 2)
             size = f.tell()
             f.seek(max(0, size - 16384))
@@ -71,7 +67,7 @@ def voice_client_connected():
     return False
 
 
-def get_waiting_questions():
+def get_waiting_questions(workspace: Path):
     """Parse pending-questions.md — matches both legacy `## Q1 — Title` and
     the current `## Title` / `- **Status:** unanswered` format.
 
@@ -81,9 +77,10 @@ def get_waiting_questions():
     Sections with an explicit status of "resolved" / "done" / "answered"
     are skipped so the old structured format still works correctly.
     """
-    if not PQ_FILE.exists():
+    pq_file = Path(personal_path("pending-questions.md", workspace))
+    if not pq_file.exists():
         return []
-    content = PQ_FILE.read_text()
+    content = pq_file.read_text()
     # Only the active region counts. Resolved questions are kept below a
     # top-level "# Resolved" divider (audit trail), not deleted — without
     # this cut the heading-agnostic split below sweeps the whole file and
@@ -110,11 +107,12 @@ def get_waiting_questions():
     return questions
 
 
-def should_notify():
+def should_notify(workspace: Path):
     """Only notify once per hour to avoid spam."""
-    if not LAST_NOTIFY_FILE.exists():
+    last_notify_file = workspace / ".last-pq-notify"
+    if not last_notify_file.exists():
         return True
-    last = LAST_NOTIFY_FILE.stat().st_mtime
+    last = last_notify_file.stat().st_mtime
     return (time.time() - last) > 3600  # 1 hour
 
 
@@ -126,10 +124,10 @@ def notify_macos(count, titles):
     ], capture_output=True)
 
 
-def notify_voice(questions):
+def notify_voice(questions, workspace: Path):
     """Write to results/ so voice agent can speak it."""
     ts = int(time.time() * 1000)
-    path = RESULTS_DIR / f"question-{ts}.txt"
+    path = workspace / "results" / f"question-{ts}.txt"
     titles = [q["title"] for q in questions]
     path.write_text(
         f"You have {len(questions)} pending question{'s' if len(questions) > 1 else ''} waiting for your answer: "
@@ -138,12 +136,12 @@ def notify_voice(questions):
     )
 
 
-def notify_discord_dm(questions):
+def notify_discord_dm(questions, workspace: Path):
     """Write a proactive-*.txt file so discord-bridge DMs the owner.
     Owner asked (2026-04-09, while traveling) to receive pending-question
     pings as DMs instead of just macOS notifications."""
     ts = int(time.time())
-    path = RESULTS_DIR / f"proactive-pending-q-{ts}.txt"
+    path = workspace / "results" / f"proactive-pending-q-{ts}.txt"
     lines = [
         f"⚠️ {len(questions)} pending question{'s' if len(questions) > 1 else ''} waiting:",
         "",
@@ -157,17 +155,18 @@ def notify_discord_dm(questions):
     path.write_text("\n".join(lines))
 
 
-def main():
+def main(*, workspace: Optional[Path] = None):
+    workspace = get_workspace(workspace)
     force = "--force" in sys.argv
-    questions = get_waiting_questions()
+    questions = get_waiting_questions(workspace)
     if not questions:
         return
 
-    if not force and presenter_mode_active():
+    if not force and presenter_mode_active(workspace):
         print(f"(presenter-mode) {len(questions)} pending questions — suppressed")
         return
 
-    if not force and not should_notify():
+    if not force and not should_notify(workspace):
         print(f"(cooldown) {len(questions)} pending questions — skipping notification")
         return
 
@@ -180,14 +179,14 @@ def main():
     # Voice result — only when voice is actually connected. When offline, the
     # discord-bridge dm-fallback would deliver question-*.txt as a duplicate
     # of notify_discord_dm below. Skipping cuts the spam in half.
-    if voice_client_connected():
-        notify_voice(questions)
+    if voice_client_connected(workspace):
+        notify_voice(questions, workspace)
 
     # Discord DM to owner (via discord-bridge poll_proactive)
-    notify_discord_dm(questions)
+    notify_discord_dm(questions, workspace)
 
     # Update last notify time
-    LAST_NOTIFY_FILE.write_text(str(int(time.time())))
+    (workspace / ".last-pq-notify").write_text(str(int(time.time())))
 
     print(f"Notified: {count} pending questions")
 
