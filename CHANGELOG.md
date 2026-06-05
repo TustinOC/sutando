@@ -2,6 +2,84 @@
 
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [v0.3.0] — 2026-06-05
+
+> **DRAFT — release-prep PR.** Polish and curate before tagging. Items marked `<!-- review -->` warrant a closer look; entries grouped by theme. The headline change is the workspace-contract rollup (M0 + M1 + M2 + sync-workspace) — that subsection is dedicated below.
+
+### Added
+
+**Workspace contract rollup (M0 + M1 + M2 + sync-workspace)** — the staging-workspace-revamp work
+- **M0 — in-repo workspace default:** the workspace now defaults to `<repo>/workspace/` instead of `~/.sutando/workspace/`. Configuration moves to `sutando.config.local.json` (per-clone, gitignored) with a clear precedence: config file > legacy env var > baked-in default. `$SUTANDO_WORKSPACE` is honored as a legacy escape hatch with a one-time deprecation warning. ([#1395], [#1397], [#1399])
+- **M1 — workspace migration script + `/sutando-migrate` skill:** `bash scripts/sutando-migrate.sh` audits state across legacy sources (A: repo-root, B: `~/.sutando/workspace/`, C: `$SUTANDO_WORKSPACE`), surfaces collisions with newest-mtime resolution + keep-both sidecars, gets owner confirmation, commits, verifies, and (optionally) deletes the source after a 30-day grace window. Per-file atomic (`cp -p` to sibling tmp → `mv`) with sha256 verification. ([#1403], [#1406], [#1440])
+- **M2 — `claude_sutando_config_dir`:** a per-workspace shell that holds Claude Code state (`projects/`, `skills/`, `agents/`, `commands/`, `settings.json`). `--migrate`/`--import` engine copies-and-warns, with post-copy path rewriting and weight-reduction excludes. ([#1415], [#1424], [#1429])
+- **Workspace-as-git-repo sync (`sync-workspace.sh`):** the workspace IS the git repo; per-host branch identity (`host/<host>/<wsId>`), config-driven gitignore carrier (`vault.sync.include` / `vault.sync.exclude`), vault URL from config (or `--vault-url` flag), handles unrelated-histories on first cross-host pull, moves sync rules to `.git/info/exclude` to avoid workspace-gitignore leak, migrates pre-wsId flat branches. ([#1445], [#1446], [#1447], [#1458], [#1459], [#1460], [#1461], [#1463])
+- **Sync-memory consolidation:** legacy `scripts/sync-memory.sh` anchored to `$SCRIPT_PARENT` (not `$REPO_DIR`); emits deprecation banner in favor of `sync-workspace.sh`. ([#1432])
+- **Catchup-after-startup skill** (`/catchup-after-startup`): reconstructs prior-session context — open PRs, in-flight tasks, sqlite voice/phone/discord rollups, build_log tail, health probe — into the new session's conversation buffer before the user types. PID-stamp sentinel survives unclean exits. ([#1431])
+- **Relay skill** (`/relay`): write a human-authored handoff note for the NEXT session capturing intent + judgment the structured snapshot can't carry. Event-triggered, append-on-thread, archived on consumption. ([#1430])
+
+**Voice / multimodal**
+- Voice work-tool both-approaches: confirm-on-misheard + attached recent transcript so delegated tasks include the user's exact words. ([#1342])
+- Unified base-mode resolver for the voice agent (closes the mode-state confusion that surfaced in #1410 / #1412 / #1413). ([#1434])
+- Discord-voice: meeting mode + per-speaker access tiers + "za-warudo" magic-word activation. ([#1311])
+- Screen-companion: implements `vision_query`, `take_note`, `look_up_reference` inline tools (re-applied after revert; original feature from #819). ([#1362])
+
+**Bridges**
+- Discord bridge: emit `parent_message_id` for replies so multi-turn DM threads thread correctly client-side. ([#1346])
+- Discord bridge: route all marker handling through a single `parse_markers()` parser (refactor for [#896]). ([#1302])
+- Slack bridge: recover from external `access.json` deletion via in-memory cache (closes [#899]). ([#1292])
+- Slack bridge: recover orphan `.sending` files on startup. ([#1290])
+- Telegram bridge: deliver briefing / insight / friction results to owner DM. ([#1350])
+- Single-instance bridge guard via `fcntl.flock` (closes [#1257]). ([#1317])
+- Mass-deletion tripwire on `sync-memory.sh` before push. ([#1349])
+
+**Skills**
+- `email-find` skill for stubborn email lookups when targeted searches return nothing. ([#1020])
+- `obsidian-vault` skill: opt-in agent vault — capture skill + state mirror + Opus-judged nightly dream. ([#1082])
+- `open-sutando-ref` fuzzy GitHub-ref resolver: `#874`, `PR 874`, `issue #874`, or free-text → URL. ([#1308])
+- `morning-briefing` skill works without gws dependency. ([#1282])
+- `quota-tracker` skill: burn-rate EWMA + passes-left forecast (closes [#1087]). ([#1319])
+
+**Reliability**
+- Sutando.app launchd KeepAlive supervisor — crash-restart + login auto-start (closes [#942]). ([#1294])
+- Self-heal for the 1M usage-credit gate wedge + fix watchdog silent no-op. ([#1428])
+- Schedule-crons: no inline-fire on registration + per-cron queue gate. ([#1437])
+- Archive stranded `.claimed-core-N.txt` task files (closes [#933]). ([#1299])
+- Voice-agent: clear stale pid file before launchctl kickstart. ([#1400])
+- Loud-warn when workspace fallback masks a `.env` override. ([#1369])
+
+**Developer experience / CI**
+- `cwd-lint`: bans bare `process.cwd()` / `Path.cwd()` outside canonical resolvers (closes [#863]). ([#1322])
+- Host-CLI dependency snapshot + migrate hardcoded `~/.claude/` paths (closes [#864]). ([#1324])
+- PEP-604 union annotation lint catches Python 3.9 incompatibilities at CI time (closes [#961]). ([#1305])
+- CLA-recheck workflow dedups `@cla-assistant check` comments. ([#1353])
+- Catchup-after-startup: migrate stale `SessionStop` → `SessionEnd` in `settings.json`. ([#1374])
+
+### Fixed
+
+- Voice-agent restart cleanly clears stale pid file before kickstart. ([#1400])
+- Bridges + services: narrow bare `except:` → `except Exception:` across 5 Python services. ([#1398])
+- Dashboard pending-count reads free-form sections (not just `**Status:**` markers). ([#1405])
+- Pending-questions parsers honor the `# Resolved` divider. ([#1402])
+- `claude-gemini` skill: guard empty `INCLUDE_DIRS` under `set -u` on bash 3.2. ([#1391])
+- Defer annotations + `timezone.utc` in `quota-tracker` & `deal-finder` skills (Python 3.9 compat). ([#1385])
+- `slide_control` inline-tool description matches implementation. ([#1396])
+- `type_text` inline-tool mode param + in-place-edit routing. ([#1394])
+- `screen-companion`: `work` (task delegation) reachable in all modes (closes [#1375]). ([#1365])
+- `call-diagnostics`: schema-drift on sessions SELECT + phone timeline accuracy (closes [#1357]). ([#1363])
+- `phone-conversation`: archive task + result files instead of unlinking (closes [#1235]). ([#1237])
+- `agent-registry`: grep `.env` for `SUTANDO_WORKSPACE` when env var is unset. ([#1368])
+- `screen-companion`: remove `SPEECH REQUIREMENT` block (revert prompt fix). ([#1373])
+- `startup`: source `.env` before `init.sh` so workspace overrides are honored. ([#1367])
+- `catchup-after-startup`: rename `SessionStop` → `SessionEnd` hook. ([#1366])
+- `screen-companion`: `deactivate_screen_companion` missing `async`. ([#1358])
+
+### Changed
+
+- `sync-memory.sh` is **deprecated** in favor of `sync-workspace.sh` — emits a one-line banner on each invocation. Migrate by: running `bash scripts/sync-workspace.sh --init` once per machine, moving the vault URL from `.env` to `sutando.config.local.json` under `vault.remote_url` (or passing `--vault-url`), and replacing the cron entry. ([#1446])
+- `community-use-cases/` moved to `docs/`; removed root `/logs` and `/data`. ([#1380])
+- Docs: README section header rename + remove WIRE-specific opening. ([#1382])
+- Docs: `email-find` skill addresses [@qingyun-wu]'s 4 review points from [#1020]. ([#1352])
+
 ## [v0.1.0] — 2026-05-28
 
 First tagged release. Engine is stable for single-machine installs; multi-machine sync and migration framework ship in v0.2.0.
@@ -61,4 +139,5 @@ First tagged release. Engine is stable for single-machine installs; multi-machin
 
 - `status_read_path()` / `statusReadPath()`: legacy workspace-root fallback removed (one-release shim, now safe to drop) ([#943], [#945])
 
+[v0.3.0]: https://github.com/sonichi/sutando/releases/tag/v0.3.0
 [v0.1.0]: https://github.com/sonichi/sutando/releases/tag/v0.1.0

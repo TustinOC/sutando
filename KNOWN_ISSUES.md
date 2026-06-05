@@ -1,12 +1,12 @@
 # Known Issues
 
-## Workspace contract — Milestone 0 (in-repo default)
+## Workspace contract — migration from `~/.sutando/workspace/`
 
-The workspace now defaults to `<repo>/workspace/` (in-repo). Configuration goes through [`sutando.config.local.json`](docs/workspace-config.md) — the loader resolves the path with a clear precedence order (config file > legacy env var > baked-in default).
+The workspace defaults to `<repo>/workspace/` (in-repo). Configuration goes through [`sutando.config.local.json`](docs/workspace-config.md) — the loader resolves the path with a clear precedence order (config file > legacy env var > baked-in default).
 
 **For existing users** with `SUTANDO_WORKSPACE` set in `.env` or shell init: the env var is still honored, and you'll see a one-time deprecation warning at startup pointing you at the config file. No action required for now; migrate when convenient.
 
-**For users with state in the old default location** (`~/.sutando/workspace/`): the upcoming Milestone 1 recovery skill (`bash scripts/sutando-migrate.sh`) will help you audit and move existing runtime data into the in-repo workspace.
+**For users with state in the old default location** (`~/.sutando/workspace/`): the migration script + skill is available now. Run `bash scripts/sutando-migrate.sh --dry-run` to preview, then `--commit` to relocate. Sources are preserved by default; cleanup via `--delete-source` after a 30-day grace window where readers fall back to the legacy location.
 
 If you hit a path-resolution oddity, check the resolved workspace via `bash scripts/sutando-config.sh workspace` and report the file/line in an issue.
 

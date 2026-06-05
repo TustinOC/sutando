@@ -26,10 +26,10 @@ If you only run Sutando on one machine, you don't need this.
 
 1. **Create a private GitHub repo** for your memory + notes (any name, e.g. `your-org/your-memory`). It will hold `memory/` and `notes/` directories, plus any per-host scratch you opt to track.
 
-2. **Add the repo URL to `.env`** in your sutando workspace:
-   ```
-   SUTANDO_MEMORY_REPO=https://github.com/your-org/your-memory.git
-   ```
+2. **Add the repo URL to your config.** Either:
+   - Preferred: `sutando.config.local.json` under `vault.remote_url` (per-clone, gitignored), OR
+   - Pass `--vault-url <url>` to `sync-workspace.sh` per invocation, OR
+   - Legacy: `.env` with `SUTANDO_MEMORY_REPO=https://github.com/your-org/your-memory.git` (still honored by `sync-memory.sh` for migration grace period).
 
 3. **Run once** from the sutando working tree:
    ```bash
@@ -46,6 +46,18 @@ Repeat the same steps on every machine in the fleet. All clone the same `SUTANDO
 
 ## What gets synced
 
+The table below shows what each sync path covers. **Prefer `sync-workspace.sh`** (the new path) for new installs; `sync-memory.sh` remains for backwards compatibility with fleet hosts still on `main`.
+
+**New path — `sync-workspace.sh`** (workspace IS the git repo, PR-1 #1445):
+
+| Source | Synced to | Notes |
+|---|---|---|
+| `<sutando workspace>/` (everything not excluded) | Single private repo (`vault.remote_url`), branch `host/<hostname>/<wsId>` per workspace | Workspace itself is the working tree. Per-host branch + automatic merge across hosts. Branch naming from PR #1459. |
+| `<workspace>/.claude-sutando/projects/<slug>/memory/` | Same repo, same branch | Claude Code auto-memory files synced alongside notes + state. |
+| `<workspace>/notes/` | Same repo, same branch | Long-form notes. No symlink needed — they're in the workspace already. |
+
+**Legacy path — `sync-memory.sh`** (rsync-to-mirror, pre-PR-1):
+
 | Source | Synced to | Notes |
 |---|---|---|
 | `$CLAUDE_CONFIG_DIR/projects/<workspace-hash>/memory/*.md` | `~/.sutando/memory-sync/memory/` | Claude Code auto-memory files. Append-only is safest. |
@@ -53,9 +65,26 @@ Repeat the same steps on every machine in the fleet. All clone the same `SUTANDO
 
 ## What does NOT get synced
 
-- **Per-host runtime state** — `core-status.json`, `contextual-chips.json`, anything in `state/`, `.env` files. These are local to each machine.
+**Defaults — never tracked:**
+- **Per-host runtime state** — `core-status.json`, `contextual-chips.json`, anything under `state/auth/` (per-host install / device identity), `.env` files. These are local to each machine.
 - **Build artifacts** — generated videos, screenshots, derived caches.
-- **Anything in `.gitignore`** of your memory repo.
+- **Anything in `.gitignore`** of your memory/workspace repo.
+
+**Customize per workspace** — `sync-workspace.sh` reads `vault.sync.include` and `vault.sync.exclude` from `sutando.config.local.json` to extend/contract what's tracked, written into the workspace's `.gitignore` (or `.git/info/exclude`, per PR #1460) on each sync tick:
+
+```json
+{
+  "vault": {
+    "remote_url": "https://github.com/your-org/your-memory.git",
+    "sync": {
+      "include": ["custom-research/", "drafts/"],
+      "exclude": ["state/cache/", "data/large-snapshots/"]
+    }
+  }
+}
+```
+
+The carrier mechanism is PR #1447. Patterns are standard gitignore syntax.
 
 ## Conflict model
 
