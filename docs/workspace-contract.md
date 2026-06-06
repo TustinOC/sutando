@@ -1,8 +1,8 @@
-# Workspace Contract — v0.8
+# Workspace Contract — v0.3.0
 
-**Version:** v0.8 (current target). Predecessors: pre-M0 (env-honored, scattered defaults), M0 (in-repo default + config-driven resolver, env still legacy-honored).
+**Version:** v0.3.0 (current). Predecessors: pre-M0 (env-honored, scattered defaults), M0 (in-repo default + config-driven resolver, env still legacy-honored).
 
-**Status (2026-06-03):** The contract below describes the **target** v0.8 shape. M0 (in-repo default, config-driven resolver) shipped via PRs #1395 + #1397 + #1399 + #1403. The v0.8 "no env override" strip is partial — `$SUTANDO_WORKSPACE` still works as a deprecation-warned legacy escape today; **PR #1440 strips it from `src/sutando_config.{py,ts}` + adds bootstrap auto-migration in `src/startup.sh`**. After #1440 merges, the resolver-level contract below is fully true. The `docs/workspace-contract-v0.8.md` adjunct (PR #1384) carries the original design rationale; this file is the operational source of truth.
+**Status:** **Ratified as of PR #1440 merge (2026-06-04).** The contract below describes the operational shape. M0 (in-repo default, config-driven resolver) shipped via PRs #1395 + #1397 + #1399 + #1403; M1 (workspace migration script + skill) via #1403 + #1406; M2 (`claude_sutando_config_dir`) via #1415 + #1424 + #1429; workspace-as-git-repo sync (`sync-workspace.sh`) via #1445 + #1446 + #1447 + #1458 + #1459 + #1460 + #1461 + #1463. The "no env override" strip landed in #1440: `$SUTANDO_WORKSPACE` is no longer honored by the resolver; setting it triggers a one-time stderr deprecation warning + bootstrap auto-migration in `src/startup.sh`. This file is the operational source of truth.
 
 **One-sentence summary**: The workspace is `<repo>/workspace/`, period. It is gitignored, computed (no env override), and ephemeral; durability is a separate concern handled by the vault.
 

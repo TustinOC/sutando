@@ -12,10 +12,11 @@ That's it for a fresh clone — no setup, no env var, no config file. The direct
 
 ## Resolution order (highest wins)
 
-1. **`$SUTANDO_WORKSPACE` env var** — legacy escape hatch. Honored, but the loader prints a one-time warning suggesting you migrate to the config file.
-2. **`sutando.config.local.json`** → `workspace.path` — per-clone override. Gitignored.
-3. **`sutando.config.json`** → `workspace.path` — tracked default. The repo ships `${REPO_DIR}/workspace`.
-4. **Baked-in fallback** — `${REPO_DIR}/workspace`, used if neither config file exists.
+1. **`sutando.config.local.json`** → `workspace.path` — per-clone override. Gitignored.
+2. **`sutando.config.json`** → `workspace.path` — tracked default. The repo ships `${REPO_DIR}/workspace`.
+3. **Baked-in fallback** — `${REPO_DIR}/workspace`, used if neither config file exists.
+
+**Note:** `$SUTANDO_WORKSPACE` is **no longer honored** by the resolver as of PR #1440 (workspace contract v0.3.0). If set, startup emits a one-time stderr deprecation warning + invokes auto-migration via `src/startup.sh`. Migrate to `sutando.config.local.json` to silence the warning.
 
 `${REPO_DIR}` in any config string expands to the directory containing the config file (== git toplevel for a sane checkout).
 
