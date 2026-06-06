@@ -9,7 +9,7 @@ the gate fires.
 Air's editorial gate v1 (from #bot2bot 2026-06-06 21:28Z):
   HARD GATE — fires only when ALL three are true:
     1. >=3 verified receipts (verifiability >= 0.8, fresh_hours <= 7*24)
-    2. >=1 fresh ≤7d hook (fresh_hours <= 24, any beat)
+    2. >=1 fresh hook (fresh_hours <= 168 = 7d; ideal sub-24h tracked separately)
     3. >=2 beats represented in the above-threshold pool
 
   SOFT TIE-BREAKERS (used to rank when multiple topics qualify):
@@ -123,8 +123,10 @@ def apply_gate(all_items_by_beat: dict[tuple[str, str], list[dict]]) -> dict:
 
     # Hard gate 1: verified receipts (verifiability >= 0.8, fresh_hours <= 7d)
     receipts = [i for i in all_items if i["verifiability"] >= 0.8 and i["fresh_hours"] <= WINDOW_DAYS * 24]
-    # Hard gate 2: fresh hook (fresh_hours <= 24)
-    fresh_hooks = [i for i in all_items if i["fresh_hours"] <= 24]
+    # Hard gate 2: fresh hook (fresh_hours <= 7d per Air's gate v1; sub-24h is the ideal but not the hard bar)
+    fresh_hooks = [i for i in all_items if i["fresh_hours"] <= WINDOW_DAYS * 24]
+    # Sub-24h hooks tracked separately for the "ideal" soft signal
+    sub_24h_hooks = [i for i in fresh_hooks if i["fresh_hours"] <= 24]
     # Hard gate 3: beats represented (in above-threshold pool)
     beats = sorted({i["beat"] for i in all_items})
 
@@ -138,9 +140,10 @@ def apply_gate(all_items_by_beat: dict[tuple[str, str], list[dict]]) -> dict:
 
     if not fresh_hooks:
         ready = False
-        reasons.append("hard-gate FAIL: no fresh <=24h hook available")
+        reasons.append("hard-gate FAIL: no fresh <=7d hook available")
     else:
-        reasons.append(f"hard-gate PASS: {len(fresh_hooks)} fresh <=24h hooks")
+        ideal_note = f", incl. {len(sub_24h_hooks)} sub-24h" if sub_24h_hooks else ", none sub-24h"
+        reasons.append(f"hard-gate PASS: {len(fresh_hooks)} fresh <=7d hooks{ideal_note}")
 
     if len(beats) < 2:
         ready = False
@@ -186,9 +189,10 @@ def write_material_ready(verdict: dict) -> Path | None:
             f.write("## Receipts (verified, fresh ≤7d)\n\n")
             for r in verdict["receipts"][:8]:
                 f.write(f"- **[{r['title']}]({r['url']})** — score={r['score']:.2f} ({r['beat']}, fresh={r['fresh_hours']:.0f}h)\n")
-            f.write("\n## Fresh hooks (≤24h)\n\n")
+            f.write("\n## Fresh hooks (≤7d; ideal sub-24h tagged)\n\n")
             for h in verdict["fresh_hooks"][:5]:
-                f.write(f"- **[{h['title']}]({h['url']})** — {h['beat']}, fresh={h['fresh_hours']:.1f}h\n")
+                ideal = " ⭐sub-24h" if h["fresh_hours"] <= 24 else ""
+                f.write(f"- **[{h['title']}]({h['url']})** — {h['beat']}, fresh={h['fresh_hours']:.1f}h{ideal}\n")
             f.write("\n## Next: angle call (human)\n\n")
             f.write("This material cleared the gate. Fleet should propose 1-2 angle picks in #design within 12h, "
                     "Chi adjudicates the final angle, then Air's script template fills in.\n")
