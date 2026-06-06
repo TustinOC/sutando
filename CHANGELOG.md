@@ -9,7 +9,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 ### Added
 
 **Workspace contract rollup (M0 + M1 + M2 + sync-workspace)** — the staging-workspace-revamp work
-- **M0 — in-repo workspace default:** the workspace now defaults to `<repo>/workspace/` instead of `~/.sutando/workspace/`. Configuration moves to `sutando.config.local.json` (per-clone, gitignored) with a clear precedence: config file > legacy env var > baked-in default. `$SUTANDO_WORKSPACE` is honored as a legacy escape hatch with a one-time deprecation warning. ([#1395], [#1397], [#1399])
+- **M0 — in-repo workspace default:** the workspace now defaults to `<repo>/workspace/` — **supersedes the v0.1.0 `~/.sutando/workspace/` default.** Configuration moves to `sutando.config.local.json` (per-clone, gitignored) with a clear precedence: config file > baked-in default. **`$SUTANDO_WORKSPACE` is no longer honored** by the resolver as of PR #1440 — setting it triggers a one-time stderr deprecation warning + bootstrap auto-migration in `src/startup.sh`. Existing users on the v0.1.0 path are auto-migrated on next startup; manual relocation via `bash scripts/sutando-migrate.sh` is recommended for clean state. ([#1395], [#1397], [#1399], [#1440])
 - **M1 — workspace migration script + `/sutando-migrate` skill:** `bash scripts/sutando-migrate.sh` audits state across legacy sources (A: repo-root, B: `~/.sutando/workspace/`, C: `$SUTANDO_WORKSPACE`), surfaces collisions with newest-mtime resolution + keep-both sidecars, gets owner confirmation, commits, verifies, and (optionally) deletes the source after a 30-day grace window. Per-file atomic (`cp -p` to sibling tmp → `mv`) with sha256 verification. ([#1403], [#1406], [#1440])
 - **M2 — `claude_sutando_config_dir`:** a per-workspace shell that holds Claude Code state (`projects/`, `skills/`, `agents/`, `commands/`, `settings.json`). `--migrate`/`--import` engine copies-and-warns, with post-copy path rewriting and weight-reduction excludes. ([#1415], [#1424], [#1429])
 - **Workspace-as-git-repo sync (`sync-workspace.sh`):** the workspace IS the git repo; per-host branch identity (`host/<host>/<wsId>`), config-driven gitignore carrier (`vault.sync.include` / `vault.sync.exclude`), vault URL from config (or `--vault-url` flag), handles unrelated-histories on first cross-host pull, moves sync rules to `.git/info/exclude` to avoid workspace-gitignore leak, migrates pre-wsId flat branches. ([#1445], [#1446], [#1447], [#1458], [#1459], [#1460], [#1461], [#1463])
@@ -75,10 +75,11 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
-- `sync-memory.sh` is **deprecated** in favor of `sync-workspace.sh` — emits a one-line banner on each invocation. Migrate by: running `bash scripts/sync-workspace.sh --init` once per machine, moving the vault URL from `.env` to `sutando.config.local.json` under `vault.remote_url` (or passing `--vault-url`), and replacing the cron entry. ([#1446])
+- `sync-memory.sh` is **deprecated and will be REMOVED in v0.4.0** — switch to `sync-workspace.sh` now. Migrate by: running `bash scripts/sync-workspace.sh --init` once per machine, moving the vault URL from `.env` to `sutando.config.local.json` under `vault.remote_url` (or passing `--vault-url`), and replacing the cron entry. ([#1446], [#1472])
 - `community-use-cases/` moved to `docs/`; removed root `/logs` and `/data`. ([#1380])
 - Docs: README section header rename + remove WIRE-specific opening. ([#1382])
 - Docs: `email-find` skill addresses [@qingyun-wu]'s 4 review points from [#1020]. ([#1352])
+- Docs: v0.3.0 docs sweep — replaced `docs/memory-sync.md` with `docs/workspace-sync.md` (canonical doc for the new sync flow + migration risk checklist + Keychain-bound gh-token troubleshooting); promoted `docs/release-process-consolidated.md` (RFC) → `docs/release-process.md` (canonical, ratified) and deleted the two proposal docs; rewrote `docs/workspace-design.md` around the 2-space model (Code + Workspace, with Memory as a sub-path) per owner directive 2026-06-04; updated `docs/workspace-contract.md` status to "Ratified as of PR #1440 merge"; updated `docs/workspace-config.md` resolution order to drop the no-longer-honored `$SUTANDO_WORKSPACE` env var. ([#1472])
 
 ## [v0.1.0] — 2026-05-28
 
