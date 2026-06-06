@@ -47,7 +47,7 @@
 #
 # Suppress this banner by setting SUTANDO_SYNC_MEMORY_SUPPRESS_DEPRECATION=1.
 if [ "${SUTANDO_SYNC_MEMORY_SUPPRESS_DEPRECATION:-0}" != "1" ]; then
-    echo "sync-memory: DEPRECATED — prefer scripts/sync-workspace.sh (see header for migration recipe; set SUTANDO_SYNC_MEMORY_SUPPRESS_DEPRECATION=1 to silence)." >&2
+    echo "sync-memory: DEPRECATED — will be REMOVED in v0.4.0. Switch to scripts/sync-workspace.sh now (see header for migration recipe; set SUTANDO_SYNC_MEMORY_SUPPRESS_DEPRECATION=1 to silence)." >&2
 fi
 
 # If SUTANDO_MEMORY_SYNC_DIR is not set, try to auto-detect: if the script

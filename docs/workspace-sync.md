@@ -1,0 +1,133 @@
+# Workspace sync across machines
+
+Sutando supports running the same agent identity across multiple machines (e.g. Mac mini + MacBook + Mac Studio). Each machine runs its own Claude Code session; a shared private git repo keeps the workspace consistent between them — notes, memory, state, and any custom directories the workspace contains.
+
+The mechanism is intentionally minimal: a single shell script (`scripts/sync-workspace.sh`) invoked on a cron tick. The workspace itself IS the git working tree; each machine pushes its writes to a per-host branch and pulls from the others to merge.
+
+## When you want this
+
+- You run Sutando on more than one machine and want the agent to share workspace state across them.
+- You want a private, owner-controlled audit log of what the agent has learned over time (every workspace write is a git commit).
+- You want fleet coordination without standing up a database or message broker — just a private GitHub repo.
+
+If you only run Sutando on one machine, you don't need this.
+
+## Setup (one-time, per machine)
+
+1. **Create a private GitHub repo** for your workspace (any name, e.g. `your-org/your-workspace`). The workspace tree will be pushed there as branches; you don't need to scaffold any contents.
+
+2. **Configure the vault URL.** Either:
+   - **Preferred:** `sutando.config.local.json` under `vault.remote_url` (per-clone, gitignored):
+     ```json
+     {
+       "vault": {
+         "remote_url": "https://github.com/your-org/your-workspace.git"
+       }
+     }
+     ```
+   - **OR:** pass `--vault-url <url>` per invocation
+   - **Legacy:** `.env` with `SUTANDO_MEMORY_REPO=https://github.com/your-org/your-workspace.git` (honored for the deprecation window; see [Migration from `sync-memory.sh`](#migration-from-sync-memorysh) below)
+
+3. **Initialize the workspace as a git repo:**
+   ```bash
+   bash scripts/sync-workspace.sh --init
+   ```
+   First run sets the workspace tree up as a git working copy, points at the configured remote, and pushes whatever's locally on disk as the initial commit on the per-host branch.
+
+4. **Add a cron entry** to run every 10–30 minutes:
+   ```cron
+   */15 * * * * cd /path/to/sutando && bash scripts/sync-workspace.sh
+   ```
+
+Repeat the same steps on every machine in the fleet. All clone the same `vault.remote_url`. Each machine pushes to its own branch named `host/<hostname>/<wsId>` (per [#1459](https://github.com/sonichi/sutando/pull/1459)); the merge across branches happens on next pull.
+
+## What gets synced
+
+The workspace tree is the unit of sync. Every file under `<workspace>/` is potentially trackable; the per-clone `.gitignore` and the workspace's own gitignore determine what actually flows.
+
+| Source | Synced to | Notes |
+|---|---|---|
+| `<sutando workspace>/` (everything not excluded) | Single private repo (`vault.remote_url`), branch `host/<hostname>/<wsId>` per workspace | Workspace IS the working tree. Per-host branch + automatic merge across hosts. |
+| `<workspace>/.claude-sutando/projects/<slug>/memory/` | Same repo, same branch | Claude Code auto-memory files synced alongside notes + state. |
+| `<workspace>/notes/` | Same repo, same branch | Long-form notes. No symlink needed — they're already in the workspace tree. |
+
+## What does NOT get synced
+
+**Defaults — never tracked:**
+
+- **Per-host runtime state** — `state/auth/` (per-host install / device identity — never tracked, never overwritten by sync), `core-status.json`, `contextual-chips.json`, `.env` files. These are local to each machine.
+- **Build artifacts** — generated videos, screenshots, derived caches.
+- **Anything in the workspace's `.gitignore`** (or `.git/info/exclude`, per [#1460](https://github.com/sonichi/sutando/pull/1460)).
+
+**Customize per workspace** — `sync-workspace.sh` reads `vault.sync.include` and `vault.sync.exclude` from `sutando.config.local.json` to extend or contract what's tracked. The carrier writes these patterns into the workspace's gitignore on each sync tick (mechanism: [#1447](https://github.com/sonichi/sutando/pull/1447)).
+
+```json
+{
+  "vault": {
+    "remote_url": "https://github.com/your-org/your-workspace.git",
+    "sync": {
+      "include": ["custom-research/", "drafts/"],
+      "exclude": ["state/cache/", "data/large-snapshots/"]
+    }
+  }
+}
+```
+
+Patterns are standard gitignore syntax.
+
+## Conflict model
+
+Concurrent writes from two machines land on different branches (`host/<host-A>/<wsId>` and `host/<host-B>/<wsId>`); the merge happens locally on each host's next sync tick via git's standard 3-way merge. Same-file edits within the same minute on two hosts produce a normal git merge conflict that gets surfaced via stderr — `sync-workspace.sh` doesn't silently pick a winner.
+
+To avoid conflicts in the first place:
+
+- **Prefer append-only files** for shared state (`build_log.md`, `MEMORY.md` index entries).
+- **Avoid simultaneous edits** to the same memory file from two machines.
+- If you hit a conflict, the conflict markers appear in the file; resolve manually or `git reset --hard origin/host/<host>/<wsId>` to take the remote's version.
+
+First-cross-host pull is handled specially — [#1458](https://github.com/sonichi/sutando/pull/1458) catches the "unrelated histories" git error from the initial bootstrap and lets the pull proceed via `--allow-unrelated-histories`.
+
+## Config keys
+
+| Key | Default | Notes |
+|---|---|---|
+| `vault.remote_url` | (required) | git URL of your private workspace repo |
+| `vault.sync.include` | `[]` | extra gitignore-negation patterns to add to the carrier |
+| `vault.sync.exclude` | `[]` | extra gitignore patterns to add to the carrier |
+| `--vault-url` (CLI flag) | (overrides config) | per-invocation override |
+
+The workspace path is resolved via the standard helper (`bash scripts/sutando-config.sh workspace`); no separate sync-side configuration needed.
+
+## Migration from `sync-memory.sh`
+
+The legacy `scripts/sync-memory.sh` (rsync-to-`~/.sutando/memory-sync/`) is **deprecated** as of v0.3.0 and will be **removed in v0.4.0**. The script still works during the deprecation window but emits a stderr banner on each invocation.
+
+To migrate:
+
+1. **One-time per machine:**
+   ```bash
+   bash scripts/sync-workspace.sh --init
+   ```
+   This converts the workspace into a git repo + sets the remote.
+
+2. **Move vault URL out of `.env`:** delete `SUTANDO_MEMORY_REPO` from `.env`; add the URL to `sutando.config.local.json` under `vault.remote_url` (per the Setup section above). Per-invocation `--vault-url` also works.
+
+3. **Update cron:** replace any cron entry calling `sync-memory.sh` with one calling `sync-workspace.sh`. See `skills/schedule-crons/crons.example.json` for the new entry.
+
+4. **Verify** by checking that the per-host branch appears on the remote after the next cron tick.
+
+After the migration, you can safely remove `~/.sutando/memory-sync/` (the legacy clone) — the new flow doesn't use it.
+
+## Troubleshooting
+
+- **`sync-workspace: vault.remote_url not set` / `--vault-url missing`** — configure per the Setup section above.
+- **`Another sync already in progress, exiting.`** — A previous cron tick is still running. The script self-clears stale locks after 10 minutes; if you see this repeatedly, check `/tmp/sync-workspace.log` for the previous tick's error.
+- **`refusing to push to non-host branch '...'`** — Someone manually `git checkout`-ed a feature branch in the workspace clone. Switch back to your `host/<host>/<wsId>` branch.
+- **Push fails with auth error** — Check that your machine has push access to the vault repo (`gh auth status` if you use the GitHub CLI). Read-only clones won't push.
+- **Merge conflicts on every tick** — Two hosts editing the same file in tight loops. Use append-only patterns or coordinate edits.
+
+## Related
+
+- [`docs/workspace-config.md`](workspace-config.md) — how the workspace path itself is resolved (different concern from sync)
+- [`docs/workspace-contract.md`](workspace-contract.md) — the workspace data contract
+- [`docs/release-process.md`](release-process.md) — when the next-version cuts that deprecate `sync-memory.sh` will land
