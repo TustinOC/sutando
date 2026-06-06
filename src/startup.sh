@@ -7,6 +7,24 @@ set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+# Belt-and-suspenders startup log → always recoverable from /tmp (Lucy's Bug #5
+# from Maddy v0.8 migration report, 2026-06-06 #design). The footgun: operator
+# runs `nohup bash src/startup.sh > $SUTANDO_WORKSPACE/logs/startup-<ts>.log 2>&1 &`
+# over SSH. Mid-run the v0.8 auto-migration `rm -rf`'s the legacy workspace dir
+# the redirect was pointing at → log vanishes mid-write, postmortem impossible.
+#
+# Fix: also tee stdout + stderr to /tmp/sutando-startup-<ts>.log so a copy
+# survives regardless of what the operator pointed their own redirect at. The
+# tee path is announced early so operators always know where to look.
+#
+# Opt out with SUTANDO_STARTUP_NO_LOG=1 (e.g. when running inside a test
+# harness that handles its own output capture).
+if [ "${SUTANDO_STARTUP_NO_LOG:-0}" != "1" ]; then
+  _STARTUP_LOG="/tmp/sutando-startup-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  echo "📓 startup log → $_STARTUP_LOG" >&2
+  exec > >(tee -a "$_STARTUP_LOG") 2> >(tee -a "$_STARTUP_LOG" >&2)
+fi
+
 # Export workspace root so child processes (skills, gather scripts, etc.) can
 # resolve "the Sutando workspace" without walking dirname-relative paths that
 # break when the script is invoked via a userSettings hardlink. Picked up by
@@ -108,7 +126,19 @@ if [ -n "${SUTANDO_WORKSPACE:-}" ]; then
   _ws_new="$(bash "$REPO/scripts/sutando-config.sh" workspace 2>/dev/null || true)"
   _migrate_sentinel="${_ws_new}/state/auth/migrated-from-env.txt"
 
+  # Bug #2 fix (Lucy's Maddy report 2026-06-06): also honor sutando-migrate.sh's
+  # OWN per-source sentinels (`state/.migrated-from-<tag>-<backup_id>`) — created
+  # when the operator runs `sutando-migrate --commit` manually instead of letting
+  # startup.sh auto-trigger it. Without this, manual-migrate flows leave SUTANDO_WORKSPACE
+  # set + legacy dir non-empty (migrate copies but doesn't rm legacy — only startup
+  # does that), so each boot re-fires the auto-migration loop.
+  _migrate_script_sentinels_present=0
+  if [ -n "$_ws_new" ] && ls "$_ws_new"/state/.migrated-from-* >/dev/null 2>&1; then
+    _migrate_script_sentinels_present=1
+  fi
+
   if [ -n "$_ws_new" ] && [ ! -f "$_migrate_sentinel" ] \
+     && [ "$_migrate_script_sentinels_present" = "0" ] \
      && [ -d "$_ws_legacy" ] && [ -n "$(ls -A "$_ws_legacy" 2>/dev/null)" ]; then
 
     _legacy_real="$(_realpath "$_ws_legacy")"
