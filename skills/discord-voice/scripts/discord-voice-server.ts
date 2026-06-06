@@ -166,6 +166,28 @@ if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
 	console.warn(`[NameGate] ⚠ meeting-mode ON but NO aliases for "${STAND_NAME}" — the gate will only break silence on the EXACT word "${STAND_NAME}". ASR variants (e.g. "${STAND_NAME}ie") will NOT wake it and audio stays suppressed. Set SUTANDO_STAND_ALIASES.`);
 }
 
+// Single source of truth for the audio OUTPUT gate: "should this turn's audio be
+// emitted?". This is DISTINCT from summon/mode name-control (the tool name-gate +
+// meeting-enter gates), which stays name-gated — only conversation output is
+// any-human. Unifies the four conditions that were inlined in handleAudioOutput.
+// Post bodhi #20 this same function is handed to the VoiceSession as
+// `config.shouldEmitAudio`, letting the handleAudioOutput monkey-patch be deleted.
+// Policy (Susan 2026-06-06): in ACTIVE mode answer ANY human — bots are filtered
+// at the input layer (speaking.start, before s.lastSpeaker is set), so a set
+// lastSpeaker is always a human; the latch keeps an in-progress reply going. In
+// MEETING mode stay silent UNLESS summoned by name (s.gate.lastAddressedToMe).
+function shouldEmitAudio(s: any, nowMs: number): boolean {
+	if (s.allowAckAudible) return true;                       // mode-switch ack — always heard
+	if (nowMs < (s._forceAudibleUntil || 0)) return true;     // #1456 force-audible window after a mode switch
+	if (!s.meetingMode) {
+		// Active mode: emit iff a human just spoke (or the in-reply latch is held).
+		const withinWindow = s._turnAudioAllowed || !!s.lastSpeaker;
+		return VOICE_CONTROLLER ? withinWindow : true;
+	}
+	// Meeting mode: silent unless summoned by name (the name-gate we keep).
+	return s.gate?.lastAddressedToMe === true;
+}
+
 // Meeting mode — suppresses bot audio output while keeping transcription + sqlite running.
 // Mirrors src/voice-agent.ts `meetingActive` behaviour for the discord-voice surface.
 // Manual: poll state/voice-mode.txt (same file the menu-bar app + voice-agent write).
@@ -1451,31 +1473,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// Gemini this turn, NOT just chunks pushed. Without this, an ack suppressed from its
 			// FIRST chunk logged nothing — indistinguishable from "Gemini emitted no audio at all".
 			(s as any)._recvThisTurn = ((s as any)._recvThisTurn || 0) + 1;
-			// Sticky: open while the controller is addressing the bot (_addressedToMe) and has spoken within
-			// the window (refreshed on every controller utterance, so it only lapses on a long
-			// silence or after the controller yields to a peer). The latch keeps an in-progress reply going.
-			// #1456 (confirmed via the `✂ MUTED from start … addressedToMe=false
-		// sinceNamed=<epoch>` observability log): ACTIVE-mode gate keys on the controller's SPEAKER-ID, not
-		// name-text. STT mangles the bot's name (e.g. into unrelated tokens) — the root of the whole mute saga —
-		// so requiring a name-match to open is fundamentally unreliable. By speaker-id it is
-		// deterministic: in active mode the bot speaks iff a HUMAN is who just spoke.
-		// (2026-06-06) Owner→human: the gate no longer keys on VOICE_CONTROLLER's id —
-		// it answers ANY human, not just the owner. Bots can't be the speaker here:
-		// speaking.start (L1838) drops non-allowlisted bots BEFORE s.lastSpeaker is set
-		// (L1847), so a set lastSpeaker is always a human. So "a human just spoke" ==
-		// lastSpeaker is set. The latch keeps an in-progress reply going. An explicit
-		// standby flips meetingMode (handled by the meeting branch), so "go quiet" still
-		// works. Meeting-mode WAKE still uses the name-gate (separate branch).
-		const _humanIsSpeaker = !!(s as any).lastSpeaker;  // bots already filtered at input (L1838)
-		const _withinNameWindow = (s as any)._turnAudioAllowed || _humanIsSpeaker;
-			const _audioOpen = s.allowAckAudible
-				|| (_nowMs < ((s as any)._forceAudibleUntil || 0))  // #1456: force-audible window after a mode switch (ack guaranteed heard)
-				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true))
-				// Meeting mode wakes on NAME: stay audible while the gate marks the bot as
-				// addressed (s.gate.lastAddressedToMe — set true by a name-summon, false by
-				// standby). Without this branch, a meeting-mode bot stayed muted even when
-				// summoned (2026-06-06 live meeting: flood of "MUTED from start … addressedToMe=true").
-				|| (s.meetingMode && s.gate?.lastAddressedToMe === true);
+			// Audio OUTPUT gate — one call, one source of truth (shouldEmitAudio, defined
+			// near VOICE_CONTROLLER). Active mode answers ANY human; meeting mode stays
+			// silent unless summoned by name. Summon/mode name-control is unchanged (it
+			// lives in the tool + meeting-enter gates). Post bodhi #20 this same function
+			// is passed as config.shouldEmitAudio and this monkey-patch path is deleted.
+			const _audioOpen = shouldEmitAudio(s, _nowMs);
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
 				(s as any)._lastAudioTs = _nowMs;
