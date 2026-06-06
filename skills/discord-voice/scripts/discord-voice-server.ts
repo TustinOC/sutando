@@ -1458,13 +1458,16 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		// sinceNamed=<epoch>` observability log): ACTIVE-mode gate keys on the controller's SPEAKER-ID, not
 		// name-text. STT mangles the bot's name (e.g. into unrelated tokens) — the root of the whole mute saga —
 		// so requiring a name-match to open is fundamentally unreliable. By speaker-id it is
-		// deterministic: in active mode the bot speaks iff the CONTROLLER is who just spoke
-		// (s.lastSpeaker === VOICE_CONTROLLER) — a peer speaking keeps it muted ("answer the
-		// owner only"). The latch keeps an in-progress reply going. An explicit standby flips
-		// meetingMode (handled by the meeting branch), so "go quiet" still works. Meeting-mode
-		// WAKE still uses the name-gate (separate branch); only active-mode output is by id.
-		const _controllerIsSpeaker = (s as any).lastSpeaker === VOICE_CONTROLLER;
-		const _withinNameWindow = (s as any)._turnAudioAllowed || _controllerIsSpeaker;
+		// deterministic: in active mode the bot speaks iff a HUMAN is who just spoke.
+		// (2026-06-06) Owner→human: the gate no longer keys on VOICE_CONTROLLER's id —
+		// it answers ANY human, not just the owner. Bots can't be the speaker here:
+		// speaking.start (L1838) drops non-allowlisted bots BEFORE s.lastSpeaker is set
+		// (L1847), so a set lastSpeaker is always a human. So "a human just spoke" ==
+		// lastSpeaker is set. The latch keeps an in-progress reply going. An explicit
+		// standby flips meetingMode (handled by the meeting branch), so "go quiet" still
+		// works. Meeting-mode WAKE still uses the name-gate (separate branch).
+		const _humanIsSpeaker = !!(s as any).lastSpeaker;  // bots already filtered at input (L1838)
+		const _withinNameWindow = (s as any)._turnAudioAllowed || _humanIsSpeaker;
 			const _audioOpen = s.allowAckAudible
 				|| (_nowMs < ((s as any)._forceAudibleUntil || 0))  // #1456: force-audible window after a mode switch (ack guaranteed heard)
 				|| (!s.meetingMode && (VOICE_CONTROLLER ? _withinNameWindow : true))
@@ -1492,7 +1495,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// never opened. Distinguishing them needs recv-count + forceAudible in the reason.
 				const _sinceNamed = _nowMs - ((s as any)._controllerNamedAt || 0);
 				const _forceAudible = _nowMs < ((s as any)._forceAudibleUntil || 0);
-				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} forceAudible=${_forceAudible} ctrlIsSpeaker=${(s as any).lastSpeaker === VOICE_CONTROLLER} lastSpeaker=${(s as any).lastSpeaker} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} recv=${(s as any)._recvThisTurn}`;
+				const _reason = `meetingMode=${s.meetingMode} allowAck=${!!s.allowAckAudible} forceAudible=${_forceAudible} humanSpoke=${!!(s as any).lastSpeaker} lastSpeaker=${(s as any).lastSpeaker} addressedToMe=${s.gate?.lastAddressedToMe ?? 'n/a'} recv=${(s as any)._recvThisTurn}`;
 				if ((s as any)._wasPlaying) {
 					(s as any)._wasPlaying = false;
 					console.log(`${ts()} [Audio] ✂ SUPPRESSED mid-reply — ${_reason} (chunks so far=${outChunks})`);
