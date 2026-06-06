@@ -588,6 +588,7 @@ DELETE_SOURCE=0
 FORCE=0
 ROLLBACK_ID=""
 NO_CONFIRM=0
+NO_CLAUDE_IMPORT=0
 
 EXPLAIN_PATH=""
 while [ $# -gt 0 ]; do
@@ -615,6 +616,7 @@ while [ $# -gt 0 ]; do
         --respect-env) RESPECT_ENV=1; shift ;;
         --backup-id) ROLLBACK_ID="$2"; shift 2 ;;
         --no-confirm|--yes|-y) NO_CONFIRM=1; shift ;;  # skip pre-flight prompt (for CI / scripted runs)
+        --no-claude-import) NO_CLAUDE_IMPORT=1; shift ;;  # skip auto-invocation of sutando-shell-setup.sh --import after commit (advanced; see Lucy's Maddy report 2026-06-06)
         --help|-h)
             sed -n '1,80p' "${BASH_SOURCE[0]}"
             exit 0
@@ -1542,6 +1544,98 @@ commit_main() {
     # sutando-plus/scripts/sutando-migrate-sync.sh — runs AFTER this commit
     # succeeds, only relevant to sutando-plus users who have a vault remote at
     # the customized source location.
+
+    # Auto-invoke Claude memory import — fixes Lucy's Maddy migration report
+    # 2026-06-06: previously sutando-migrate set up the M2 directories but did
+    # NOT copy `~/.claude/projects/<slug>/*` into `<workspace>/.claude-sutando/
+    # projects/<slug>/*`. Users assumed migrate moved their Claude Code memory;
+    # it didn't, leaving the real ~517-file memory at the legacy `~/.claude/`
+    # location and a 181-byte stub at the new location. Now `commit_main` ends
+    # with the same `--import` rsync that worked for owner's setup (when run
+    # manually). Idempotent — rsync skips files already up-to-date at dest, so
+    # re-running migrate is safe. Opt out with `--no-claude-import` for tests
+    # or advanced users with custom claude-config-dir layouts.
+    #
+    # Skipped on phase-2 delete-only runs (DELETE_SOURCE=1 with $ROLLBACK_ID
+    # set means the copy walk was already done in an earlier pass).
+    if [ "$NO_CLAUDE_IMPORT" = "0" ] && [ "$DELETE_SOURCE" = "0" ]; then
+        local _import_script="$(dirname "$0")/sutando-shell-setup.sh"
+        if [ -x "$_import_script" ] || [ -f "$_import_script" ]; then
+            echo
+            echo "sutando-migrate: invoking sutando-shell-setup.sh --import to copy Claude memory ..."
+            if bash "$_import_script" --import; then
+                echo "  Claude memory import: ok"
+            else
+                local _rc=$?
+                # Don't hard-fail the migrate on import failure — the per-file
+                # workspace migration completed successfully; the user can
+                # re-run `--import` manually. Surface the failure so they know
+                # to address it.
+                echo "  Claude memory import: FAILED (rc=$_rc) — re-run manually: bash scripts/sutando-shell-setup.sh --import" >&2
+            fi
+        else
+            echo "  Claude memory import: skipped (scripts/sutando-shell-setup.sh not found at expected path; run --import manually after migrate)"
+        fi
+    fi
+
+    # Slug-rename bridge — runs independently of the --import call above so
+    # the test (and production --no-claude-import users) still get the bridge.
+    # Skipped only on phase-2 delete-only runs (no copy walk happened).
+    if [ "$DELETE_SOURCE" = "0" ]; then
+        # Addresses Lucy's #design follow-up 2026-06-06:
+        # `--import` rsyncs same-slug, but if the user's invocation CWD
+        # changed between pre-M0 (CWD=<repo>) and post-M0 (CWD=<workspace>),
+        # the slug Claude reads from gains a `-workspace` suffix (or similar
+        # subdir-derived suffix). The same-slug rsync leaves files at the OLD
+        # slug while Claude looks at the NEW slug → stub-only at the read
+        # path.
+        #
+        # Symptomatic detection: scan `<dest>/.claude-sutando/projects/` for
+        # populated-vs-stub mismatches sharing a slug prefix. If
+        # `<base-slug>/memory/` is populated AND `<base-slug>-<suffix>/memory/`
+        # is a stub (≤1 .md file), bridge by `cp -an` populated → stub.
+        # This is symptom-driven (no hardcoded `-workspace` suffix) and
+        # handles any subdir-derived slug variant.
+        local _claude_dir="$DEST_REAL/.claude-sutando"
+        local _projects_dir="$_claude_dir/projects"
+        if [ -d "$_projects_dir" ]; then
+            local _bridged_count=0
+            local _populated_dir _base_slug _populated_count _variant_dir _variant_count
+            for _populated_dir in "$_projects_dir"/*; do
+                [ -d "$_populated_dir/memory" ] || continue
+                _base_slug="$(basename "$_populated_dir")"
+                _populated_count="$(find "$_populated_dir/memory" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
+                # Skip stubs themselves
+                [ "$_populated_count" -lt 2 ] && continue
+                # Find variant slugs sharing the prefix
+                for _variant_dir in "$_projects_dir/${_base_slug}-"*; do
+                    [ -d "$_variant_dir/memory" ] || continue
+                    _variant_count="$(find "$_variant_dir/memory" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
+                    if [ "$_variant_count" -lt 2 ]; then
+                        local _variant_slug
+                        _variant_slug="$(basename "$_variant_dir")"
+                        echo "  Claude memory bridge: $_base_slug → $_variant_slug ($_populated_count files; stub had $_variant_count)"
+                        # `cp -a` (NO -n) — clobber the stub by design. Per
+                        # Lucy + Chi (Maddy v0.8 validation 2026-06-06):
+                        # the gate condition `_variant_count<2` already
+                        # restricts to confirmed stubs (typically just a
+                        # 181-byte placeholder MEMORY.md Claude wrote on
+                        # first read). `cp -an` left that stub in place,
+                        # so the user's ~73KB real MEMORY.md (the memory
+                        # INDEX) never made it across — silent data-loss-
+                        # equivalent for the index file. Dropping `-n`
+                        # makes the populated source authoritative for ALL
+                        # files at the variant slug.
+                        cp -a "$_populated_dir/memory/"*.md "$_variant_dir/memory/" 2>/dev/null || true
+                        _bridged_count=$((_bridged_count+1))
+                    fi
+                done
+            done
+            if [ "$_bridged_count" -eq 0 ]; then
+                echo "  Claude memory bridge: no stub-vs-populated mismatches detected (Claude reads same slug as source)"
+            fi
+        fi
+    fi  # DELETE_SOURCE gate for slug-rename bridge
 
     echo
     echo "sutando-migrate: COMMIT complete. Verify with: bash scripts/sutando-migrate.sh verify"
