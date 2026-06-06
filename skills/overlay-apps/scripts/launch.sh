@@ -11,14 +11,8 @@ set -e
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_SRC="$SKILL_DIR/app"
 REPO_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
-# Workspace resolution goes through the canonical loader (M0 cutover).
-# Fallback to the legacy inline default keeps the script working if the
-# wrapper isn't present (e.g. skill installed outside a sutando checkout).
-if [ -f "$REPO_ROOT/scripts/sutando-config.sh" ]; then
-  WORKSPACE="$(bash "$REPO_ROOT/scripts/sutando-config.sh" workspace)"
-else
-  WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
-fi
+# Workspace resolution via the canonical M0 helper.
+WORKSPACE="$(bash "$REPO_ROOT/scripts/sutando-config.sh" workspace)"
 APP_DIR="$WORKSPACE/overlay-apps/benchmark-overlay"
 
 mkdir -p "$APP_DIR"

@@ -13,11 +13,10 @@ set -o pipefail   # so `cmd | grep ... || say "(none)"` actually fires when cmd 
 
 # REPO: env wins IF it's a valid M0 checkout, else probe common layouts.
 # Validity check is M0-aware (scripts/sutando-config.sh must exist) — without
-# it, the catchup script blindly trusted SUTANDO_REPO_DIR pointing at a
-# stale submodule pin (e.g. sutando-plus/sutando) that pre-dated M0, then
-# fell through to the legacy $HOME/.sutando/workspace fallback for WS.
-# Symptom: catchup briefing listed tasks under ~/.sutando/workspace/tasks/
-# while the running session was reading the in-repo workspace.
+# it, the catchup script could blindly trust SUTANDO_REPO_DIR pointing at a
+# stale submodule pin (e.g. sutando-plus/sutando) that pre-dated M0, leading
+# the catchup briefing to read workspace state that doesn't match the
+# running session.
 # Probing means a checkout at $HOME/Desktop/sutando OR $HOME/Documents/sutando/sutando OR $(pwd)
 # all Just Work without per-user env. (Was a hardcoded /Users/xueqingliu/...
 # path pre-review; fixed per qingyun-wu + Mini's #1056 review.)
@@ -42,16 +41,8 @@ if [ -z "$REPO" ]; then
   fi
   REPO="${REPO:-$HOME/Desktop/sutando}"   # last-ditch convention
 fi
-# Workspace resolution goes through the canonical M0 loader. We just gated
-# REPO on having the helper, so the else-branch is for the unusual case where
-# the env-fallback above accepted an invalid SUTANDO_REPO_DIR.
-if [ -f "$REPO/scripts/sutando-config.sh" ]; then
-  WS="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
-else
-  # No M0 helper reachable. Honor SUTANDO_WORKSPACE if explicitly set,
-  # otherwise fall back to the pre-M0 canonical default (legacy installs).
-  WS="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
-fi
+# Workspace resolution via the canonical M0 helper. REPO was gated above.
+WS="$(bash "$REPO/scripts/sutando-config.sh" workspace)"
 # Hours window: positional arg wins (so /catchup-after-startup 12 works as
 # documented), env var second, default 3h. Pre-review the script only read
 # CATCHUP_HOURS — the documented `[hours]` arg was silently ignored (Mini #1).
