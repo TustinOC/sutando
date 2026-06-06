@@ -51,7 +51,7 @@ Skill-PR destination: a skill is **coupled** (PR to `sonichi/sutando`) if it imp
 
 ## Workspace contract
 
-Sutando's file state lives in two concentric spaces (with the repo as the inferred container): **State** (the workspace — resolved via `bash scripts/sutando-config.sh workspace`; default `<repo>/workspace/`) and **Memory** (`$SUTANDO_MEMORY_DIR`, user-content synced across the fleet — legacy alias `$SUTANDO_PRIVATE_DIR` honored for one release per #870). The code itself (`<repo>/src/`, `<repo>/scripts/`, `<repo>/skills/`) is just "where this checkout is" — inferred, not configured. See [`docs/workspace-design.md`](docs/workspace-design.md) for the mental model + "Quick decision: which space?" flowchart when adding new code or data.
+Sutando's file state lives in two top-level spaces (with the repo as the inferred container): **Code** (`<repo>/src/`, `<repo>/scripts/`, `<repo>/skills/` — where this checkout is, inferred not configured) and **Workspace** (resolved via `bash scripts/sutando-config.sh workspace`; default `<repo>/workspace/`; configurable via `sutando.config.local.json`). All per-user state — `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, **memory** (`<workspace>/.claude-sutando/projects/<slug>/memory/`), `build_log.md`, `pending-questions.md`, etc. — lives under the workspace; sync is a property of sub-paths (configured via `vault.sync.*` in `sutando.config.local.json`), not a separate container. The `$SUTANDO_MEMORY_DIR` env override is still honored for the memory sub-path (legacy alias `$SUTANDO_PRIVATE_DIR` for one release per #870). See [`docs/workspace-design.md`](docs/workspace-design.md) for the mental model + "Quick decision: which sub-path?" flowchart when adding new code or data.
 
 All per-user mutable state — `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md`, etc. — lives under a single **workspace** directory. Loose status/state `.json` files (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`) live under `state/`; the workspace root holds only the top-level directories. Code, skills source, and repo configuration stay in the repo root (separate concern).
 
@@ -166,13 +166,15 @@ in #design 2026-06-02.
 
 ## Memory
 
-Full memory index: $SUTANDO_MEMORY_DIR (default: $CLAUDE_CONFIG_DIR/projects/.../memory)/MEMORY.md
+Memory lives at `<workspace>/.claude-sutando/projects/<slug>/memory/` (a sub-path of the workspace per the 2-space contract above). The `$SUTANDO_MEMORY_DIR` env override is honored if set; otherwise the path is computed from the resolved workspace.
+
+Full memory index: `<workspace>/.claude-sutando/projects/<slug>/memory/MEMORY.md`
 
 Key files:
-- User profile: $SUTANDO_MEMORY_DIR (default: $CLAUDE_CONFIG_DIR/projects/.../memory)/user_profile.md
-- Feedback (response style): $SUTANDO_MEMORY_DIR (default: $CLAUDE_CONFIG_DIR/projects/.../memory)/feedback_response_style.md
-- Feedback (operating principle): $SUTANDO_MEMORY_DIR (default: $CLAUDE_CONFIG_DIR/projects/.../memory)/feedback_minimal_cost_max_value.md
-- Build log (what's built, what's next): build_log.md
+- User profile: `<workspace>/.claude-sutando/projects/<slug>/memory/user_profile.md`
+- Feedback (response style): `<workspace>/.claude-sutando/projects/<slug>/memory/feedback_response_style.md`
+- Feedback (operating principle): `<workspace>/.claude-sutando/projects/<slug>/memory/feedback_minimal_cost_max_value.md`
+- Build log (what's built, what's next): `<workspace>/build_log.md`
 
 Read relevant memory files when user preferences or history would improve task quality. Write new memory when you learn something durable about the user or the project.
 
@@ -294,8 +296,8 @@ When the user says "learn this", "remember my preference", "I always do it this 
 
 1. **Extract the durable fact.** What is the user teaching? A preference, a workflow, a style choice, a correction?
 2. **Classify it:**
-   - *Preference* → update `$SUTANDO_MEMORY_DIR (default: $CLAUDE_CONFIG_DIR/projects/.../memory)/user_profile.md` (add to "Observed additions")
-   - *Feedback/correction* → create or update a feedback memory file in `$SUTANDO_MEMORY_DIR (default: $CLAUDE_CONFIG_DIR/projects/.../memory)/feedback_*.md`
+   - *Preference* → update `<workspace>/.claude-sutando/projects/<slug>/memory/user_profile.md` (add to "Observed additions")
+   - *Feedback/correction* → create or update a feedback memory file at `<workspace>/.claude-sutando/projects/<slug>/memory/feedback_*.md`
    - *Process/workflow* → save as a note in `notes/` with tag `[workflow, learned]`
 3. **Update the memory index** `MEMORY.md` if a new file was created.
 4. **Confirm briefly** what was learned: "Got it — I'll [do X] from now on."
