@@ -4,7 +4,7 @@
 
 The workspace defaults to `<repo>/workspace/` (in-repo). Configuration goes through [`sutando.config.local.json`](docs/workspace-config.md) — the loader resolves the path with a clear precedence order (config file > legacy env var > baked-in default).
 
-**For existing users** with `SUTANDO_WORKSPACE` set in `.env` or shell init: the env var is still honored, and you'll see a one-time deprecation warning at startup pointing you at the config file. No action required for now; migrate when convenient.
+**For existing users** with `SUTANDO_WORKSPACE` set in `.env` or shell init: the env var is **no longer honored for workspace resolution** as of v0.8 / #1440. It is still detected on startup to fire a one-time deprecation warning and trigger one-time auto-migration via per-source sentinels (PR #1478), but the resolver itself ignores its value. Remove the export from your shell init when convenient — see step 2 of the pre-migration operator checklist below — otherwise the deprecation banner keeps firing on every shell.
 
 **For users with state in the old default location** (`~/.sutando/workspace/`): the migration script + skill is available now. Run `bash scripts/sutando-migrate.sh --dry-run` to preview, then `--commit` to relocate. Sources are preserved by default; cleanup via `--delete-source` after a 30-day grace window where readers fall back to the legacy location.
 
