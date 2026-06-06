@@ -57,9 +57,9 @@ The workspace tree is the unit of sync. Every file under `<workspace>/` is poten
 
 - **Per-host runtime state** — `state/auth/` (per-host install / device identity — never tracked, never overwritten by sync), `core-status.json`, `contextual-chips.json`, `.env` files. These are local to each machine.
 - **Build artifacts** — generated videos, screenshots, derived caches.
-- **Anything in the workspace's `.gitignore`** (or `.git/info/exclude`, per [#1460](https://github.com/sonichi/sutando/pull/1460)).
+- **Anything in `<workspace>/.git/info/exclude`** — this is where the carrier writes its sync rules as of [#1460](https://github.com/sonichi/sutando/pull/1460), so the workspace's user-tracked `.gitignore` stays clean of system-level excludes.
 
-**Customize per workspace** — `sync-workspace.sh` reads `vault.sync.include` and `vault.sync.exclude` from `sutando.config.local.json` to extend or contract what's tracked. The carrier writes these patterns into the workspace's gitignore on each sync tick (mechanism: [#1447](https://github.com/sonichi/sutando/pull/1447)).
+**Customize per workspace** — `sync-workspace.sh` reads `vault.sync.include` and `vault.sync.exclude` from `sutando.config.local.json` to extend or contract what's tracked. The carrier writes these patterns into `<workspace>/.git/info/exclude` on each sync tick (mechanism: [#1447](https://github.com/sonichi/sutando/pull/1447) + [#1460](https://github.com/sonichi/sutando/pull/1460) — not the workspace's `.gitignore`, to avoid leaking the carrier-set rules into operator-tracked state).
 
 ```json
 {
@@ -143,19 +143,19 @@ Adopting sync-workspace.sh on an existing Sutando install is a structural migrat
 3. `bash scripts/sutando-migrate.sh --commit` → real migration.
 4. `bash scripts/sync-workspace.sh --init` → workspace becomes git repo.
 5. Restart bridges + voice-agent + Sutando.app.
-6. Verify: `bash src/health-check.py` reports all paths via M0 helper cleanly.
+6. Verify: `python3 src/health-check.py` reports all paths via M0 helper cleanly.
 7. **Verify sync hygiene:** immediately after `core_heartbeat.py` writes its first `.alive`, run `cd <workspace> && git status` — should show no changes (heartbeat files must be excluded). If not, fix exclusion rules before pushing.
 8. Next host.
 
 Why serial: branch D/F collisions are possible on simultaneous first-pushes pre-#1463; serial avoids the race entirely.
 
-### Known issues from prior migrations (workarounds during the v0.3.0 deprecation window)
+### What used to break (resolved in v0.3.0 — historical reference)
 
-These are tracked separately from this doc (see open issues against `sonichi/sutando` tagged `workspace-migration`); listed here so users hitting them recognize the symptoms:
+The three migration symptoms below were observed pre-v0.3.0 and all shipped fixes in this release. Listed here so anyone debugging an older migration recognizes the pattern; if you're running v0.3.0 or later, none of these apply:
 
-- **Claude memory not auto-moved.** Migrate creates `<ws>/.claude-sutando/projects/<slug>/memory/` stub but the real memory may stay at `~/.claude/projects/<slug-without-"-workspace">/memory/` (slug changes because the project path gains `/workspace`). **Workaround:** after migrate, `rsync -a ~/.claude/projects/<old-slug>/memory/ <ws>/.claude-sutando/projects/<new-slug>/memory/` then re-verify.
-- **`sync-workspace.sh` plain run (no `--init`) silently commits the entire workspace** — including `data/(sqlite)`, session logs, video. **Workaround:** always run `--init` first on each host; check `git ls-files | head -20` before the first plain run to confirm gitignore is taking effect.
-- **First migration on a host with `SUTANDO_WORKSPACE` set in `.env`** re-migrates every boot until the env line is removed. **Workaround:** comment out the env line in `.env` post-migrate.
+- **Claude memory not auto-moved** — Fixed by [#1475](https://github.com/sonichi/sutando/pull/1475): `sutando-migrate --commit` now auto-invokes `--import` to copy `~/.claude/projects/<slug>/memory/` into `<ws>/.claude-sutando/projects/<slug>/memory/`, with a slug-rename bridge for the `<repo-slug>` → `<repo-slug>-workspace` variant.
+- **`sync-workspace.sh` plain run silently commits the entire workspace** — Fixed by [#1483](https://github.com/sonichi/sutando/pull/1483): the script now refuses push/pull when `.git` is present but sync was never initialized, with a clear error directing operators to run `--init` first.
+- **First migration with `SUTANDO_WORKSPACE` set re-migrates every boot** — Fixed by [#1478](https://github.com/sonichi/sutando/pull/1478): `src/startup.sh` honors `sutando-migrate`'s per-source sentinels (`state/.migrated-from-<tag>-<id>`), suppressing the re-migrate loop when the env var is still set in shell rc after a manual migration. The residual deprecation banner keeps firing until the env line is removed — see step 2 of the [pre-migration operator checklist](../KNOWN_ISSUES.md).
 
 ## Troubleshooting
 

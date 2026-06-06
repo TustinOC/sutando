@@ -10,10 +10,10 @@
 
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, appendFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { resolveWorkspace } from './workspace_default.js';
+import { claudeHomePath } from './util_paths.js';
 import { recordConversation, recordSessionBoundary } from './conversation-store.js';
 
 const REPO_DIR = resolveWorkspace();
@@ -258,8 +258,7 @@ export const workTool: ToolDefinition = {
 				const video = execFileSync('/bin/sh', ['-c', 'ls -t /tmp/sutando-recording-*-narrated-subtitled.mov /tmp/sutando-recording-*-narrated.mov /tmp/sutando-recording-*.mov 2>/dev/null | head -1'], { timeout: 3000 }).toString().trim();
 				if (image && video) {
 					// execFileSync argv array bypasses shell — image/video paths are separate args, no interpolation (fixes #1451)
-					const claudeCfgDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
-					const scriptPath = resolve(join(claudeCfgDir, 'skills/video-concat/scripts/prepend-image.sh'));
+					const scriptPath = resolve(claudeHomePath('skills', 'video-concat', 'scripts', 'prepend-image.sh'));
 					const result = execFileSync('bash', [scriptPath, image, video, '3'], { timeout: 60000 }).toString().trim();
 					const parsed = JSON.parse(result);
 					return { status: 'done', result: `Video with image prepended: ${parsed.output} (${parsed.size_mb}MB)` };
