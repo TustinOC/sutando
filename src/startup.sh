@@ -48,6 +48,38 @@ if [ -x "$REPO/scripts/sutando-config.sh" ]; then
   _ccd_err="$(mktemp -t startup-ccd.XXXXXX)"
   if _ccd="$(bash "$REPO/scripts/sutando-config.sh" claude-sutando-config-dir 2>"$_ccd_err")"; then
     mkdir -p "$_ccd"
+    # Auth-carry (v0.8 cold-start fix). Seed credentials + onboarding state from
+    # $HOME/.claude/ so a cold `claude` core doesn't dead-end at the login wall
+    # (.credentials.json) or trust-folder prompt (.claude.json) before reaching
+    # /schedule-crons. Idempotent — only copies when the per-runtime dir lacks
+    # the file. Without this, the watcher never starts on a fresh node (see
+    # Lucy's #design 2026-06-06 17:12Z heads-up, Bug 1).
+    #
+    # Single-tenant assumption (Pro 21:18Z + Lucy 21:25Z reviews on PR #1496):
+    # this whole-file copy binds the per-runtime dir to whatever account
+    # $HOME/.claude owns — .claude.json carries `oauthAccount`, `userID`, the
+    # `projects` map (per-dir history + MCP approval state), and `mcpServers`.
+    # Fine for the current single-user-Mac reality. If per-runtime ever means
+    # per-account, narrow this carry to onboarding flags only.
+    #
+    # Sync caveat: if CLAUDE_CONFIG_DIR lives under workspace/ and
+    # workspace-sync is on, .claude.json propagates across the fleet. Trust
+    # entries keyed by absolute checkout path don't collide between hosts.
+    # Followup: consider narrowing CLAUDE_CONFIG_DIR to a per-host non-synced
+    # subdir.
+    for _seed in .credentials.json .claude.json; do
+      if [ ! -f "$_ccd/$_seed" ] && [ -f "$HOME/.claude/$_seed" ]; then
+        # Mini 21:23Z: defensive log on cp failure (read-only target, disk full).
+        # Lucy 21:25Z: log on success too so a stale-source case (expired creds
+        # carried forward + masked by the idempotent guard) is diagnosable.
+        if cp "$HOME/.claude/$_seed" "$_ccd/$_seed" 2>/dev/null; then
+          [ "$_seed" = ".credentials.json" ] && chmod 600 "$_ccd/$_seed"
+          echo "  ~ auth-carry: seeded $_seed from \$HOME/.claude/"
+        else
+          echo "  ~ auth-carry: cp failed for $_seed (check target perms + disk)"
+        fi
+      fi
+    done
     export CLAUDE_CONFIG_DIR="$_ccd"
   else
     echo "startup: claude_sutando_config_dir invalid — refusing to start" >&2
@@ -602,6 +634,18 @@ if _DC_ENV="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels/discord/.env"; [ -f "$_
       break
     fi
   done
+  # Fallback (v0.8 cold-start fix). If none of the probed candidates had
+  # discord.py importable (PATH stripped by launchctl, conda shim shadowing
+  # homebrew, etc.) the original loop fell through silently. Per Lucy's
+  # PR #1496 review: probe PATH `python3` for `import discord` before
+  # falling back to it — avoids handing the bridge a guaranteed-fail
+  # interpreter that would crash-loop on every boot. If THAT probe also
+  # fails, keep the labeled skip with the pip-install hint (names the
+  # missing dep + fix at the startup console).
+  if [ -z "$PYTHON_WITH_DISCORD" ] && command -v python3 >/dev/null 2>&1 && python3 -c "import discord" 2>/dev/null; then
+    PYTHON_WITH_DISCORD="python3"
+    echo "  ~ discord bridge using PATH python3 (no probed interp matched; PATH python3 has discord.py)"
+  fi
   if [ -z "$PYTHON_WITH_DISCORD" ]; then
     echo "  ~ discord bridge (no python with discord.py — run: /opt/homebrew/bin/pip3 install discord.py)"
   elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
