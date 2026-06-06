@@ -129,6 +129,7 @@ Adopting sync-workspace.sh on an existing Sutando install is a structural migrat
 | `vault.remote_url` set in `sutando.config.local.json` | First-run `--init` reads it; missing → error halt |
 | `SUTANDO_WORKSPACE` removed from shell rc (`~/.zshrc` / `~/.bash_profile`) AND from workspace `.env` | Stale env causes startup re-migrate-every-boot loop |
 | Workspace size scoped — exclude large media (`notes/asset-library/`, video, `data/large-snapshots/`) via `vault.sync.exclude` BEFORE `--init` | Pre-migration backup tars the whole workspace; uncompressible mp4 freezes `tar -czf` for 30+ min on a 30+ GB workspace |
+| `node_modules/` dirs excluded via `vault.sync.exclude` (also nested under surface dirs like `notes/asset-library/`) | Regenerable build artifact (`npm install`) — large, no-value in vault, and uncompressible → slow backup |
 | Active voice/phone/discord-voice sessions ended | They drop on bridge restart anyway; explicit shutdown is cleaner |
 | `.env` is in `vault.sync.exclude` | Contains secrets; must NEVER sync |
 | `tasks/`, `results/`, `state/cores/<host>.alive`, `conversation.sqlite`, `.DS_Store` are in `vault.sync.exclude` (or default gitignore) | Per-host runtime / per-host data — must not sync |

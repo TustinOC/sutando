@@ -10,7 +10,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 **Workspace contract rollup (M0 + M1 + M2 + sync-workspace)** — the staging-workspace-revamp work
 - **M0 — in-repo workspace default:** the workspace now defaults to `<repo>/workspace/` — **supersedes the v0.1.0 `~/.sutando/workspace/` default.** Configuration moves to `sutando.config.local.json` (per-clone, gitignored) with a clear precedence: config file > baked-in default. **`$SUTANDO_WORKSPACE` is no longer honored** by the resolver as of PR #1440 — setting it triggers a one-time stderr deprecation warning + bootstrap auto-migration in `src/startup.sh`. Existing users on the v0.1.0 path are auto-migrated on next startup; manual relocation via `bash scripts/sutando-migrate.sh` is recommended for clean state. ([#1395], [#1397], [#1399], [#1440])
-- **M1 — workspace migration script + `/sutando-migrate` skill:** `bash scripts/sutando-migrate.sh` audits state across legacy sources (A: repo-root, B: `~/.sutando/workspace/`, C: `$SUTANDO_WORKSPACE`), surfaces collisions with newest-mtime resolution + keep-both sidecars, gets owner confirmation, commits, verifies, and (optionally) deletes the source after a 30-day grace window. Per-file atomic (`cp -p` to sibling tmp → `mv`) with sha256 verification. ([#1403], [#1406], [#1440])
+- **M1 — workspace migration script + `/sutando-migrate` skill:** `bash scripts/sutando-migrate.sh` audits state across legacy sources (A: repo-root, B: `~/.sutando/workspace/`, C: `$SUTANDO_WORKSPACE`), surfaces collisions with newest-mtime resolution + keep-both sidecars, gets owner confirmation, commits, verifies, and (optionally) deletes the source after a 30-day grace window. Per-file atomic (`cp -p` to sibling tmp → `mv`) with sha256 verification. Pre-flight scan + per-file progress reporter for visibility on large migrations. ([#1403], [#1406], [#1440], [#1473])
 - **M2 — `claude_sutando_config_dir`:** a per-workspace shell that holds Claude Code state (`projects/`, `skills/`, `agents/`, `commands/`, `settings.json`). `--migrate`/`--import` engine copies-and-warns, with post-copy path rewriting and weight-reduction excludes. ([#1415], [#1424], [#1429])
 - **Workspace-as-git-repo sync (`sync-workspace.sh`):** the workspace IS the git repo; per-host branch identity (`host/<host>/<wsId>`), config-driven gitignore carrier (`vault.sync.include` / `vault.sync.exclude`), vault URL from config (or `--vault-url` flag), handles unrelated-histories on first cross-host pull, moves sync rules to `.git/info/exclude` to avoid workspace-gitignore leak, migrates pre-wsId flat branches. ([#1445], [#1446], [#1447], [#1458], [#1459], [#1460], [#1461], [#1463])
 - **Sync-memory consolidation:** legacy `scripts/sync-memory.sh` anchored to `$SCRIPT_PARENT` (not `$REPO_DIR`); emits deprecation banner in favor of `sync-workspace.sh`. ([#1432])
@@ -43,6 +43,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - Sutando.app launchd KeepAlive supervisor — crash-restart + login auto-start (closes [#942]). ([#1294])
 - Self-heal for the 1M usage-credit gate wedge + fix watchdog silent no-op. ([#1428])
 - Schedule-crons: no inline-fire on registration + per-cron queue gate. ([#1437])
+- Bridges: inject skill instructions into owner task files so they survive context compaction across long sessions. ([#1467])
 - Archive stranded `.claimed-core-N.txt` task files (closes [#933]). ([#1299])
 - Voice-agent: clear stale pid file before launchctl kickstart. ([#1400])
 - Loud-warn when workspace fallback masks a `.env` override. ([#1369])
@@ -55,6 +56,19 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - Catchup-after-startup: migrate stale `SessionStop` → `SessionEnd` in `settings.json`. ([#1374])
 
 ### Fixed
+
+**Migration — Lucy's Maddy v0.8 5-bug sweep (2026-06-06)**
+- `sutando-migrate`: auto-invoke `--import` to copy Claude memory; slug-rename bridge for `<repo-slug>` → `<repo-slug>-workspace` variant when post-M0 read-slug differs from source-slug. ([#1475])
+- `startup.sh`: honor `sutando-migrate` per-source sentinels (`state/.migrated-from-<tag>-<id>`); suppress the re-migrate-every-boot loop when `$SUTANDO_WORKSPACE` is still set in shell rc after a manual migration. ([#1478])
+- `sutando-migrate`: `backup_dest` default media excludes (`*.mp4 *.mov *.mkv *.avi *.webm`, archives, `notes/asset-library/`, `node_modules`, `.git`) + skip gzip when surface payload exceeds 5GB (configurable via `SUTANDO_MIGRATE_BACKUP_GZIP_THRESHOLD_MB`). On a 34GB media-heavy workspace: 30+ min stall → ~5s. ([#1482])
+- `sync-workspace`: refuse push/pull when `.git` is present but sync was never initialized — two-tier guard accepts either `.git/info/exclude` marker or `.sutando-vault/ws-id` as proof of init; bypass with `SUTANDO_SYNC_SKIP_INIT_GUARD=1`. ([#1483])
+- `startup.sh`: tee stdout + stderr to `/tmp/sutando-startup-<UTC-ts>-<PID>.log` at script top so the trace survives operator redirects into a dir the migration then `rm -rf`'s. ([#1484])
+
+**Cross-platform**
+- `sutando-migrate`: `uname -s` branch for preflight byte count — BSD `stat -f '%z'` (macOS) vs GNU `stat -c '%s'` (Linux). Closes the Linux portability gap surfaced in #1474. ([#1476])
+
+**Security — `execSync` → `execFileSync` sweep (#1451)**
+- `meeting-tools.ts`, `task-bridge.ts`, `recording-tools.ts`: convert `execSync` → `execFileSync` throughout to eliminate shell-injection surface. ([#1452], [#1462], [#1466])
 
 - Voice-agent restart cleanly clears stale pid file before kickstart. ([#1400])
 - Bridges + services: narrow bare `except:` → `except Exception:` across 5 Python services. ([#1398])
