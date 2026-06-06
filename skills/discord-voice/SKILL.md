@@ -72,7 +72,7 @@ This skill's config carries **per-user data** (your Discord channel ids, your ow
 <workspace>/config/discord-voice.json
 ```
 
-(`<workspace>` resolved via `bash scripts/sutando-config.sh workspace` — per `sutando.config.local.json`, defaulting to `<repo>/workspace/`; honors `$SUTANDO_WORKSPACE` as legacy escape hatch).
+(`<workspace>` resolved via `bash scripts/sutando-config.sh workspace` — per `sutando.config.local.json`, defaulting to `<repo>/workspace/`; `$SUTANDO_WORKSPACE` no longer honored as of v0.8 / #1440).
 
 The repo ships a committed **template** — `skills/discord-voice/config.json.example` — with the safe defaults. On first run, if the workspace config is missing, the server copies the template into place; you then edit the workspace copy. (If the copy can't happen, the server falls back to the built-in defaults — `owner_mode: false`, every channel read-only.) **Never commit a live `discord-voice.json` back into the repo** — it's per-user data, not code.
 
