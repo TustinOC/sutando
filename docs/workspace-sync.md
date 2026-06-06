@@ -118,12 +118,51 @@ To migrate:
 
 After the migration, you can safely remove `~/.sutando/memory-sync/` (the legacy clone) — the new flow doesn't use it.
 
+## Migration risks + pre-flight checklist
+
+Adopting sync-workspace.sh on an existing Sutando install is a structural migration: the workspace gains a `.git` directory, sync rules are written, and bridges restart. The risks below come from real first-hand migration runs (#1467 thread + Lucy's Maddy v0.8 report 2026-06-06).
+
+### Pre-migration (every host, before `--init`)
+
+| Check | Why |
+|---|---|
+| `vault.remote_url` set in `sutando.config.local.json` | First-run `--init` reads it; missing → error halt |
+| `SUTANDO_WORKSPACE` removed from shell rc (`~/.zshrc` / `~/.bash_profile`) AND from workspace `.env` | Stale env causes startup re-migrate-every-boot loop |
+| Workspace size scoped — exclude large media (`notes/asset-library/`, video, `data/large-snapshots/`) via `vault.sync.exclude` BEFORE `--init` | Pre-migration backup tars the whole workspace; uncompressible mp4 freezes `tar -czf` for 30+ min on a 30+ GB workspace |
+| Active voice/phone/discord-voice sessions ended | They drop on bridge restart anyway; explicit shutdown is cleaner |
+| `.env` is in `vault.sync.exclude` | Contains secrets; must NEVER sync |
+| `tasks/`, `results/`, `state/cores/<host>.alive`, `conversation.sqlite`, `.DS_Store` are in `vault.sync.exclude` (or default gitignore) | Per-host runtime / per-host data — must not sync |
+
+### Migration order (across multiple hosts)
+
+**Serial, not parallel.** One host at a time:
+
+1. Pre-migration checklist (above) on host N.
+2. `bash scripts/sutando-migrate.sh --dry-run` → review the plan.
+3. `bash scripts/sutando-migrate.sh --commit` → real migration.
+4. `bash scripts/sync-workspace.sh --init` → workspace becomes git repo.
+5. Restart bridges + voice-agent + Sutando.app.
+6. Verify: `bash src/health-check.py` reports all paths via M0 helper cleanly.
+7. **Verify sync hygiene:** immediately after `core_heartbeat.py` writes its first `.alive`, run `cd <workspace> && git status` — should show no changes (heartbeat files must be excluded). If not, fix exclusion rules before pushing.
+8. Next host.
+
+Why serial: branch D/F collisions are possible on simultaneous first-pushes pre-#1463; serial avoids the race entirely.
+
+### Known issues from prior migrations (workarounds during the v0.3.0 deprecation window)
+
+These are tracked separately from this doc (see open issues against `sonichi/sutando` tagged `workspace-migration`); listed here so users hitting them recognize the symptoms:
+
+- **Claude memory not auto-moved.** Migrate creates `<ws>/.claude-sutando/projects/<slug>/memory/` stub but the real memory may stay at `~/.claude/projects/<slug-without-"-workspace">/memory/` (slug changes because the project path gains `/workspace`). **Workaround:** after migrate, `rsync -a ~/.claude/projects/<old-slug>/memory/ <ws>/.claude-sutando/projects/<new-slug>/memory/` then re-verify.
+- **`sync-workspace.sh` plain run (no `--init`) silently commits the entire workspace** — including `data/(sqlite)`, session logs, video. **Workaround:** always run `--init` first on each host; check `git ls-files | head -20` before the first plain run to confirm gitignore is taking effect.
+- **First migration on a host with `SUTANDO_WORKSPACE` set in `.env`** re-migrates every boot until the env line is removed. **Workaround:** comment out the env line in `.env` post-migrate.
+
 ## Troubleshooting
 
 - **`sync-workspace: vault.remote_url not set` / `--vault-url missing`** — configure per the Setup section above.
 - **`Another sync already in progress, exiting.`** — A previous cron tick is still running. The script self-clears stale locks after 10 minutes; if you see this repeatedly, check `/tmp/sync-workspace.log` for the previous tick's error.
 - **`refusing to push to non-host branch '...'`** — Someone manually `git checkout`-ed a feature branch in the workspace clone. Switch back to your `host/<host>/<wsId>` branch.
 - **Push fails with auth error** — Check that your machine has push access to the vault repo (`gh auth status` if you use the GitHub CLI). Read-only clones won't push.
+- **Push fails with macOS Keychain error `-25308` over SSH or plain cron** — `gh auth` stores the GitHub token in macOS Keychain, which is bound to a GUI session by default. Plain SSH sessions / system-level crontabs can't unlock it. **Fix:** run sync from a launchd plist scoped to your user GUI session (not system-level crontab), or unlock the keychain explicitly in the cron wrapper (`security unlock-keychain` — requires interactive password setup, not recommended for automation).
 - **Merge conflicts on every tick** — Two hosts editing the same file in tight loops. Use append-only patterns or coordinate edits.
 
 ## Related
