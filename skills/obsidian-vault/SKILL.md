@@ -4,7 +4,7 @@ Voice-inline capture into a Sutando-owned Obsidian vault. The voice agent calls 
 
 ## Vault
 
-Lives at `<workspace>/obsidian-vault/` (`<workspace>` resolved via `bash scripts/sutando-config.sh workspace` — defaults to `<repo>/workspace/`, honors `$SUTANDO_WORKSPACE` as legacy escape hatch). Auto-created on first capture, with a `.obsidian/` marker dir so Obsidian recognizes the folder as a vault.
+Lives at `<workspace>/obsidian-vault/` (`<workspace>` resolved via `bash scripts/sutando-config.sh workspace` — per `sutando.config.local.json`, defaulting to `<repo>/workspace/`; honors `$SUTANDO_WORKSPACE` as legacy escape hatch). Auto-created on first capture, with a `.obsidian/` marker dir so Obsidian recognizes the folder as a vault.
 
 ## Layout
 

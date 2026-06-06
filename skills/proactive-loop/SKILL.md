@@ -39,7 +39,7 @@ WORKSPACE="$(bash scripts/sutando-config.sh workspace)"
 echo "$payload" > "$WORKSPACE/state/core-status.json"
 cat "$WORKSPACE/build_log.md"
 ```
-This resolves to `<repo>/workspace/` by default; honors `$SUTANDO_WORKSPACE` as legacy escape hatch. Never hardcode `~/.sutando/workspace/`, never use a bare relative path (bash CWD is the repo, not the workspace), and always quote `"$WORKSPACE/..."` so spaces in the workspace path don't tokenize.
+This resolves through `bash scripts/sutando-config.sh workspace`, which reads `sutando.config.local.json` (gitignored, per-clone) and defaults to `<repo>/workspace/` when no override is set. `$SUTANDO_WORKSPACE` is honored as a legacy escape hatch with a one-time deprecation warning. Never hardcode `~/.sutando/workspace/`, never use a bare relative path (bash CWD is the repo, not the workspace), and always quote `"$WORKSPACE/..."` so spaces in the workspace path don't tokenize.
 
 **Build log:** `$WORKSPACE/build_log.md`
 
