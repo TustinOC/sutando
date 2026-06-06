@@ -30,7 +30,7 @@ fleet/
 queue/
 ```
 
-The sync runs as a sibling script (`scripts/sync-fleet-state.sh`) that the existing `scripts/sync-memory.sh` cron can call after the memory sync, so the fleet picks up new claims at the same cadence Memory propagates.
+The sync runs as a sibling script (`scripts/sync-fleet-state.sh`) that the existing `scripts/sync-workspace.sh` cron can call after the workspace sync, so the fleet picks up new claims at the same cadence Memory propagates.
 
 ## Allowlist file format
 
@@ -108,9 +108,9 @@ This is the rough shape for when code actually lands; not part of this PR.
 
 ```text
 1. Read <workspace>/state/.sync-allowlist. If missing, exit 0 — sync is opt-out by default.
-2. For each entry, rsync (or git-add) the subpath into the same private memory-sync repo's `fleet/` subdir.
-3. Conflict policy: rsync mtime-wins for v1 (same as memory-sync). Filename collisions in claim files mean a race — let the protocol handle it on the next read.
-4. Hook into the existing scripts/sync-memory.sh cron, after the memory sync runs.
+2. For each entry, rsync (or git-add) the subpath into the same private vault repo's `fleet/` subdir.
+3. Conflict policy: rsync mtime-wins for v1 (same as workspace-sync). Filename collisions in claim files mean a race — let the protocol handle it on the next read.
+4. Hook into the existing scripts/sync-workspace.sh cron, after the workspace sync runs.
 ```
 
 ### Task processor changes

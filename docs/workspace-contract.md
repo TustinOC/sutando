@@ -96,8 +96,8 @@ This applies even when a public PR / issue would benefit from quoting workspace 
 - **TOFU + allowlist for owner identity** — first DM to a bridge auto-enrolls the sender as owner and writes `$CLAUDE_CONFIG_DIR/channels/<surface>/access.json`. Subsequent senders are checked against `allowFrom`; absent or non-matching senders fall through to non-owner tiers (no implicit owner promotion).
 - **Sandboxed delegation for team/other** — non-owner tasks run under `codex exec --sandbox read-only`. The sandbox blocks filesystem writes and restricts reads to the agent's working directory, so workspace `state/`, `notes/`, `build_log.md`, etc. are unreachable to non-owner tiers even if the user-supplied prompt tries to coax otherwise.
 - **Result-body delivery markers** — `[no-send]`, `[deduped: task-X]`, `[REPLIED]`, `[channel: <id>]` route or suppress bot replies *at the bridge layer*, not the agent layer. Even if the agent writes a confidential result, a `[no-send]` marker prevents it from reaching any user-facing surface.
-- **Memory split (shared vs private)** — memory and notes live under `$SUTANDO_MEMORY_DIR` (default: `$CLAUDE_CONFIG_DIR/projects/.../memory/`), separate from the public repo. `scripts/sync-memory.sh` syncs to a private repo (`$SUTANDO_MEMORY_REPO`); never to a public one. Memory content is loaded into agent context, never into PR bodies or commit messages.
-- **Per-host install state under `state/auth/`** — `cloud-auth.json`, `device.json`, and other per-host credentials are scoped to one host's workspace and exempted from transient-state cleanup. They never sync via `sync-memory.sh` (which targets `memory/` + `notes/` only) or via `sync-workspace.sh` (which excludes `state/auth/` by path).
+- **Memory split (shared vs private)** — memory and notes live under `$SUTANDO_MEMORY_DIR` (default: `$CLAUDE_CONFIG_DIR/projects/.../memory/`), separate from the public repo. `scripts/sync-workspace.sh` (canonical as of v0.3.0) syncs to a private vault (`vault.remote_url` in `sutando.config.local.json`); never to a public one. The legacy `scripts/sync-memory.sh` flow remains during the deprecation window (v0.3.x) and is removed in v0.4.0. Memory content is loaded into agent context, never into PR bodies or commit messages.
+- **Per-host install state under `state/auth/`** — `cloud-auth.json`, `device.json`, and other per-host credentials are scoped to one host's workspace and exempted from transient-state cleanup. They never sync via `sync-workspace.sh` (which excludes `state/auth/` by path) or via the legacy `sync-memory.sh` (which targeted `memory/` + `notes/` only).
 - **Channel-confidentiality routing rule** (operational) — codified in the `feedback_channel_confidentiality` memory: strategic / competitive / financial content goes to owner-DM only, never to shared channels. When the owner asks "what's pending?" in a public channel, the agent lists only audience-appropriate items.
 
 ### 1.5 Expansion (user-side)
@@ -148,7 +148,7 @@ The workspace is intentionally ephemeral: delete the repo and the workspace dies
 
 - `$SUTANDO_VAULT` — the durability env var. Defaults exist; user can override.
 - Default content: memories. The user can extend the sync allowlist.
-- Sync mechanism: scripts/cron-driven (today `scripts/sync-memory.sh`; future `sync-vault.sh`).
+- Sync mechanism: `scripts/sync-workspace.sh` (canonical as of v0.3.0, cron-driven). Legacy `scripts/sync-memory.sh` remains during the v0.3.x deprecation window and is removed in v0.4.0.
 - Cross-host topology, room collaboration, allowlist format, secret push-gate, conflict policy — **all out of scope here**. See `docs/vault-design.md` *(forthcoming)*.
 
 ## 5. Locked decisions
