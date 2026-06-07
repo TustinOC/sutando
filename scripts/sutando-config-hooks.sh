@@ -73,9 +73,8 @@ _catchup_hook_command() {
 
 _sutando_hook_manifest() {
   # Path to the manifest that installers write and _known_sutando_substrings reads.
-  # Resolves via the M0 helper (#1536) so this honors $CLAUDE_CONFIG_DIR and emits
-  # the deprecation banner on fallback. Pre-#1536 this used the inline
-  # `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` shorthand, which bypassed both.
+  # Routes via the M0 claude-home-path helper (#1536) so $CLAUDE_CONFIG_DIR is
+  # honored and the deprecation banner fires on fallback.
   bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sutando-config.sh" claude-home-path sutando-hook-manifest.json
 }
 
