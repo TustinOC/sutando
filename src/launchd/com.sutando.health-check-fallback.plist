@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sutando — health-check FALLBACK launchd job (template).
+
+  Role: OS-level safety net for "all of Sutando is dead." Sutando.app's
+  in-process Timer (PR #613) is the primary 30min health-check while the
+  menu-bar app is alive. This launchd job is the redundant supervisor
+  that keeps running even when Sutando.app exits / crashes / is signed
+  out, closing the circular-dependency gap (a stuck proactive loop also
+  stops Sutando.app's Timer from being the only check).
+
+  Cadence: every 5min. Higher than #613's 30min so the stuck-loop and
+  task-queue checks (which require 5–10min thresholds before warning)
+  fire promptly. Lower than the original 60s — those underlying
+  thresholds make sub-5min polling redundant.
+
+  Installed by `bash src/install-health-check-launchd.sh` after the install
+  script substitutes __REPO__, __PYTHON__, and __HOMEBREW_BIN__ with the
+  user's actual paths. Do NOT load this template directly — paths must be
+  expanded first.
+
+  Behavior:
+    - Fires every 300s (StartInterval).
+    - Runs `python3 src/health-check.py --emit-task --notify-on-fail
+      --notify-slack --recover-core --quiet`.
+    - Surfaces failures as tasks/task-health-*.txt, macOS notifications, AND
+      a direct Slack DM to the owner (remote-visible; fires even when the core
+      session is wedged but its heartbeat process still ticks). The Slack DM
+      no-ops cleanly if SLACK_BOT_TOKEN (channel .env / $REPO/.env / env) or the
+      owner id in ~/.claude/channels/slack/access.json is missing.
+    - --recover-core: when the core is alive-but-wedged (heartbeat ticking but
+      the task queue isn't draining — the 2026-06-02 1M usage-credit-gate loop
+      signature), auto-restarts it via scripts/start-cli.sh --restart. Heavily
+      guarded (sustained-wedge confirm window, 30min cooldown, 3/hr give-up cap)
+      and a clean no-op when the core is healthy. Keeps 1M on the first restart;
+      degrades to standard 200K only if the wedge recurs. Runs here, in launchd's
+      own process — never from inside the core session it would kill.
+    - ThrottleInterval=60 prevents crash-loop thrash.
+    - Exit-only job (KeepAlive omitted) — launchd waits StartInterval, fires
+      again, no zombie process between runs.
+    - All output goes to $WORKSPACE/logs/health-check-launchd.log for
+      postmortem (per PR #911 workspace-vs-repo split).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.health-check-fallback</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__REPO__/src/health-check.py</string>
+        <string>--emit-task</string>
+        <string>--notify-on-fail</string>
+        <string>--notify-slack</string>
+        <string>--recover-core</string>
+        <string>--quiet</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOMEBREW_BIN__:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__WORKSPACE__/logs/health-check-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__WORKSPACE__/logs/health-check-launchd.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

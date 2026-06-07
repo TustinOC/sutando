@@ -1,0 +1,2061 @@
+#!/usr/bin/env python3
+"""
+Sutando health check — verifies all components are running correctly.
+
+Usage:
+  python3 src/health-check.py                  # full check, human-readable
+  python3 src/health-check.py --json           # machine-readable output
+  python3 src/health-check.py --fix            # attempt to fix issues
+  python3 src/health-check.py --emit-task      # write tasks/task-health-*.txt on failure
+  python3 src/health-check.py --notify-on-fail # macOS notification on failure
+  python3 src/health-check.py --notify-slack   # DM the owner on Slack on failure (remote, core-independent)
+  python3 src/health-check.py --recover-core   # auto-restart the core when alive-but-wedged (guarded)
+
+Checks:
+  - macOS TCC Documents-folder access (when repo is under ~/Documents)
+  - Voice agent (port 9900), web client, agent API, dashboard
+  - Critical files (CLAUDE.md, build_log.md, ACTIVITY.md)
+  - Memory system (MEMORY.md index, key memory files)
+  - Notes directory
+"""
+
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+try:
+    import fcntl  # POSIX file locking for the recovery critical section
+except ImportError:  # non-POSIX (e.g. Windows) — the lock degrades to a no-op
+    fcntl = None
+
+REPO_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(Path(__file__).parent))
+from util_paths import claude_home_path, shared_personal_path  # noqa: E402
+from workspace_default import resolve_workspace, status_read_path  # noqa: E402
+
+# Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
+# source-code root (src/, skills/, logs/, .env, build_log.md). Before PR #762's
+# resolver existed, every consumer hardcoded REPO_DIR / "tasks" — so when the
+# owner set $SUTANDO_WORKSPACE to a non-repo location, health-check kept
+# writing alerts to <repo>/tasks/ while the watcher was reading from
+# $SUTANDO_WORKSPACE/tasks/. Three task-health alerts on 2026-05-16 landed in
+# the wrong dir before this fix; same drift class as src/watch-tasks-stream.sh
+# pre-#736 and skills/self-diagnose pre-#769.
+WORKSPACE_DIR = resolve_workspace()
+
+def _default_memory_dir() -> str:
+    """Auto-detect Claude Code memory dir from repo path."""
+    repo = Path(__file__).parent.parent.resolve()
+    slug = str(repo).replace("/", "-")
+    return str(Path.home() / ".claude" / "projects" / slug / "memory")
+
+MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+
+def check_port(port: int, name: str) -> dict:
+    """Check if a port is listening."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(2)
+            result = s.connect_ex(("127.0.0.1", port))
+            up = result == 0
+        return {"name": name, "status": "ok" if up else "down", "detail": f"port {port}"}
+    except Exception as e:
+        return {"name": name, "status": "error", "detail": str(e)}
+
+
+def check_launchd(label: str) -> dict:
+    """Check if a launchd job is loaded and running."""
+    try:
+        result = subprocess.run(
+            ["/bin/launchctl", "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.split("\n"):
+            if label in line:
+                parts = line.split("\t")
+                pid = parts[0].strip() if len(parts) > 0 else "-"
+                exit_code = parts[1].strip() if len(parts) > 1 else "?"
+                running = pid != "-" and pid != ""
+                status = "ok" if running or exit_code == "0" else "stopped"
+                return {"name": label, "status": status, "detail": f"pid={pid} exit={exit_code}"}
+        return {"name": label, "status": "not_loaded", "detail": "not found in launchctl list"}
+    except Exception as e:
+        return {"name": label, "status": "error", "detail": str(e)}
+
+
+def check_file(path: Path, name: str) -> dict:
+    """Check if a file exists and is non-empty."""
+    if not path.exists():
+        return {"name": name, "status": "missing", "detail": str(path)}
+    size = path.stat().st_size
+    if size == 0:
+        return {"name": name, "status": "empty", "detail": str(path)}
+    return {"name": name, "status": "ok", "detail": f"{size} bytes"}
+
+
+def check_directory(path: Path, name: str) -> dict:
+    """Check if a directory exists and has files."""
+    if not path.exists():
+        return {"name": name, "status": "missing", "detail": str(path)}
+    count = len(list(path.glob("*.md")))
+    return {"name": name, "status": "ok", "detail": f"{count} .md files"}
+
+
+def check_memory_sync() -> dict:
+    """Verify memory sync is configured and has run recently."""
+    name = "memory-sync"
+    env_path = REPO_DIR / ".env"
+    repo_url = ""
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("SUTANDO_MEMORY_REPO="):
+                repo_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    if not repo_url:
+        return {"name": name, "status": "warn", "detail": "SUTANDO_MEMORY_REPO not set — cross-machine sync disabled"}
+    # Memory-sync clone dir: PR #764 renamed legacy ~/.sutando-memory-sync/
+    # → ~/.sutando/memory-sync/. Check new path first; fall back to legacy
+    # for installs that haven't migrated yet (sync-memory.sh auto-migrates
+    # on next run when env is unset).
+    sync_dir_new = Path.home() / ".sutando" / "memory-sync"
+    sync_dir_legacy = Path.home() / ".sutando-memory-sync"
+    if sync_dir_new.exists():
+        sync_dir = sync_dir_new
+    elif sync_dir_legacy.exists():
+        sync_dir = sync_dir_legacy
+    else:
+        return {"name": name, "status": "warn", "detail": "repo configured but never synced — run bash scripts/sync-memory.sh"}
+    git_dir = sync_dir / ".git" / "FETCH_HEAD"
+    if git_dir.exists():
+        age_h = (time.time() - git_dir.stat().st_mtime) / 3600
+        if age_h > 48:
+            return {"name": name, "status": "warn", "detail": f"last sync {age_h:.0f}h ago (stale)"}
+        return {"name": name, "status": "ok", "detail": f"last sync {age_h:.1f}h ago"}
+    return {"name": name, "status": "ok", "detail": "initialized, never fetched"}
+
+
+def check_tcc_documents_access() -> dict:
+    """Detect macOS TCC denial of Documents-folder access (issue #709).
+
+    Relevant when REPO_DIR is inside ~/Documents — the default location for
+    git checkouts on macOS. A process that hasn't been granted Documents access
+    in System Settings → Privacy & Security → Files and Folders will hit
+    PermissionError on every file read/write in the repo, causing tasks to go
+    missing and services to crash on startup with no obvious error.
+
+    Probe: attempt to list REPO_DIR and write+unlink a throwaway temp file.
+    Safe even when access is denied — the PermissionError is caught and reported
+    rather than propagated.
+    """
+    name = "tcc-documents-access"
+    docs_dir = Path.home() / "Documents"
+    try:
+        in_documents = str(REPO_DIR.resolve()).startswith(str(docs_dir.resolve()))
+    except OSError:
+        in_documents = True  # can't resolve → assume we're in Documents and probe
+
+    if not in_documents:
+        return {"name": name, "status": "ok", "detail": "repo not in ~/Documents — TCC check N/A"}
+
+    probe = REPO_DIR / ".tcc-probe"
+    try:
+        list(REPO_DIR.iterdir())
+        probe.write_text("")
+        probe.unlink()
+        return {"name": name, "status": "ok", "detail": "Documents folder access granted"}
+    except PermissionError:
+        try:
+            probe.unlink()
+        except Exception:
+            pass
+        return {
+            "name": name,
+            "status": "fail",
+            "detail": (
+                "macOS TCC denied Documents folder access — grant in "
+                "System Settings → Privacy & Security → Files and Folders "
+                "→ Terminal (or your IDE/launchd app)"
+            ),
+        }
+    except OSError:
+        return {"name": name, "status": "ok", "detail": "Documents access check inconclusive"}
+
+
+# ---------------------------------------------------------------------------
+# Fix attempts
+# ---------------------------------------------------------------------------
+
+def fix_launchd(label: str) -> str:
+    """Try to reload a launchd job."""
+    plist_map = {
+        "com.sutando.voice-agent": Path.home() / "Library/LaunchAgents/com.sutando.voice-agent.plist",
+        "com.sutando.web-client": Path.home() / "Library/LaunchAgents/com.sutando.web-client.plist",
+    }
+    plist = plist_map.get(label)
+    if not plist or not plist.exists():
+        return f"no plist found for {label}"
+
+    uid = subprocess.run(["/usr/bin/id", "-u"], capture_output=True, text=True).stdout.strip()
+    # Try kickstart
+    result = subprocess.run(
+        ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0:
+        return f"restarted {label}"
+    # Try bootstrap
+    result = subprocess.run(
+        ["/bin/launchctl", "bootstrap", f"gui/{uid}", str(plist)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0:
+        return f"bootstrapped {label}"
+    return f"failed to restart {label}: {result.stderr.strip()}"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def mark_stale_if_outdated(check: dict, src_file: Path, pgrep_pattern: str, threshold_sec: int = 1800, binary_path: Optional[Path] = None) -> None:
+    """Mark `check` as 'stale' in place if a process matching `pgrep_pattern`
+    started more than `threshold_sec` before `src_file`'s mtime.
+
+    Extracted so the same logic covers all tsx-managed services
+    (voice-agent, web-client, conversation-server) without duplication.
+    30 min default threshold tolerates `git checkout` mtime bumps; real
+    stale deploys are hours/days old. Silent on any failure — stale
+    detection is advisory, not authoritative.
+
+    If `binary_path` is supplied (compiled artifacts like the Swift
+    Sutando.app), the function ALSO checks whether the binary itself is
+    older than the source. A stale binary means the running process —
+    however recently relaunched — is executing old code. When this fires,
+    the message tells the user to rebuild, not just restart.
+    """
+    if not src_file.exists():
+        return
+    # Compiled-artifact check: binary older than source → "rebuild needed",
+    # regardless of process start. This catches the case where --fix
+    # relaunches a stale binary repeatedly (#528 stopped the leak; this
+    # makes the message actionable).
+    if binary_path is not None and binary_path.exists():
+        try:
+            src_mtime = src_file.stat().st_mtime
+            bin_mtime = binary_path.stat().st_mtime
+            if src_mtime - bin_mtime > threshold_sec:
+                age_min = int((src_mtime - bin_mtime) / 60)
+                check["status"] = "stale"
+                check["detail"] = f"running, but binary is {age_min} min older than source — rebuild needed"
+                return
+        except OSError:
+            pass
+    try:
+        pids = subprocess.run(
+            ["/usr/bin/pgrep", "-f", pgrep_pattern],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip().split("\n")
+        pids = [p for p in pids if p]
+        if not pids:
+            return
+        ps_out = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", ",".join(pids)],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip().split("\n")
+        from datetime import datetime as _dt
+        starts = []
+        for line in ps_out:
+            line = line.strip()
+            if line:
+                try:
+                    starts.append(_dt.strptime(line, "%a %b %d %H:%M:%S %Y").timestamp())
+                except ValueError:
+                    pass
+        if not starts:
+            return
+        # Pick the OLDEST start time — the tsx wrapper spawns a child node
+        # process; we want the parent's launch time, not the child's.
+        proc_start = min(starts)
+        src_mtime = src_file.stat().st_mtime
+        if src_mtime - proc_start > threshold_sec:
+            # Before flagging stale, cross-check with git: mtime gets bumped by
+            # `git checkout`/`pull`/`rebase` even when the file content is
+            # identical, which produced a steady stream of false positives
+            # whenever a branch switch left the working tree unchanged on a
+            # specific file. Ask git for the last commit time that actually
+            # touched this file. If that's older than proc_start AND there
+            # are no uncommitted changes to the file, it's a mtime-only
+            # bump — the running code is still current.
+            if _file_unchanged_since(src_file, proc_start):
+                return
+            check["status"] = "stale"
+            check["detail"] = f"running but code is {int((src_mtime - proc_start) / 60)} min newer than process — restart needed"
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _file_unchanged_since(src_file: Path, proc_start: float) -> bool:
+    """Return True if git's last-commit-time for src_file predates proc_start
+    AND the file has no uncommitted changes. Used to suppress stale-detection
+    false positives from git operations that bump mtime without changing
+    content. Silent-failure: returns False on any git error so real stale
+    deploys aren't hidden.
+    """
+    try:
+        log = subprocess.run(
+            ["/usr/bin/git", "log", "-1", "--format=%ct", "HEAD", "--", str(src_file)],
+            cwd=REPO_DIR, capture_output=True, text=True, timeout=5
+        )
+        if log.returncode != 0 or not log.stdout.strip():
+            return False
+        commit_time = int(log.stdout.strip())
+        if commit_time >= proc_start:
+            # Real commit landed after proc_start — genuinely stale
+            return False
+        # No commits since proc_start; check for uncommitted edits
+        diff = subprocess.run(
+            ["/usr/bin/git", "diff", "--quiet", "HEAD", "--", str(src_file)],
+            cwd=REPO_DIR, capture_output=True, timeout=5
+        )
+        return diff.returncode == 0  # 0 = no diff
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return False
+
+
+# Watchers task-bridge starts at voice-agent boot. If any of these is
+# missing from the log after the most recent "Sutando — Voice Interface"
+# banner, the watcher wasn't registered and the corresponding feature
+# (context drop, note view, task results) is silently broken. This
+# check was added after a 9-hour incident on 2026-04-09 where the
+# note-view watcher was silently absent and nobody noticed until a
+# user reported voice hallucinating note titles.
+REQUIRED_VOICE_WATCHERS = [
+    "Watching for context drops",
+    "Watching for note views",
+    "Watching for results",
+]
+
+
+def _voice_log_path() -> Path:
+    """Resolve where voice-agent's stdout/stderr lands.
+
+    Two paths exist for legitimate reasons:
+    - launchd plist (~/Library/LaunchAgents/com.sutando.voice-agent.plist)
+      pipes StandardOut/ErrorPath to `~/Library/Application Support/Sutando/
+      logs/voice-agent.log`. This is the path **generated by Sutando.app's
+      installer** — not a fixed assumption. Hosts that predate Sutando.app
+      (or have a hand-written plist) may instead point at
+      `<workspace>/logs/voice-agent.log`, in which case the resolver falls
+      through to the workspace path below and behavior is unchanged.
+    - `src/startup.sh:153` writes to `<workspace>/logs/voice-agent.log`
+      when the user starts voice-agent manually (dev mode).
+
+    Prefer the launchd path when it has content. Falls back to the
+    workspace path so manually-launched voice-agents still resolve.
+    Without this resolver, `voice-watchers` and `voice-transport` would
+    permanently warn "voice-agent.log not found" on Sutando.app installs.
+    """
+    launchd_log = Path.home() / "Library/Application Support/Sutando/logs/voice-agent.log"
+    workspace_log = WORKSPACE_DIR / "logs" / "voice-agent.log"
+    if launchd_log.exists() and launchd_log.stat().st_size > 0:
+        return launchd_log
+    return workspace_log
+
+
+def check_voice_watchers(voice_check: dict) -> dict:
+    """Verify all 3 task-bridge watchers are registered in the current
+    voice-agent process. Parses logs/voice-agent.log for the most recent
+    boot banner and confirms each REQUIRED_VOICE_WATCHERS pattern
+    appears after it.
+    """
+    check = {"name": "voice-watchers", "status": "ok", "detail": "all 3 watchers active"}
+    # Only run if voice-agent itself is ok; otherwise the check is moot.
+    # Distinguish "stale" (process running, old code) from absent.
+    vs = voice_check.get("status")
+    if vs != "ok":
+        check["status"] = "warn"
+        check["detail"] = f"voice-agent {vs}" if vs else "voice-agent status unknown"
+        return check
+    log_file = _voice_log_path()
+    if not log_file.exists():
+        check["status"] = "warn"
+        check["detail"] = "voice-agent.log not found"
+        return check
+    try:
+        lines = log_file.read_text(errors="replace").splitlines()
+        # Find the most recent startup banner
+        banner_idx = -1
+        for i in range(len(lines) - 1, -1, -1):
+            if "Sutando — Voice Interface" in lines[i]:
+                banner_idx = i
+                break
+        if banner_idx < 0:
+            check["status"] = "warn"
+            check["detail"] = "no startup banner found in log"
+            return check
+        tail = lines[banner_idx:]
+        # task-bridge logs watchers BEFORE the banner prints — check a
+        # bounded window both sides to be safe (20 lines before banner)
+        window_start = max(0, banner_idx - 20)
+        window = lines[window_start:]
+        missing = []
+        for pat in REQUIRED_VOICE_WATCHERS:
+            if not any(pat in line for line in window):
+                missing.append(pat.replace("Watching for ", ""))
+        if missing:
+            check["status"] = "fail"
+            check["detail"] = f"missing watcher(s): {', '.join(missing)} — restart voice-agent"
+    except OSError as e:
+        check["status"] = "warn"
+        check["detail"] = f"log read failed: {e}"
+    return check
+
+
+# Close codes that indicate a healthy voice-agent → Gemini Live transport
+# state. Anything else after a startup banner suggests upstream failure
+# (quota, auth, network blip, bodhi state-machine wedge).
+#   1000 = normal closure
+#   4000 = sutando custom goodbye disconnect (bodhi fork commit 44172b8)
+VOICE_TRANSPORT_HEALTHY_CLOSE_CODES = {"1000", "4000"}
+
+
+def _extract_close_code(line: str) -> Optional[str]:
+    import re
+    m = re.search(r"code=(\d+)", line)
+    return m.group(1) if m else None
+
+
+def _extract_close_reason(line: str) -> Optional[str]:
+    import re
+    m = re.search(r'reason="([^"]*)"', line)
+    return m.group(1) if m else None
+
+
+def check_voice_transport(voice_check: dict) -> dict:
+    """Scan voice-agent.log from the most recent startup banner forward
+    for abnormal Gemini transport closes. Flags things like:
+        code=1011 "exceeded your current quota"    (the 3.1 tier issue)
+        code=1007 "Request contains an invalid argument" (CLOSED→CLOSED)
+        code=1006 abnormal / network drop
+    Returns ok if the latest transport event since the most recent boot
+    is "setup complete", or if an abnormal close was followed by a
+    successful "setup complete" (auto-recovery worked).
+
+    Added 2026-04-09 after the Gemini 3.1 dry-run produced a 1011 that
+    health-check couldn't see — voice-agent port was up, bodhi was up,
+    every existing probe said ok, but the transport was rejected
+    server-side. Without this check, that failure mode is only visible
+    to whoever manually tails the log.
+    """
+    check = {"name": "voice-transport", "status": "ok", "detail": "no recent transport errors"}
+    vs = voice_check.get("status")
+    if vs != "ok":
+        check["status"] = "warn"
+        check["detail"] = f"voice-agent {vs}" if vs else "voice-agent status unknown"
+        return check
+    log_file = _voice_log_path()
+    if not log_file.exists():
+        check["status"] = "warn"
+        check["detail"] = "voice-agent.log not found"
+        return check
+    try:
+        lines = log_file.read_text(errors="replace").splitlines()
+        banner_idx = -1
+        for i in range(len(lines) - 1, -1, -1):
+            if "Sutando — Voice Interface" in lines[i]:
+                banner_idx = i
+                break
+        if banner_idx < 0:
+            check["status"] = "warn"
+            check["detail"] = "no startup banner found in log"
+            return check
+        # Walk from the banner forward. Track the most recent transport
+        # event and a few state flags so we can distinguish real failures
+        # from expected idle-timeout closes.
+        #
+        # Expected idle path: Gemini Live fires a `GoAway` (60s warning),
+        # then ~60s later closes the transport with code=1011
+        # "The service is currently unavailable." Bodhi transitions the
+        # session to CLOSED waiting for the next client connect. That's
+        # a normal lifecycle event, not a failure — the session
+        # reconnects fresh when a client comes back. If we flag every
+        # 1011-after-GoAway as a fail, the probe reports a false
+        # positive every time voice sits idle for 10+ minutes.
+        most_recent_abnormal: Optional[str] = None
+        most_recent_abnormal_lineno: int = -1  # relative to banner_idx
+        abnormal_recovered = False
+        goaway_before_close = False  # GoAway seen since the last setup/close
+        for rel_i, line in enumerate(lines[banner_idx:]):
+            if "Gemini setup complete" in line or "LLM transport connected and setup complete" in line:
+                if most_recent_abnormal is not None:
+                    abnormal_recovered = True
+                    most_recent_abnormal = None
+                    most_recent_abnormal_lineno = -1
+                goaway_before_close = False
+            elif "GoAway from Gemini" in line:
+                goaway_before_close = True
+            elif "[VoiceSession] Transport closed" in line:
+                m_code = _extract_close_code(line)
+                if m_code is None:
+                    continue
+                if m_code in VOICE_TRANSPORT_HEALTHY_CLOSE_CODES:
+                    most_recent_abnormal = None
+                    most_recent_abnormal_lineno = -1
+                    goaway_before_close = False
+                elif goaway_before_close:
+                    # Idle timeout path — Google warned, then closed. Not an error.
+                    most_recent_abnormal = None
+                    most_recent_abnormal_lineno = -1
+                    goaway_before_close = False
+                else:
+                    most_recent_abnormal = line
+                    most_recent_abnormal_lineno = rel_i
+                    abnormal_recovered = False
+        if most_recent_abnormal is not None:
+            reason = _extract_close_reason(most_recent_abnormal) or "unknown"
+            code = _extract_close_code(most_recent_abnormal) or "?"
+            # Count [Health] state=CONNECTING lines after the abnormal close.
+            # The health ticker fires every ~30s; >20 consecutive CONNECTING
+            # lines = stuck for >10 min and bodhi won't self-recover.
+            connecting_after = sum(
+                1 for ln in lines[banner_idx + most_recent_abnormal_lineno + 1:]
+                if "[Health] state=CONNECTING" in ln
+            ) if most_recent_abnormal_lineno >= 0 else 0
+            if connecting_after > 20:
+                elapsed_min = connecting_after * 30 // 60
+                check["status"] = "fail"
+                check["detail"] = f"stuck CONNECTING ~{elapsed_min}min after code={code} transport close — needs kickstart"
+                check["_stuck_connecting"] = True
+            elif code == "1006":
+                # code=1006 is an abnormal network close (often a DNS blip). If DNS
+                # resolves now the transport will self-recover on next client connect
+                # — downgrade to warn so the dashboard isn't stuck on red.
+                try:
+                    socket.getaddrinfo("generativelanguage.googleapis.com", 443)
+                    check["status"] = "warn"
+                    check["detail"] = "transient network drop (code=1006, DNS ok now — will recover on next connect)"
+                except OSError:
+                    check["status"] = "fail"
+                    check["detail"] = "network drop code=1006 and DNS still failing"
+            else:
+                check["status"] = "fail"
+                check["detail"] = f"unrecovered transport close: code={code} reason={reason[:80]}"
+        elif abnormal_recovered:
+            check["detail"] = "transport recovered after earlier error"
+    except OSError as e:
+        check["status"] = "warn"
+        check["detail"] = f"log read failed: {e}"
+    return check
+
+
+def check_bodhi_dist() -> dict:
+    """Verify the installed bodhi-realtime-agent dist has the Gemini 3.1
+    wire-format fixes applied. Greps the Gemini sendAudio/sendFile bodies
+    for the post-fix `audio:`/`video:` keys rather than the deprecated
+    `media:` key.
+
+    Added 2026-04-09 after the 1007 "media_chunks is deprecated" regression:
+    package-lock.json pointed at the post-fix bodhi commit, but the dist
+    on disk was stale (git pull advanced the lockfile without triggering
+    npm install). voice-agent booted fine because sendAudio isn't
+    exercised until a client connects — so existing probes silently let
+    it through. This probe catches that case on every health tick.
+
+    Fix when this check fails: `npm install github:sonichi/bodhi_realtime_agent`
+    then `launchctl kickstart -k gui/$(id -u)/com.sutando.voice-agent`.
+    """
+    check = {"name": "bodhi-dist", "status": "ok", "detail": "Gemini 3.1 wire-format fixes present"}
+    dist = REPO_DIR / "node_modules" / "bodhi-realtime-agent" / "dist" / "index.js"
+    if not dist.exists():
+        check["status"] = "warn"
+        check["detail"] = "bodhi dist not found — run `npm install`"
+        return check
+    try:
+        text = dist.read_text(errors="replace")
+    except OSError as e:
+        check["status"] = "warn"
+        check["detail"] = f"dist read failed: {e}"
+        return check
+    # Isolate the Gemini transport's sendAudio body. The OpenAI realtime
+    # transport also defines sendAudio but uses `audio: base64Data` as a
+    # flat string — a naive grep would false-positive.
+    idx = text.find("sendAudio(base64Data) {")
+    if idx < 0:
+        check["status"] = "warn"
+        check["detail"] = "could not locate sendAudio in bodhi dist"
+        return check
+    # Find the first two sendAudio definitions; the Gemini one wraps its
+    # arg in `this.session.sendRealtimeInput(...)`.
+    stale_audio = False
+    stale_file = False
+    # Scan each sendAudio body for the sendRealtimeInput caller (Gemini).
+    for start in _find_all(text, "sendAudio(base64Data) {"):
+        body = _extract_body(text, start)
+        if "sendRealtimeInput" in body:
+            if "media: { data" in body or "media:{data" in body:
+                stale_audio = True
+            break
+    for start in _find_all(text, "sendFile(base64Data, mimeType) {"):
+        body = _extract_body(text, start)
+        if "sendRealtimeInput" in body:
+            if "media: { data" in body or "media:{data" in body:
+                stale_file = True
+            break
+    stale = []
+    if stale_audio:
+        stale.append("sendAudio")
+    if stale_file:
+        stale.append("sendFile")
+    if stale:
+        check["status"] = "fail"
+        check["detail"] = (
+            f"bodhi dist stale: {'/'.join(stale)} still uses deprecated `media` key — "
+            "Gemini 3.1 rejects with 1007. Run `npm install github:sonichi/bodhi_realtime_agent`."
+        )
+    return check
+
+
+def _find_all(haystack: str, needle: str):
+    """Yield every start index where `needle` occurs in `haystack`."""
+    i = 0
+    while True:
+        i = haystack.find(needle, i)
+        if i < 0:
+            return
+        yield i
+        i += len(needle)
+
+
+def _extract_body(text: str, start: int) -> str:
+    """Extract the function body (matched-brace region) starting at the
+    first `{` at or after `start`. Returns at most the next 2000 chars.
+    """
+    brace = text.find("{", start)
+    if brace < 0:
+        return ""
+    depth = 0
+    for j in range(brace, min(brace + 2000, len(text))):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : j + 1]
+    return text[brace : brace + 2000]
+
+
+# ---------------------------------------------------------------------------
+# Stuck-loop / dead-watcher detection
+# ---------------------------------------------------------------------------
+# These two checks together catch the failure mode observed 2026-05-06 where
+# voice-queued tasks piled up in tasks/ for 5+ minutes with no processing,
+# because (a) the watch-tasks fswatch shim wasn't running and (b) the
+# core proactive loop's last status update was 5 days old (status="running"
+# with a stale ts means a pass crashed mid-execution and the loop never
+# re-armed). Each check is a *consequence* signal that fires regardless of
+# which underlying mechanism died.
+
+def check_core_proactive_loop(threshold_sec: int = 600) -> dict:
+    """Detect a stuck core proactive loop via stale core-status.json.
+
+    The proactive loop writes core-status.json at every state transition
+    (see CLAUDE.md "Work Status"). If status reads "running" but the
+    timestamp hasn't advanced in `threshold_sec`, a pass crashed mid-
+    execution and the loop never re-armed — emitted tasks won't be
+    processed. Returns "warn" so emit_task_for_failures surfaces it.
+
+    File missing or malformed → ok (new install, or core has never run).
+    Status is anything other than "running" → ok regardless of age.
+    """
+    name = "core-proactive-loop"
+    status_path = status_read_path("core-status.json", WORKSPACE_DIR)
+    if not status_path.exists():
+        return {"name": name, "status": "ok", "detail": "core-status.json not yet written"}
+    try:
+        data = json.loads(status_path.read_text())
+    except Exception as e:
+        # Malformed JSON shouldn't be treated as a stuck loop — could be a
+        # half-written file caught between os.write() syscalls. Fall through
+        # to ok so the next tick sees a (re-)written status.
+        return {"name": name, "status": "ok", "detail": f"core-status.json unreadable: {str(e)[:60]}"}
+    state = data.get("status")
+    ts = data.get("ts")
+    if state != "running":
+        return {"name": name, "status": "ok", "detail": f"status={state}"}
+    if not isinstance(ts, (int, float)):
+        return {"name": name, "status": "ok", "detail": "running, no ts"}
+    age = int(time.time() - ts)
+    if age > threshold_sec:
+        step = data.get("step", "?")
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"running for {age}s on '{step}' — last heartbeat > {threshold_sec}s ago",
+        }
+    return {"name": name, "status": "ok", "detail": f"running ({age}s ago)"}
+
+
+def check_discord_voice() -> dict:
+    """Detect the discord-voice-server process — an on-demand voice session
+    process under skills/discord-voice/scripts/discord-voice-server.ts.
+
+    Like conversation-server, this is NOT a long-lived daemon: it's launched
+    per Discord voice session and SIGTERM'd by the `dismiss` tool when the
+    session ends. So "not running" is the expected steady state, not an error
+    — this returns a soft `warn` ("not running (on-demand)") when down and
+    `ok` when up, mirroring the conversation-server check. `warn` keeps it out
+    of the `N issue(s) found` error count (main() treats only down/missing/
+    not_loaded/fail as issues; warn is excluded).
+
+    Detection: `pgrep -f discord-voice-server` — the process has no listening
+    port, unlike conversation-server (port 3100), so it can't use check_port.
+    The detail string deliberately contains the word "running" in both states
+    so the dashboard's service filter (src/dashboard.py — keeps checks whose
+    detail mentions "port"/"running") surfaces it either way.
+    """
+    name = "discord-voice"
+    try:
+        result = subprocess.run(
+            ["/usr/bin/pgrep", "-f", "discord-voice-server"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [p for p in result.stdout.strip().split("\n") if p] if result.returncode == 0 else []
+    except (subprocess.TimeoutExpired, OSError):
+        pids = []
+    if pids:
+        check = {"name": name, "status": "ok", "detail": "running"}
+        mark_stale_if_outdated(
+            check,
+            REPO_DIR / "skills" / "discord-voice" / "scripts" / "discord-voice-server.ts",
+            "discord-voice-server.ts",
+        )
+        return check
+    return {"name": name, "status": "warn", "detail": "not running (on-demand)"}
+
+
+def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> dict:
+    """Detect a task-queue pileup — tasks/ directory growing without
+    being drained. Independent of which watcher / loop is dying: the queue
+    backs up either way. Fires when BOTH count and age cross thresholds so
+    a transient spike of fresh tasks (normal during heavy use) doesn't
+    alert.
+    """
+    name = "task-queue"
+    tasks_dir = WORKSPACE_DIR / "tasks"
+    if not tasks_dir.exists():
+        return {"name": name, "status": "ok", "detail": "tasks/ not yet created"}
+    # *.txt at the top level only — archive lives in tasks/archive/<YYYY-MM>/
+    # (PR #591) and shouldn't count toward the queue.
+    files = [p for p in tasks_dir.glob("*.txt") if p.is_file()]
+    if not files:
+        return {"name": name, "status": "ok", "detail": "queue empty"}
+    now = time.time()
+    oldest = min(files, key=lambda p: p.stat().st_mtime)
+    oldest_age = int(now - oldest.stat().st_mtime)
+    if len(files) > threshold_count and oldest_age > threshold_age_sec:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"{len(files)} tasks queued, oldest {oldest_age}s — watcher or core may be stuck",
+        }
+    return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
+
+
+def check_notes_split_brain() -> "dict | None":
+    """Detect notes/ split-brain (#1266): overlapping .md files in both
+    <repo>/notes/ and <workspace>/notes/ — fires only when the two paths differ."""
+    repo_notes = REPO_DIR / "notes"
+    ws_notes = Path(shared_personal_path("notes", WORKSPACE_DIR))
+    if repo_notes.resolve() == ws_notes.resolve():
+        return None
+    if not repo_notes.exists() or not ws_notes.exists():
+        return None
+    repo_files = {p.name for p in repo_notes.glob("*.md")}
+    ws_files = {p.name for p in ws_notes.glob("*.md")}
+    overlap = repo_files & ws_files
+    if not overlap:
+        return None
+    examples = ", ".join(sorted(overlap)[:3])
+    tail = f" … and {len(overlap) - 3} more" if len(overlap) > 3 else ""
+    return {
+        "name": "notes-split-brain",
+        "status": "warn",
+        "detail": (
+            f"{len(overlap)} .md file(s) duplicated across <repo>/notes/ and <workspace>/notes/ "
+            f"— edits to one side are invisible to the other. "
+            f"Run scripts/sutando-migrate.sh to consolidate. "
+            f"Overlap: {examples}{tail}"
+        ),
+    }
+
+
+def run_all_checks() -> list[dict]:
+    checks = []
+
+    # Core services (required)
+    voice_check = check_port(9900, "voice-agent")
+    if voice_check["status"] == "ok":
+        mark_stale_if_outdated(voice_check, REPO_DIR / "src" / "voice-agent.ts", "voice-agent.ts")
+    checks.append(voice_check)
+    checks.append(check_voice_watchers(voice_check))
+    checks.append(check_voice_transport(voice_check))
+    checks.append(check_bodhi_dist())
+
+    web_check = check_port(8080, "web-client")
+    if web_check["status"] == "ok":
+        mark_stale_if_outdated(web_check, REPO_DIR / "src" / "web-client.ts", "web-client.ts")
+    checks.append(web_check)
+
+    # Optional services (downgrade missing to warning, not failure)
+    for port, name in [(7843, "agent-api"), (7844, "dashboard"), (7845, "screen-capture")]:
+        c = check_port(port, name)
+        if c["status"] != "ok":
+            c["status"] = "warn"
+            c["detail"] = "not running (optional)"
+        checks.append(c)
+
+    # macOS TCC — must come before critical-file checks so if TCC is blocking
+    # everything, the operator sees the root cause before the downstream failures.
+    checks.append(check_tcc_documents_access())
+
+    # Critical files
+    for name, path in [
+        ("CLAUDE.md", REPO_DIR / "CLAUDE.md"),
+        ("build_log.md", WORKSPACE_DIR / "build_log.md"),
+        (".env", REPO_DIR / ".env"),
+    ]:
+        checks.append(check_file(path, name))
+
+    # Memory system (check if dir exists — specific files are optional)
+    if MEMORY_DIR.exists():
+        checks.append(check_directory(MEMORY_DIR, "memory-dir"))
+    else:
+        checks.append({"name": "memory-dir", "status": "ok", "detail": "not yet created (normal for new installs)"})
+
+    # Notes — canonical home is the resolved workspace post-migration.
+    # Pass WORKSPACE_DIR (not REPO_DIR) so the check resolves to
+    # <workspace>/notes rather than <repo>/notes — the notes/.gitkeep was
+    # removed from the repo in #793's workspace migration. Post-v0.8
+    # (#1440) the workspace defaults to <repo>/workspace/.
+    checks.append(check_directory(Path(shared_personal_path("notes", WORKSPACE_DIR)), "notes-dir"))
+
+    # Notes split-brain: both <repo>/notes/ and <workspace>/notes/ with overlapping files (#1266)
+    _notes_sb = check_notes_split_brain()
+    if _notes_sb:
+        checks.append(_notes_sb)
+
+    # Memory sync
+    checks.append(check_memory_sync())
+
+    # Phone conversation server (optional — only check if Twilio configured and not skipped)
+    env_path = REPO_DIR / ".env"
+    if env_path.exists():
+        env_content = env_path.read_text()
+        has_twilio = "TWILIO_ACCOUNT_SID=" in env_content and not env_content.split("TWILIO_ACCOUNT_SID=")[1].startswith("\n")
+        skip_phone = "SKIP_PHONE=1" in env_content or os.environ.get("SKIP_PHONE") == "1"
+        if has_twilio and not skip_phone:
+            c = check_port(3100, "conversation-server")
+            if c["status"] != "ok":
+                c["status"] = "warn"
+                c["detail"] = "not running (starts on demand)"
+            else:
+                mark_stale_if_outdated(
+                    c,
+                    REPO_DIR / "skills" / "phone-conversation" / "scripts" / "conversation-server.ts",
+                    "conversation-server.ts",
+                )
+            checks.append(c)
+            # Tunnel check — depends on TWILIO_WEBHOOK_URL host (Funnel) or ngrok.
+            # Skip the whole block when TWILIO_WEBHOOK_URL is unset/empty: with
+            # no inbound webhook, no tunnel is required, so flagging ngrok
+            # "down — phone calls won't reach server" would be a false alarm
+            # (issue #710). The has_twilio gate above only requires
+            # TWILIO_ACCOUNT_SID, which the owner may set for outbound-only.
+            if c["status"] == "ok":
+                webhook_url = ""
+                for line in env_content.splitlines():
+                    if line.startswith("TWILIO_WEBHOOK_URL="):
+                        webhook_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+                if webhook_url:
+                    from urllib.parse import urlparse as _urlparse
+                    _host = _urlparse(webhook_url).hostname or ""
+                    is_funnel = _host.endswith(".ts.net")
+                    if is_funnel:
+                        # Tailscale Funnel — verify funnel is serving and reachable
+                        funnel_c = {"name": "tailscale-funnel", "status": "ok", "detail": f"serving {webhook_url}"}
+                        try:
+                            import urllib.request
+                            req = urllib.request.Request(f"{webhook_url}/health", headers={"User-Agent": "sutando-healthcheck"})
+                            with urllib.request.urlopen(req, timeout=5) as resp:
+                                if resp.status != 200:
+                                    funnel_c["status"] = "down"
+                                    funnel_c["detail"] = f"webhook returned {resp.status}"
+                        except Exception as e:
+                            funnel_c["status"] = "down"
+                            funnel_c["detail"] = f"unreachable: {str(e)[:60]}"
+                        checks.append(funnel_c)
+                    else:
+                        ngrok_c = check_port(4040, "ngrok")
+                        if ngrok_c["status"] == "ok":
+                            ngrok_c["detail"] = "tunnel active (port 4040)"
+                        else:
+                            # Critical: phone calls fail without ngrok
+                            ngrok_c["status"] = "down"
+                            ngrok_c["detail"] = "not running — phone calls won't reach server"
+                        checks.append(ngrok_c)
+
+    # Messaging bridges (optional — only check if configured and not skipped)
+    skip_telegram = (env_path.exists() and "SKIP_TELEGRAM=1" in env_path.read_text()) or os.environ.get("SKIP_TELEGRAM") == "1"
+    channels_dir = claude_home_path("channels")
+    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge")]:
+        channel_name = name.replace("-bridge", "")
+        if channel_name == "telegram" and skip_telegram:
+            continue
+        env_file = channels_dir / channel_name / ".env"
+        access_file = channels_dir / channel_name / "access.json"
+        # Check if configured via either .env or access.json
+        if not env_file.exists() and not access_file.exists():
+            continue
+        try:
+            # Anchor on the .py suffix so we don't match unrelated processes
+            # whose command line happens to contain "discord-bridge" (shell
+            # invocations, ps/grep pipelines, etc). Otherwise pgrep -f bare
+            # name produces false-positive "multiple processes" warnings
+            # that scared us into thinking the bridges were zombied today.
+            result = subprocess.run(["/usr/bin/pgrep", "-f", f"{proc_name}\\.py$"], capture_output=True, text=True)
+            pids = result.stdout.strip().split("\n") if result.returncode == 0 else []
+            pids = [p for p in pids if p]
+        except Exception:
+            pids = []
+
+        if not pids:
+            checks.append({"name": name, "status": "warn", "detail": "configured but not running"})
+            continue
+
+        # Check 1: Multiple processes (zombie/duplicate)
+        if len(pids) > 1:
+            checks.append({"name": name, "status": "warn", "detail": f"multiple processes ({len(pids)} PIDs: {','.join(pids)})"})
+            continue
+
+        # Check 2: Log file freshness — prefer logs/ (where startup.sh writes)
+        # and fall back to src/ for legacy. The src/ default was silently a
+        # no-op since 2026-04 when startup.sh was changed to write logs/<name>.log,
+        # so log-stale warnings never fired (caught 2026-05-05 when Mini's
+        # logs/discord-bridge.log was 36h stale but health-check stayed "ok").
+        import time
+        log_file = WORKSPACE_DIR / "logs" / f"{name}.log"
+        if not log_file.exists():
+            log_file = REPO_DIR / "src" / f"{name}.log"
+        detail = "running"
+        status = "ok"
+        if log_file.exists():
+            age_sec = time.time() - log_file.stat().st_mtime
+            if age_sec > 300:  # 5 minutes
+                status = "warn"
+                detail = f"running but log stale ({int(age_sec)}s old)"
+
+        # Check 3: Heartbeat file freshness (overrides log staleness if fresh)
+        heartbeat_file = WORKSPACE_DIR / "state" / f"{name}.heartbeat"
+        if heartbeat_file.exists():
+            hb_age = time.time() - heartbeat_file.stat().st_mtime
+            if hb_age <= 120:  # heartbeat is fresh — bridge is alive
+                status = "ok"
+                detail = "running"
+            else:
+                status = "warn"
+                detail = f"running but heartbeat stale ({int(hb_age)}s old)"
+
+        # Check 4: Stale code — process started before the source file's last
+        # modification. This catches the case where a fix is on disk but the
+        # running process is from a previous version (e.g., PR #203 silently
+        # not in effect because nobody restarted the bridge after merge).
+        try:
+            src_file = REPO_DIR / "src" / f"{name}.py"
+            if src_file.exists() and pids:
+                src_mtime = src_file.stat().st_mtime
+                # Use ps to get process start time as Unix epoch
+                ps_out = subprocess.run(
+                    ["/bin/ps", "-o", "lstart=", "-p", pids[0]],
+                    capture_output=True, text=True, timeout=5
+                ).stdout.strip()
+                if ps_out:
+                    from datetime import datetime as _dt
+                    proc_start = _dt.strptime(ps_out, "%a %b %d %H:%M:%S %Y").timestamp()
+                    # Threshold tuned to avoid false positives from `git checkout`
+                    # which bumps the mtime of every file that differs between
+                    # branches, even when content is identical. Real stale deploys
+                    # (the original target of #228) are usually hours/days old,
+                    # so 30 min comfortably catches them while tolerating routine
+                    # branch switching.
+                    if src_mtime - proc_start > 1800:  # source >30 min newer
+                        # Cross-check with git before flagging — #253 added this
+                        # for voice-agent + web-client via mark_stale_if_outdated,
+                        # this path does the same check inline to reach bridges.
+                        if not _file_unchanged_since(src_file, proc_start):
+                            status = "stale"
+                            detail = f"running but code is {int((src_mtime - proc_start) / 60)} min newer than process — restart needed"
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            pass
+
+        # Check 5: Dead-log-inode detection — last so heartbeat doesn't override.
+        # Bridge process FDs point to a path that's been renamed/deleted (the
+        # 2026-05-05 case where discord-bridge stdout was going to
+        # /discord-bridge.log.bak after the file was unlinked, so logging
+        # silently went to /dev/null while bridge appeared healthy). Heartbeats
+        # don't catch this because they're written to a separate file via
+        # state/<name>.heartbeat.
+        try:
+            lsof_out = subprocess.run(
+                ["/usr/sbin/lsof", "-p", pids[0]], capture_output=True, text=True, timeout=5
+            ).stdout
+            for line in lsof_out.splitlines():
+                parts = line.split()
+                # Columns: COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME
+                # FD column is index 3 — "1w" or "2w" carry log writes
+                if len(parts) < 9 or parts[3] not in ("1w", "2w"):
+                    continue
+                # NAME starts at col 8 — join remaining tokens to handle paths
+                # with spaces (per MacBook's PR #596 review nit).
+                log_path = " ".join(parts[8:])
+                if log_path.endswith(".log") or log_path.endswith(".log.bak"):
+                    if not Path(log_path).exists():
+                        status = "warn"
+                        detail = (
+                            f"running but log inode dead ({log_path} unlinked) — "
+                            f"restart with: launchctl kickstart -k gui/$(id -u)/com.sutando.{name} "
+                            "(or nohup+disown on Mini)"
+                        )
+                        break
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Check 6: Log-content health for known failure modes.
+        # discord-bridge: LoginFailure means the token is revoked/invalid.
+        #   Always overrides — there is no point restarting with stale code
+        #   if the token is bad; the token fix is the only path forward.
+        # slack-bridge: "60s elapsed" hint means Socket Mode connected but
+        #   events aren't routing (Slack app Event Subscriptions disabled).
+        #   Only overrides "ok" — stale/dead-inode are higher priority.
+        if log_file.exists() and name in ("discord-bridge", "slack-bridge"):
+            try:
+                tail = log_file.read_text(errors="replace").splitlines()[-60:]
+                if name == "discord-bridge":
+                    if any("LoginFailure" in ln or "Improper token" in ln for ln in tail):
+                        status = "fail"
+                        detail = "token invalid (LoginFailure) — regenerate at discord.com/developers/applications"
+                elif name == "slack-bridge" and status == "ok":
+                    if any("60s elapsed with zero events" in ln for ln in tail):
+                        status = "warn"
+                        detail = "connected but events not arriving — enable Event Subscriptions at api.slack.com/apps"
+            except OSError:
+                pass
+
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    # Discord voice server — on-demand process (launched per voice session,
+    # SIGTERM'd by the `dismiss` tool). Soft-warn when down, like
+    # conversation-server. Always checked: discord-voice can be started any
+    # time the discord-bridge / owner triggers a voice session.
+    checks.append(check_discord_voice())
+
+    # Sutando menu bar app — check either dev-built binary or installed .app.
+    # On the distributed .app path the dev binary doesn't ship; we still want
+    # the menu bar check to run so dashboard reports accurate status.
+    dev_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
+    app_bin = Path("/Applications/Sutando.app/Contents/MacOS/Sutando")
+    if dev_bin.exists() or app_bin.exists():
+        # Distinguish pgrep failures (exit code != 0 and != 1) from a real
+        # no-match (exit code 1). Pre-fix the bare try/except swallowed
+        # subprocess errors AND empty results into a single "no pids" path,
+        # which surfaced as a false "not running" warn when pgrep itself
+        # hiccupped (CPU contention, fd exhaustion, etc.). Chi hit this
+        # 2026-05-18 — app was alive (PID 34586 since May 17) but a
+        # health-check tick reported "not running."
+        pgrep_status = None  # "ok-running" | "ok-stopped" | "error"
+        pgrep_err = ""
+        pids: list[str] = []
+        try:
+            result = subprocess.run(
+                ["/usr/bin/pgrep", "-f", "(Sutando|MacOS)/Sutando"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                pids = [p for p in result.stdout.strip().split("\n") if p]
+                pgrep_status = "ok-running"
+            elif result.returncode == 1:
+                # pgrep convention: 1 = no match
+                pgrep_status = "ok-stopped"
+            else:
+                pgrep_status = "error"
+                pgrep_err = (result.stderr or f"pgrep exit={result.returncode}").strip()[:120]
+        except Exception as e:
+            pgrep_status = "error"
+            pgrep_err = f"{type(e).__name__}: {e}"[:120]
+
+        if pgrep_status == "ok-running" and pids:
+            check = {"name": "sutando-app", "status": "ok", "detail": f"running (⌃C/⌃V/⌃M)"}
+            # Staleness check is meaningful only in the dev workflow — the
+            # .app binary and bundled main.swift share a build mtime, so a
+            # comparison there is always equal. Skip when dev_bin missing.
+            if dev_bin.exists():
+                mark_stale_if_outdated(
+                    check,
+                    REPO_DIR / "src" / "Sutando" / "main.swift",
+                    "(Sutando|MacOS)/Sutando",
+                    binary_path=dev_bin,
+                )
+            checks.append(check)
+        elif pgrep_status == "ok-stopped":
+            checks.append({"name": "sutando-app", "status": "warn", "detail": "not running — hotkeys disabled"})
+        else:
+            # pgrep itself errored — don't false-alarm "not running" when we
+            # actually couldn't determine state. Surface as a transient warn
+            # with the cause so it's debuggable, not a routine "app is down."
+            checks.append({"name": "sutando-app", "status": "warn", "detail": f"detection failed (pgrep: {pgrep_err or 'unknown error'}) — actual app state unknown"})
+
+    # Stuck-loop / queue-pileup detection — consequence-level signals that
+    # fire whether the watcher died, the proactive loop crashed mid-pass, or
+    # both. Independent of which mechanism died.
+    loop_stale_sec = int(os.environ.get("SUTANDO_HEALTH_LOOP_STALE_SEC", "600"))
+    queue_age_sec = int(os.environ.get("SUTANDO_HEALTH_QUEUE_AGE_SEC", "300"))
+    queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
+    checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
+    checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
+
+    return checks
+
+
+def _any_core_alive(workspace: Optional[Path] = None, max_age_s: float = 90.0) -> bool:
+    """Return True if any sutando-core on any host has a live heartbeat.
+
+    Each running core writes `<workspace>/state/cores/<hostname>.alive` every
+    30 seconds (src/core_heartbeat.py). A file younger than `max_age_s` (3
+    missed beats at 30s each) means the core is alive. When it is, the
+    proactive loop already handles health inline — no need to queue a task.
+
+    `workspace` defaults to `WORKSPACE_DIR` at call time (not at import time)
+    so tests can patch the module-level name and have the change take effect.
+    """
+    if workspace is None:
+        workspace = WORKSPACE_DIR
+    cores_dir = workspace / "state" / "cores"
+    if not cores_dir.is_dir():
+        return False
+    now = time.time()
+    for alive_file in cores_dir.glob("*.alive"):
+        try:
+            if now - alive_file.stat().st_mtime < max_age_s:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None, tasks_dir: Optional[Path] = None) -> None:
+    """Emit a task file describing health-check failures so the proactive
+    loop's CLI session sees them via the watcher and can decide what to do
+    (restart, DM owner, ignore as transient).
+
+    Bridges the detection-vs-action gap: dashboard + morning-briefing already
+    surface failures to the user, but no path drove the AGENT to act on them.
+    Now health-check at any cron tick can produce a task file → watcher fires
+    → CLI processes as owner-tier task → LLM judgment at the act step.
+
+    Dedup via failure-SET hash to avoid spamming a task every tick when a
+    failure persists. The hash covers the full active set (sorted member
+    names) — if the set changes (one service recovers, another fails), the
+    hash changes and a new task fires. Cooldown is 1h per hash so a
+    persistent failure re-alerts after a reasonable window.
+
+    `state_file` and `tasks_dir` default to the workspace paths used in
+    production. Tests inject temp paths.
+    """
+    # `warn` is the status used for "service is up but has a real issue"
+    # (e.g., the dead-log-inode case from PR #596 — bridge running but
+    # logging silently to a deleted file). Including warn means the
+    # watchdog catches the bug class that motivated this PR. Excluding
+    # would have missed Mini's discord-bridge issue this morning. Per
+    # her PR review note 2026-05-05.
+    failures = [c for c in checks if c["status"] in ("down", "missing", "not_loaded", "fail", "stale", "warn")]
+    if not failures:
+        return
+
+    if state_file is None or tasks_dir is None:
+        if state_file is None:
+            state_file = WORKSPACE_DIR / "state" / "health-last-alerted.json"
+        if tasks_dir is None:
+            tasks_dir = WORKSPACE_DIR / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Hash the full failure set (sorted) — Mini's #2 review note: hash MUST
+    # cover the active set, not member-by-member, else suppressing legit
+    # re-alerts when the set is identical to last alert.
+    set_key = "|".join(sorted(c["name"] for c in failures))
+    hash_key = hashlib.sha256(set_key.encode()).hexdigest()[:16]
+    now_ms = int(time.time() * 1000)
+    cooldown_ms = 3600 * 1000  # 1h
+
+    # Read prior alert state.
+    history: dict = {}
+    try:
+        if state_file.exists():
+            history = json.loads(state_file.read_text())
+    except Exception:
+        history = {}
+
+    last_alerted = history.get(hash_key, 0)
+    if now_ms - last_alerted < cooldown_ms:
+        # Same failure set, within cooldown — skip.
+        return
+
+    # Build task content.
+    ts_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    bullet_lines = [f"- {c['name']}: {c['status']} ({c['detail']})" for c in failures]
+    body = (
+        f"id: task-health-{now_ms}\n"
+        f"timestamp: {ts_iso}\n"
+        f"task: Health check found issues. Decide whether to restart, DM owner, or treat as transient:\n"
+        + "\n".join(bullet_lines) + "\n"
+        f"source: health-check\n"
+        f"user_id: health-check\n"
+        f"access_tier: owner\n"
+        f"priority: low\n"
+    )
+    task_path = tasks_dir / f"task-health-{now_ms}.txt"
+    task_path.write_text(body)
+
+    # Update history. Prune entries older than 24h to bound file size.
+    history[hash_key] = now_ms
+    cutoff = now_ms - (24 * 3600 * 1000)
+    history = {k: v for k, v in history.items() if v >= cutoff}
+    try:
+        state_file.write_text(json.dumps(history))
+    except Exception:
+        pass
+
+
+def notify_for_failures(
+    checks: list[dict],
+    state_file: Optional[Path] = None,
+    notify_cmd: Optional[list[str]] = None,
+) -> None:
+    """Surface health-check failures via macOS notification.
+
+    Companion to `emit_task_for_failures` — same dedup contract (per-failure-
+    set hash, 1h cooldown, separate state file). Two surfaces are needed for
+    robustness: emit-task only delivers if the agent is alive to read tasks/,
+    osascript runs at OS level and surfaces even when every Sutando service
+    is dead. The launchd-supervised fallback health-check
+    (com.sutando.health-check-fallback) relies on this property — it's the
+    alert path that survives "all of Sutando is down."
+
+    `notify_cmd` is the executable + args used to fire the notification;
+    defaults to `osascript` driving `display notification`. Tests inject a
+    fake to avoid spamming the developer's own notification center.
+    """
+    failures = [c for c in checks if c["status"] in ("down", "missing", "not_loaded", "fail", "stale", "warn")]
+    if not failures:
+        return
+
+    if state_file is None:
+        state_file = WORKSPACE_DIR / "state" / "health-last-notified.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    set_key = "|".join(sorted(c["name"] for c in failures))
+    hash_key = hashlib.sha256(set_key.encode()).hexdigest()[:16]
+    now_ms = int(time.time() * 1000)
+    cooldown_ms = 3600 * 1000  # 1h — matches emit_task
+
+    history: dict = {}
+    try:
+        if state_file.exists():
+            history = json.loads(state_file.read_text())
+    except Exception:
+        history = {}
+
+    last_notified = history.get(hash_key, 0)
+    if now_ms - last_notified < cooldown_ms:
+        return
+
+    # Build a short notification body — macOS truncates aggressively. Lead
+    # with count, then top failure names. Full detail is in emit-task.
+    names = [c["name"] for c in failures[:3]]
+    extra = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+    body = f"{len(failures)} health check failure(s): {', '.join(names)}{extra}"
+
+    # AppleScript single-quote escaping: drop double-quotes and backslashes
+    # so the shell command literal can't be broken by check details.
+    safe = body.replace('"', '').replace('\\', '')
+    cmd = notify_cmd or [
+        "osascript", "-e",
+        f'display notification "{safe}" with title "Sutando — health check"',
+    ]
+    try:
+        subprocess.run(cmd, check=False, timeout=10)
+    except Exception:
+        # Notification failure is non-fatal — we still want emit-task to fire.
+        pass
+
+    history[hash_key] = now_ms
+    cutoff = now_ms - (24 * 3600 * 1000)
+    history = {k: v for k, v in history.items() if v >= cutoff}
+    try:
+        state_file.write_text(json.dumps(history))
+    except Exception:
+        pass
+
+
+def _slack_failures(checks: list[dict]) -> list[dict]:
+    """Failures worth a remote owner DM.
+
+    Same hard-failure statuses as notify_for_failures, but drops benign
+    on-demand `warn`s (e.g. discord-voice / conversation-server "not running
+    (on-demand)") — those are the steady state for per-session processes and
+    would spam the owner's DM every cooldown window. The signals that matter
+    for a remote watchdog (stuck core-proactive-loop, task-queue pileup, a
+    bridge that's actually down) all survive this filter.
+    """
+    out = []
+    for c in checks:
+        st = c["status"]
+        if st in ("down", "missing", "not_loaded", "fail", "stale"):
+            out.append(c)
+        elif st == "warn" and "on-demand" not in (c.get("detail") or ""):
+            out.append(c)
+    return out
+
+
+def _slack_token_from_env_file() -> str:
+    """Read SLACK_BOT_TOKEN from disk. The launchd-supervised fallback runs
+    with a minimal environment (no sourced .env), so $SLACK_BOT_TOKEN is
+    usually absent there — but the token persists on disk. Reading the file
+    directly keeps the watchdog self-sufficient without putting the secret in
+    the world-readable LaunchAgents plist. Returns "" if absent/unreadable.
+
+    Order matters: the slack bridge's canonical token location is
+    ~/.claude/channels/slack/.env (startup.sh sources exactly that file before
+    launching the bridge — see src/startup.sh). The original implementation
+    only checked $REPO/.env, where the token does NOT live on a standard
+    install — so the watchdog DM silently no-op'd (creds=None) and the owner
+    got no alert at all. Check the channel .env first, then fall back to
+    $REPO/.env for hosts that keep it there instead.
+    """
+    candidates = [
+        Path.home() / ".claude" / "channels" / "slack" / ".env",
+        REPO_DIR / ".env",
+    ]
+    for env_path in candidates:
+        try:
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("SLACK_BOT_TOKEN="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        return val
+        except Exception:
+            continue
+    return ""
+
+
+def _slack_owner_creds() -> "tuple[str, str] | None":
+    """Return (bot_token, owner_user_id) for a direct Slack DM, or None.
+
+    Token from $SLACK_BOT_TOKEN (same one the slack bridge uses), falling back
+    to the on-disk .env files (channel .env first, then $REPO/.env) for the
+    minimal-env launchd path; owner from
+    ~/.claude/channels/slack/access.json (`tofuOwner`, else first `allowFrom`).
+    Both must be present — otherwise there's no one to DM.
+    """
+    token = os.environ.get("SLACK_BOT_TOKEN", "").strip() or _slack_token_from_env_file()
+    if not token:
+        return None
+    access = Path.home() / ".claude" / "channels" / "slack" / "access.json"
+    try:
+        data = json.loads(access.read_text())
+    except Exception:
+        return None
+    owner = data.get("tofuOwner")
+    if not owner:
+        allow = data.get("allowFrom") or []
+        owner = allow[0] if allow else None
+    if not owner:
+        return None
+    return token, owner
+
+
+def _slack_api(token: str, method: str, payload: dict) -> dict:
+    """Minimal Slack Web API POST via urllib (no slack_bolt dependency, so
+    this works in the launchd-supervised fallback even if the bridge venv
+    isn't on the path). Returns the parsed JSON response."""
+    req = urllib.request.Request(
+        f"https://slack.com/api/{method}",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _default_slack_sender(text: str) -> bool:
+    """Open a DM to the owner and post `text`. Returns True on success."""
+    creds = _slack_owner_creds()
+    if not creds:
+        return False
+    token, owner = creds
+    try:
+        opened = _slack_api(token, "conversations.open", {"users": owner})
+        if not opened.get("ok"):
+            return False
+        channel = opened["channel"]["id"]
+        posted = _slack_api(token, "chat.postMessage", {"channel": channel, "text": text})
+        return bool(posted.get("ok"))
+    except Exception:
+        return False
+
+
+def notify_slack_for_failures(
+    checks: list[dict],
+    state_file: Optional[Path] = None,
+    sender=None,
+) -> None:
+    """DM the owner on Slack when health checks fail — a remote-visible
+    surface that does NOT depend on the core agent being alive.
+
+    This is the watchdog the owner asked for: when the core session wedges
+    (e.g. loops on the 1M-context usage-credit API error), `core-heartbeat`
+    keeps beating from its own background process, so `_any_core_alive()`
+    stays True and `emit_task_for_failures` stays silent — but the
+    `core-proactive-loop` check flips to `warn` and this DMs Slack anyway.
+    Deliberately NOT gated on core liveness, for exactly that reason.
+
+    Same dedup contract as notify_for_failures (per-failure-set hash, 1h
+    cooldown) but a separate state file so the Slack and macOS surfaces never
+    suppress each other. The dedup hash is recorded only on a SUCCESSFUL send,
+    so a transient Slack/API outage doesn't silence the alert for an hour.
+    `sender` is injected by tests to avoid real API calls.
+    """
+    failures = _slack_failures(checks)
+    if not failures:
+        return
+
+    if state_file is None:
+        state_file = WORKSPACE_DIR / "state" / "health-last-slacked.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    set_key = "|".join(sorted(c["name"] for c in failures))
+    hash_key = hashlib.sha256(set_key.encode()).hexdigest()[:16]
+    now_ms = int(time.time() * 1000)
+    cooldown_ms = 3600 * 1000  # 1h — matches the macOS + emit-task surfaces
+
+    history: dict = {}
+    try:
+        if state_file.exists():
+            history = json.loads(state_file.read_text())
+    except Exception:
+        history = {}
+
+    if now_ms - history.get(hash_key, 0) < cooldown_ms:
+        return
+
+    lines = [f"• {c['name']}: {c['status']} ({c['detail']})" for c in failures[:5]]
+    extra = f"\n…(+{len(failures) - 5} more)" if len(failures) > 5 else ""
+    text = (
+        f":rotating_light: *Sutando health check* — {len(failures)} issue(s):\n"
+        + "\n".join(lines)
+        + extra
+    )
+
+    send = sender or _default_slack_sender
+    if not send(text):
+        # Send failed — don't record dedup, so the next tick retries.
+        return
+
+    history[hash_key] = now_ms
+    cutoff = now_ms - (24 * 3600 * 1000)
+    history = {k: v for k, v in history.items() if v >= cutoff}
+    try:
+        state_file.write_text(json.dumps(history))
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Core wedge auto-recovery (--recover-core)
+# ---------------------------------------------------------------------------
+#
+# The 2026-06-02 outage: the core session crossed into 1M extended context,
+# hit the interactive `/usage-credits` gate — which CANNOT be pre-authorized
+# for an unattended agent (it's a per-session, account-side toggle, no
+# settings key / env var / CLI flag exists) — and then looped on the API
+# error. core_heartbeat.py runs as its own process, so the core still "looked
+# alive" while no task ever drained. --notify-slack makes that VISIBLE; this
+# makes it SELF-HEALING.
+#
+# Recovery action is the one mechanism we already own and trust:
+# `scripts/start-cli.sh --restart`. A restarted session starts fresh under the
+# standard context boundary; because the /usage-credits enable persists
+# ACCOUNT-WIDE once a human sets it (and on Max/Team plans 1M is included with
+# no gate at all), the restarted core keeps 1M and re-clears the gate by
+# itself. Queued task files survive a restart (the bridge is file-based), so
+# no work is lost. 1M therefore stays the DEFAULT — we never disable it.
+#
+# Heavily guarded, because auto-restarting a 24/7 agent is consequential:
+#   - Fires only on a CONFIRMED, SUSTAINED wedge: core process alive AND the
+#     oldest queued task older than RECOVER_WEDGE_SEC AND the core didn't just
+#     boot — observed on two passes ≥ RECOVER_CONFIRM_SEC apart. Never a blip.
+#   - Identity + progress gating (so a legitimately long-running single task is
+#     not killed mid-work): the SAME oldest task must persist across the window
+#     (a draining queue surfaces a different oldest each pass → resets) AND
+#     core-status.json must not advance (a core making progress isn't wedged).
+#     Residual: a long single task that NEVER updates its status is still
+#     indistinguishable from a wedge by external signals — bounded by the
+#     cooldown + give-up cap, and such tasks should heartbeat core-status.json.
+#   - RECOVER_COOLDOWN_SEC between restarts; an exclusive flock on the state
+#     file serializes the decision so a manual + launchd run can't double-fire.
+#   - Hard cap of RECOVER_MAX_PER_HOUR; past that it DMs "giving up" and stops,
+#     so a pathological wedge can't become a restart loop.
+#   - Graceful degradation: the FIRST restart of an episode keeps 1M; if the
+#     wedge recurs (the 1M restart didn't hold), the next restart pins
+#     SUTANDO_CORE_MODEL=opus (standard 200K) so the agent keeps WORKING.
+#   - DMs the owner before each restart and records whether the DM succeeded
+#     (last_restart_dm_sent) + logs failures, so a restart is never invisible
+#     even if Slack is down — recovery still proceeds (recovery > notification).
+#
+# All side-effecting collaborators are injectable so the escalation / cooldown
+# / give-up logic is unit-tested without real restarts or Slack calls. Only
+# wired into the launchd fallback job (its own process, outside the core), and
+# start-cli.sh has its own from-inside-core guard — two independent guarantees
+# the recovery never runs from within the session it would kill.
+
+RECOVER_WEDGE_SEC = int(os.environ.get("SUTANDO_RECOVER_WEDGE_SEC", "600"))        # task stuck this long = wedged
+RECOVER_CONFIRM_SEC = int(os.environ.get("SUTANDO_RECOVER_CONFIRM_SEC", "120"))    # wedge must persist across passes
+RECOVER_COOLDOWN_SEC = int(os.environ.get("SUTANDO_RECOVER_COOLDOWN_SEC", "1800")) # min gap between restarts
+RECOVER_MAX_PER_HOUR = int(os.environ.get("SUTANDO_RECOVER_MAX_PER_HOUR", "3"))
+
+
+def _oldest_pending_task(now: float, tasks_dir: Optional[Path] = None) -> "tuple[str, int] | None":
+    """(identity, age_seconds) of the oldest top-level tasks/*.txt, or None if
+    the queue is empty. Mirrors check_task_queue's globbing (top-level only;
+    archive/ excluded). This is the precise wedge signal for recovery: a healthy
+    core drains a task in seconds-to-minutes, so a task sitting for
+    RECOVER_WEDGE_SEC while the core process is alive means the core is stuck —
+    regardless of what core-status.json last said (check_core_proactive_loop
+    misses a wedge that happens while status reads 'idle', because it only flags
+    'running').
+
+    The identity is `"<name>|<int(mtime)>"`. Recovery requires the SAME identity
+    to persist across the confirm window before restarting (PR #1428 review,
+    blocker 3): if the oldest task changes (a task drained → a different oldest)
+    or its mtime moves (the file was rewritten/reprocessed), the queue is
+    draining, not wedged, and the observation resets — so a busy-but-healthy
+    backlog never triggers a restart."""
+    if tasks_dir is None:
+        tasks_dir = WORKSPACE_DIR / "tasks"
+    try:
+        files = [p for p in tasks_dir.glob("*.txt") if p.is_file()]
+    except OSError:
+        return None
+    if not files:
+        return None
+    try:
+        oldest = min(files, key=lambda p: p.stat().st_mtime)
+        mtime = oldest.stat().st_mtime
+    except OSError:
+        return None
+    return (f"{oldest.name}|{int(mtime)}", int(now - mtime))
+
+
+def _core_status_ts(workspace: Optional[Path] = None) -> "float | None":
+    """Current core-status.json `ts`, or None if unavailable. Used as a
+    progress signal: a core actively working (even a long single task that
+    periodically updates status per CLAUDE.md) advances this; a core looping on
+    the usage-credit API error cannot complete a turn to update it. If it
+    advances across the confirm window, recovery treats the core as making
+    progress and resets — so legitimately long work isn't restarted out from
+    under itself (PR #1428 review, blocker 3)."""
+    if workspace is None:
+        workspace = WORKSPACE_DIR
+    try:
+        data = json.loads(status_read_path("core-status.json", workspace).read_text())
+        ts = data.get("ts")
+        return ts if isinstance(ts, (int, float)) else None
+    except Exception:
+        return None
+
+
+def _core_started_within(seconds: float, workspace: Optional[Path] = None, now: Optional[float] = None) -> bool:
+    """True if the freshest LIVE core heartbeat reports started_at within the
+    last `seconds`. Guards against restarting a core that only just booted and
+    hasn't had time to drain the queue yet (its tasks look 'old' but it's
+    catching up, not wedged)."""
+    if workspace is None:
+        workspace = WORKSPACE_DIR
+    if now is None:
+        now = time.time()
+    cores_dir = workspace / "state" / "cores"
+    if not cores_dir.is_dir():
+        return False
+    youngest_start = None
+    for alive_file in cores_dir.glob("*.alive"):
+        try:
+            if now - alive_file.stat().st_mtime >= 90.0:
+                continue  # stale heartbeat — not a live core
+            data = json.loads(alive_file.read_text())
+        except (OSError, ValueError):
+            continue
+        started = data.get("started_at")
+        if isinstance(started, (int, float)):
+            if youngest_start is None or started > youngest_start:
+                youngest_start = started
+    if youngest_start is None:
+        return False
+    return (now - youngest_start) < seconds
+
+
+def _default_core_restart(standard_context: bool) -> bool:
+    """Run scripts/start-cli.sh --restart out-of-process. When standard_context
+    is True, pin SUTANDO_CORE_MODEL=opus so the restarted core runs in the
+    standard 200K window (graceful degradation). Returns True if the restart
+    command exited 0."""
+    script = REPO_DIR / "scripts" / "start-cli.sh"
+    if not script.exists():
+        return False
+    env = dict(os.environ)
+    # launchd's minimal PATH won't find homebrew tmux; start-cli.sh needs it.
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "/usr/bin:/bin")
+    if standard_context:
+        env["SUTANDO_CORE_MODEL"] = "opus"
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", str(script), "--restart"],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def recover_core_if_wedged(
+    state_file: Optional[Path] = None,
+    now: Optional[float] = None,
+    alive_fn=None,
+    oldest_task_fn=None,
+    status_ts_fn=None,
+    just_booted_fn=None,
+    restart_fn=None,
+    sender=None,
+) -> "dict | None":
+    """Auto-restart the core when it is alive-but-wedged. Returns a dict
+    describing the action taken (for tests / observability), or None when no
+    action was warranted. See the module comment above for the guard rationale.
+    All side-effecting collaborators are injectable for tests.
+
+    The whole load→decide→restart→save sequence runs under an exclusive,
+    non-blocking flock on `<state_file>.lock` (PR #1428 review, suggestion):
+    a manual `--recover-core` from the CLI and the launchd job firing in the
+    same window must not both clear the cooldown and issue duplicate restarts.
+    A second concurrent invocation returns {"action": "locked"} and no-ops.
+    """
+    if now is None:
+        now = time.time()
+    if state_file is None:
+        state_file = WORKSPACE_DIR / "state" / "core-recovery.json"
+    alive_fn = alive_fn or _any_core_alive
+    oldest_task_fn = oldest_task_fn or (lambda: _oldest_pending_task(now))
+    status_ts_fn = status_ts_fn or _core_status_ts
+    just_booted_fn = just_booted_fn or (lambda: _core_started_within(RECOVER_WEDGE_SEC, now=now))
+    restart_fn = restart_fn or _default_core_restart
+    send = sender or _default_slack_sender
+
+    try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    # Serialize the critical section (suggestion: no concurrent double-restart).
+    lock_path = state_file.with_name(state_file.name + ".lock")
+    lock_fh = None
+    if fcntl is not None:
+        try:
+            lock_fh = open(lock_path, "w")
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Another recovery invocation holds the lock — skip this pass.
+            if lock_fh is not None:
+                lock_fh.close()
+            return {"action": "locked"}
+
+    try:
+        try:
+            state = json.loads(state_file.read_text()) if state_file.exists() else {}
+        except Exception:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+
+        def _save():
+            try:
+                state_file.write_text(json.dumps(state))
+            except Exception:
+                pass
+
+        def _reset_observation():
+            state["wedge_first_seen"] = 0
+            state["wedge_task"] = None
+            state["wedge_status_ts"] = None
+
+        oldest = oldest_task_fn()                    # (identity, age) | None
+        cur_key = oldest[0] if oldest else None
+        oldest_age = oldest[1] if oldest else None
+        status_ts = status_ts_fn()
+        wedged = (
+            alive_fn()
+            and oldest is not None
+            and oldest_age > RECOVER_WEDGE_SEC
+            and not just_booted_fn()
+        )
+
+        if not wedged:
+            # Healthy / no queued work / core down / just booted. Clear any
+            # in-progress observation so a future wedge starts fresh.
+            # last_restart / history are preserved (cooldown + give-up survive).
+            if state.get("wedge_first_seen") or state.get("wedge_task") is not None:
+                _reset_observation()
+                _save()
+            return None
+
+        # Identity + progress gating (blocker 3): age alone can't tell a wedge
+        # from a legitimately long single task. Reset the confirmation window if
+        # EITHER the oldest task changed (queue draining → a different oldest, or
+        # the file was rewritten → new mtime) OR the core advanced core-status.json
+        # (it's making progress, not looping). Only a SAME-task, NO-progress
+        # streak across the window is treated as a real wedge.
+        prev_key = state.get("wedge_task")
+        prev_status_ts = state.get("wedge_status_ts")
+        first_seen = state.get("wedge_first_seen") or 0
+        progressed = (
+            isinstance(prev_status_ts, (int, float))
+            and isinstance(status_ts, (int, float))
+            and status_ts > prev_status_ts
+        )
+        if (not first_seen) or prev_key != cur_key or progressed:
+            state["wedge_first_seen"] = now
+            state["wedge_task"] = cur_key
+            state["wedge_status_ts"] = status_ts
+            _save()
+            return {"action": "observed", "oldest_age": oldest_age, "task": cur_key}
+
+        if now - first_seen < RECOVER_CONFIRM_SEC:
+            return {"action": "confirming", "oldest_age": oldest_age, "for": int(now - first_seen)}
+
+        # Cooldown between restarts.
+        last_restart = state.get("last_restart") or 0
+        if last_restart and now - last_restart < RECOVER_COOLDOWN_SEC:
+            return {"action": "cooldown", "oldest_age": oldest_age, "since_restart": int(now - last_restart)}
+
+        # Give-up cap: prune restart history to the trailing hour.
+        history = [t for t in (state.get("restart_history") or []) if isinstance(t, (int, float)) and now - t < 3600]
+        if len(history) >= RECOVER_MAX_PER_HOUR:
+            # DM once per give-up episode. Record gave_up_at only on a SUCCESSFUL
+            # send so a Slack outage doesn't silence the give-up alert for an hour.
+            if not state.get("gave_up_at") or now - state["gave_up_at"] > 3600:
+                if send(
+                    ":octagonal_sign: *Sutando core auto-recovery gave up* — restarted "
+                    f"{len(history)}× in the last hour and the core is still wedged "
+                    f"(oldest task stuck {oldest_age // 60} min). Needs manual attention: "
+                    "check the CLI / `/usage-credits`."
+                ):
+                    state["gave_up_at"] = now
+                    _save()
+                else:
+                    print("[recover-core] WARNING: give-up DM to owner failed", flush=True)
+            return {"action": "gave_up", "restarts_last_hour": len(history)}
+
+        # Escalation: the FIRST restart in the trailing hour keeps 1M; if we're
+        # wedged again after a prior restart, that restart didn't hold — degrade
+        # to standard 200K context so the agent keeps working instead of re-wedging.
+        standard_context = len(history) >= 1
+        mode = "standard" if standard_context else "1m"
+        ctx_note = (
+            "in standard 200K context (the 1M restart didn't hold)" if standard_context
+            else "keeping 1M context"
+        )
+        # DM the owner BEFORE restarting. Capture the result (blocker 2): if the
+        # DM fails we still restart (recovery > notification — don't leave the
+        # core wedged because Slack is down), but we record dm_sent=False and log
+        # to stderr/launchd so the restart is never invisible.
+        dm_ok = send(
+            f":hourglass: *Sutando core wedged* — oldest task stuck {oldest_age // 60} min "
+            f"while the core process is alive (likely the 1M usage-credit gate or a "
+            f"stalled turn). Auto-restarting {ctx_note}. Queued tasks are preserved."
+        )
+        if not dm_ok:
+            print(f"[recover-core] WARNING: wedge-restart DM failed; restarting anyway (mode={mode})", flush=True)
+
+        if not restart_fn(standard_context):
+            # Restart launch failed — don't burn a cooldown/history slot, and
+            # keep the observation so we stay confirmed and retry next pass.
+            return {"action": "restart_failed", "mode": mode, "dm_sent": dm_ok}
+
+        history.append(now)
+        state["restart_history"] = history
+        state["last_restart"] = now
+        state["last_restart_mode"] = mode
+        state["last_restart_dm_sent"] = dm_ok
+        _reset_observation()  # re-observe after the restart settles
+        state.pop("gave_up_at", None)
+        _save()
+        return {
+            "action": "restarted", "mode": mode, "oldest_age": oldest_age,
+            "restarts_last_hour": len(history), "dm_sent": dm_ok,
+        }
+    finally:
+        if lock_fh is not None:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            lock_fh.close()
+
+
+def main():
+    as_json = "--json" in sys.argv
+    do_fix = "--fix" in sys.argv
+    do_emit = "--emit-task" in sys.argv
+    do_notify = "--notify-on-fail" in sys.argv
+    do_notify_slack = "--notify-slack" in sys.argv
+    do_recover = "--recover-core" in sys.argv
+    quiet = "--quiet" in sys.argv or "-q" in sys.argv
+
+    checks = run_all_checks()
+    issues = [c for c in checks if c["status"] not in ("ok", "warn")]
+
+    # Optional: macOS notification surface for the launchd-supervised path
+    # (com.sutando.health-check-fallback). Notifies on the INITIAL check set
+    # — the launchd fallback wants the user-visible alert immediately, even
+    # if --fix would resolve some issues. Independent dedup state from
+    # emit-task — the two surfaces are deliberately decoupled so neither
+    # can suppress the other.
+    if do_notify:
+        notify_for_failures(checks)
+
+    # Optional: remote Slack DM surface. Unlike --notify-on-fail (local
+    # macOS notification) and --emit-task (needs a live core to read the
+    # task), this reaches the owner off-machine and fires even when the core
+    # session is wedged but its heartbeat process still ticks. Intended for
+    # the launchd-supervised fallback invocation so outages self-report.
+    if do_notify_slack:
+        notify_slack_for_failures(checks)
+
+    # Optional: auto-recover a wedged core (alive-but-stuck) by restarting it.
+    # Independent of the checks list — keys off the queue-drain + heartbeat
+    # signals directly (see recover_core_if_wedged). Intended for the
+    # launchd-supervised fallback so the core self-heals from the 1M-gate wedge
+    # without waiting for a human. Heavily guarded (confirm window, cooldown,
+    # give-up cap); a no-op when the core is healthy.
+    if do_recover:
+        recover_core_if_wedged()
+
+    # Emit-task: when NOT running --fix, the initial check IS the residual,
+    # so emit here BEFORE the early-exit paths (--json return, --quiet
+    # sys.exit). Per Mini's PR #640 v2-regression catch: my prior change
+    # moved emit-task to end-of-main, which the launchd fallback's
+    # `--quiet --emit-task --notify-on-fail` invocation bypassed via the
+    # quiet-path sys.exit(1). Splitting the emit logic by --fix state
+    # restores coverage for the no-fix path.
+    #
+    # Skip when a live core is present (issue #635 dedup-runners): the
+    # proactive loop already handles health inline — writing a task file
+    # here creates a duplicate that re-queues the same check. The task-file
+    # path is only useful when the core is dead (queues for next restart).
+    if do_emit and not do_fix and not _any_core_alive():
+        emit_task_for_failures(checks)
+
+    if as_json:
+        print(json.dumps({"checks": checks, "issues": len(issues), "total": len(checks)}, indent=2))
+        return
+
+    # --quiet: print only issues (or nothing if clean). Exit code reflects state.
+    # Useful for cron callers and automation that only cares about problems.
+    if quiet:
+        if issues:
+            for c in issues:
+                icon = "♻" if c["status"] == "stale" else "✗"
+                print(f"{icon} {c['name']}: {c['status']} ({c['detail']})")
+            if do_fix:
+                # Fall through to existing fix path below
+                pass
+            else:
+                sys.exit(1)
+        else:
+            sys.exit(0)
+
+    # Human-readable
+    if not quiet:
+        print("Sutando Health Check")
+        print("=" * 40)
+
+        for c in checks:
+            icon = "✓" if c["status"] == "ok" else "⚠" if c["status"] == "warn" else "✗" if c["status"] in ("down", "missing", "not_loaded") else "♻" if c["status"] == "stale" else "~"
+            print(f"  {icon} {c['name']:30s} {c['status']:12s} {c['detail']}")
+
+        print()
+    if not issues:
+        if not quiet:
+            print("All systems operational.")
+    else:
+        print(f"{len(issues)} issue(s) found:")
+        for c in issues:
+            print(f"  - {c['name']}: {c['status']} ({c['detail']})")
+
+        if do_fix:
+            print()
+            print("Attempting fixes...")
+            for c in issues:
+                if c["name"].startswith("com.sutando."):
+                    result = fix_launchd(c["name"])
+                    print(f"  {c['name']}: {result}")
+                elif c["name"] in ("telegram-bridge", "discord-bridge"):
+                    # LoginFailure means the token is bad — restarting won't help
+                    # and would create a duplicate alongside the launchd-managed one.
+                    if "LoginFailure" in c.get("detail", "") or "token invalid" in c.get("detail", ""):
+                        print(f"  {c['name']}: token invalid — regenerate at discord.com/developers/applications (no restart)")
+                    else:
+                        # If stale (process older than source code), kill old PID first
+                        # so the new process doesn't conflict with a still-running zombie.
+                        if c["status"] == "stale":
+                            try:
+                                # Anchor to `\.py$` to match the detect path at
+                                # line ~277. Without this, a bare `pgrep -f
+                                # discord-bridge` also catches grep pipelines
+                                # and shell invocations whose command line
+                                # contains the bridge name, and we'd kill them
+                                # instead of (or in addition to) the real
+                                # bridge process. PR #243 fixed the detect
+                                # side; this keeps the kill side consistent.
+                                old_pids = subprocess.run(
+                                    ["/usr/bin/pgrep", "-f", f"{c['name']}\\.py$"], capture_output=True, text=True
+                                ).stdout.strip().split("\n")
+                                for pid in old_pids:
+                                    if pid:
+                                        subprocess.run(["/bin/kill", pid], check=False)
+                                import time as _t; _t.sleep(1)
+                            except Exception:
+                                pass
+                        # Use sys.executable to avoid launchd's minimal PATH
+                        # resolving `python3` to /usr/bin/python3 (3.9), which
+                        # doesn't have the homebrew site-packages (discord,
+                        # dotenv, etc.) — restart would crash on import.
+                        # Log path uses logs/ (post-PR #251 refactor).
+                        subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
+                                         stdout=open(str(WORKSPACE_DIR / "logs" / f"{c['name']}.log"), "a"),
+                                         stderr=subprocess.STDOUT, start_new_session=True)
+                        print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
+                elif c["name"] == "sutando-app":
+                    # Two distinct failure modes:
+                    #   1. status="warn" + detail="not running …" → binary may
+                    #      already be fresh; just needs to be launched. Safe
+                    #      to auto-fix via `open` (singleton enforcement is
+                    #      not at risk because no PID exists yet).
+                    #   2. status="stale" → main.swift is newer than the
+                    #      running binary's process start time. Real fix
+                    #      needs pkill + swiftc rebuild + open; an earlier
+                    #      auto-fix path leaked duplicate instances (macOS
+                    #      doesn't enforce singleton on this bundle —
+                    #      observed 3 concurrent on 2026-04-19), so we
+                    #      defer that path to a manual rebuild + relaunch.
+                    binary = REPO_DIR / "src" / "Sutando" / "Sutando"
+                    source = REPO_DIR / "src" / "Sutando" / "main.swift"
+                    if (
+                        c.get("status") == "warn"
+                        and "not running" in (c.get("detail") or "")
+                        and binary.exists()
+                        and source.exists()
+                        and binary.stat().st_mtime >= source.stat().st_mtime
+                    ):
+                        try:
+                            subprocess.run(["/usr/bin/open", str(binary)],
+                                           check=True, timeout=5)
+                            print(f"  {c['name']}: launched (binary fresh, no rebuild needed)")
+                        except Exception as e:
+                            print(f"  {c['name']}: launch failed ({type(e).__name__}: {e}) — try `open {binary}` manually")
+                    else:
+                        print(f"  {c['name']}: not auto-fixed — needs manual rebuild + relaunch (see memory feedback_sutando_app_launch_method.md)")
+                elif c["name"] == "ngrok":
+                    # Read ngrok domain from .env if set, otherwise use default
+                    env_path = REPO_DIR / ".env"
+                    domain_arg = []
+                    if env_path.exists():
+                        for line in env_path.read_text().splitlines():
+                            if line.startswith("NGROK_DOMAIN="):
+                                domain = line.split("=", 1)[1].strip().strip('"').strip("'")
+                                if domain:
+                                    domain_arg = [f"--domain={domain}"]
+                                break
+                    subprocess.Popen(["ngrok", "http", "3100"] + domain_arg,
+                                     stdout=open("/tmp/ngrok.log", "a"),
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+                    print(f"  {c['name']}: restarted")
+                elif c["name"] == "tailscale-funnel":
+                    # Re-enable Tailscale Funnel for port 3100
+                    ts_bin = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+                    subprocess.run([ts_bin, "funnel", "--bg", "3100"],
+                                   capture_output=True, timeout=10)
+                    print(f"  {c['name']}: restarted")
+                elif c["name"] == "voice-transport" and c.get("_stuck_connecting"):
+                    result = fix_launchd("com.sutando.voice-agent")
+                    print(f"  voice-agent (stuck CONNECTING): {result}")
+                elif c["name"] == "conversation-server":
+                    # If stale, kill old PIDs first so the new process doesn't
+                    # bind-fail or end up alongside a still-running zombie.
+                    if c["status"] == "stale":
+                        try:
+                            old_pids = subprocess.run(
+                                ["/usr/bin/pgrep", "-f", "conversation-server.ts"],
+                                capture_output=True, text=True
+                            ).stdout.strip().split("\n")
+                            for pid in old_pids:
+                                if pid:
+                                    subprocess.run(["/bin/kill", pid], check=False)
+                            import time as _t; _t.sleep(1)
+                        except Exception:
+                            pass
+                    subprocess.Popen(["npx", "tsx", "skills/phone-conversation/scripts/conversation-server.ts"],
+                                     cwd=str(REPO_DIR),
+                                     stdout=open("/tmp/conversation-server.log", "a"),
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+                    print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
+
+    # Emit task on the RESIDUAL failure set when --fix ran (per PR #640 v2
+    # review). The no-fix path emits earlier, before --quiet / --json early
+    # exits (per #640 v2-regression: launchd's `--quiet --emit-task` was
+    # bypassing the end-of-main emit via sys.exit(1)).
+    if do_emit and do_fix and issues and not _any_core_alive():
+        # Brief delay so restarts have a chance to register before re-check.
+        # 2s matches the fix-loop's per-service `time.sleep(1)` budget.
+        import time as _t; _t.sleep(2)
+        residual_checks = run_all_checks()
+        emit_task_for_failures(residual_checks)
+
+    sys.exit(1 if issues else 0)
+
+
+if __name__ == "__main__":
+    main()

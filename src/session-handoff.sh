@@ -1,0 +1,138 @@
+#!/bin/bash
+# Session handoff — writes a summary for the next session to pick up.
+# Called by PreCompact hook so context survives session restarts.
+#
+# Reads the transcript, extracts key signals, and writes to session-state.md.
+# The incoming session reads this in CLAUDE.md or as part of the proactive loop.
+
+# REPO resolves to: (1) $SUTANDO_REPO_DIR if set, (2) auto-detect from the
+# script's parent dir using a sutando-checkout signature, (3) ~/Desktop/sutando
+# as last-resort default. SUTANDO_WORKSPACE intentionally NOT in the fallback
+# (CLAUDE.md reserves it for the per-user workspace dir; using it as a REPO
+# alias would silently pick the wrong path).
+__SCRIPT_PARENT="$(cd "$(dirname "$0")/.." && pwd 2>/dev/null || echo "")"
+if [ -n "${SUTANDO_REPO_DIR:-}" ]; then
+    REPO="$SUTANDO_REPO_DIR"
+elif [ -n "$__SCRIPT_PARENT" ] && [ -f "$__SCRIPT_PARENT/CLAUDE.md" ] && [ -d "$__SCRIPT_PARENT/skills" ] && [ -d "$__SCRIPT_PARENT/.git" ]; then
+    REPO="$__SCRIPT_PARENT"
+else
+    REPO="$HOME/Desktop/sutando"
+fi
+export PATH="/opt/homebrew/bin:$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
+STATE_FILE="$REPO/session-state.md"
+TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
+
+# Workspace resolves via the shared post-M0 helper (src/workspace_resolve.sh).
+# Exports $WORKSPACE on success; exits non-zero with a diagnostic on failure
+# (including empty-string returns — important because this script does NOT
+# use `set -e`). See workspace-revamp M0 (PR #1395) + Mini's PR #1399 review.
+# Defensive fallback for non-checkout installs where the helper isn't present.
+# Helper resolution: prefer $REPO/src/, fall back to script-sibling (cross-
+# checkout safety). Critical for session-handoff specifically because its
+# REPO resolution above prefers $SUTANDO_REPO_DIR over script-parent, and
+# that env can point to a sibling checkout (e.g. sutando-plus submodule pin)
+# that hasn't yet pulled this newly-added file. Caught by E2E pass against
+# PR #1399.
+__HELPER="$REPO/src/workspace_resolve.sh"
+[ -f "$__HELPER" ] || __HELPER="$(cd "$(dirname "$0")" && pwd)/workspace_resolve.sh"
+if [ -f "$__HELPER" ]; then
+  # shellcheck source=workspace_resolve.sh
+  source "$__HELPER"
+  resolve_workspace_or_die
+else
+  # Post-v0.8 (#1440 + Mini opinion-requested 2026-06-06): no env-var
+  # fallback. `$SUTANDO_WORKSPACE` is no longer honored for workspace
+  # resolution; if the M0 helper isn't reachable, session-handoff can't
+  # save meaningful state. Fail loud rather than risk writing
+  # session-state.md to the wrong workspace.
+  echo "session-handoff: cannot resolve workspace — workspace_resolve.sh not found at \$REPO/src/ or alongside this script. Verify the sutando checkout has the M0 helper." >&2
+  exit 1
+fi
+unset __HELPER
+if [ -z "${WORKSPACE:-}" ]; then
+  echo "session-handoff: workspace resolved to empty string. Refusing to derive paths under /." >&2
+  exit 1
+fi
+WORKSPACE_DIR="$WORKSPACE"  # historical local name retained for the rest of this file
+
+# Build state from available signals
+{
+  echo "---"
+  echo "# Session State (auto-generated on compaction)"
+  echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "---"
+  echo ""
+
+  # What's running
+  echo "## System Status"
+  python3 "$REPO/src/health-check.py" 2>/dev/null | grep -E "✓|⚠|✗" | head -15
+  echo ""
+
+  # Recent git activity (what was built)
+  echo "## Recent Work (last 10 commits)"
+  git -C "$REPO" log --oneline -10 2>/dev/null
+  echo ""
+
+  # Open PRs
+  echo "## Open PRs"
+  gh pr list --repo sonichi/sutando --state open --limit 5 2>/dev/null || echo "(couldn't fetch)"
+  echo ""
+
+  # Pending questions — canonical home is memory-dir machine-<host>/ post-migration.
+  # Resolves via util_paths.personal_path() with cwd fallback. Pass through both
+  # the canonical SUTANDO_MEMORY_DIR and the legacy SUTANDO_PRIVATE_DIR; the
+  # helper prefers the new name and honors the legacy one with a deprecation
+  # warning for one release (#870).
+  PQ_PATH=$(SUTANDO_MEMORY_DIR="${SUTANDO_MEMORY_DIR:-}" SUTANDO_PRIVATE_DIR="${SUTANDO_PRIVATE_DIR:-}" python3 -c "
+import sys; sys.path.insert(0, '$REPO/src')
+from util_paths import personal_path
+from pathlib import Path
+print(personal_path('pending-questions.md', Path('$REPO')))
+" 2>/dev/null || echo "$REPO/pending-questions.md")
+  echo "## Pending Questions"
+  if [ -f "$PQ_PATH" ]; then
+    grep -A1 "^## Q" "$PQ_PATH" | head -20
+  else
+    echo "None"
+  fi
+  echo ""
+
+  # Tasks in flight
+  echo "## Tasks"
+  ls "$WORKSPACE_DIR/tasks/"*.txt 2>/dev/null | head -5 || echo "None pending"
+  echo ""
+
+  # Quota (with reset times)
+  echo "## Quota"
+  # Quota state is per-user runtime state — canonical home is
+  # <workspace>/state/quota-state.json (written by the credential proxy).
+  # Reading an in-repo copy would pick up a stale shadow (see PR #970).
+  QUOTA_FILE="$WORKSPACE_DIR/state/quota-state.json"
+  if [ -f "$QUOTA_FILE" ]; then
+    python3 -c "
+import json
+from datetime import datetime
+d=json.load(open('$QUOTA_FILE'))
+now=datetime.now()
+r5=datetime.fromtimestamp(int(d['headers']['anthropic-ratelimit-unified-5h-reset']))
+m5=int((r5-now).total_seconds()/60)
+print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:%M %p\")}), 7d: {d[\"utilization_7d\"]:.0%}')
+" 2>/dev/null
+  fi
+  echo ""
+
+  # Stars
+  echo "## Repo Stats"
+  gh api repos/sonichi/sutando --jq '.stargazers_count, .forks_count' 2>/dev/null | tr '\n' ' ' | awk '{print $1 " stars, " $2 " forks"}' || echo "(couldn't fetch)"
+
+} > "$STATE_FILE" 2>/dev/null
+
+echo "Session state saved to $STATE_FILE"
+
+# Clear the proactive-loop fresh-session sentinel so the NEXT session's first
+# /proactive-loop re-fires /catchup-after-startup. Without this, the sentinel
+# from the just-ended session persists and the next /proactive-loop's step 1
+# skips catchup, defeating the auto-fire wiring. (Paired with
+# skills/proactive-loop/SKILL.md step 1's sentinel guard.)
+SENTINEL="$WORKSPACE_DIR/state/proactive-loop-started.sentinel"
+rm -f "$SENTINEL" 2>/dev/null

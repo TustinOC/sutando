@@ -1,0 +1,159 @@
+#!/bin/bash
+# scripts/start-cli.sh — canonical launch script for the sutando-core tmux
+# session. Single source of truth for the "how to start Claude Code" command,
+# so startup.sh + Sutando.app's Restart Core menu can both invoke it without
+# duplicating the launch arguments.
+#
+# Usage:
+#   bash scripts/start-cli.sh           # start (or attach if running)
+#   bash scripts/start-cli.sh --restart # kill existing session then start fresh
+#
+# Per Chi's prompt 2026-05-05 ("shall we add core CLI-related commands in
+# sutando app"): extracting the launch command from startup.sh's inline tmux
+# block lets the menu-bar app's Restart Core action invoke the same canonical
+# entry without re-implementing the tmux flags.
+
+set -e
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO"
+
+TMUX_SOCKET="/tmp/sutando-tmux.sock"
+SESSION="sutando-core"
+
+# Resolve workspace-scoped CLAUDE_CONFIG_DIR. The interactive `claude-sutando`
+# shell function does the same per-invocation; this is the machine-spawn
+# equivalent so the tmux-wrapped core process writes sessions / memory / state
+# into the workspace tree rather than the global ~/.claude/.
+#
+# Defense in depth:
+#   - M0 helper missing → silent fallback (legacy install, extracted tarball).
+#   - Helper present + config valid → export env for every claude invocation
+#     below (no-tmux fallback at L~75, TTY exec at L~115, no-TTY detached at
+#     L~120 all inherit it).
+#   - Helper present + config violates the workspace-sub-folder invariant →
+#     refuse to start. Silently falling back to ~/.claude/ would hide a real
+#     config error AND scatter state into a location the M2 vault sync engine
+#     doesn't include.
+if [ -x "$REPO/scripts/sutando-config.sh" ]; then
+  _ccd_err="$(mktemp -t start-cli-ccd.XXXXXX)"
+  if _ccd="$(bash "$REPO/scripts/sutando-config.sh" claude-sutando-config-dir 2>"$_ccd_err")"; then
+    mkdir -p "$_ccd"
+    export CLAUDE_CONFIG_DIR="$_ccd"
+    echo "  ✓ CLAUDE_CONFIG_DIR=$_ccd"
+  else
+    echo "start-cli: claude_sutando_config_dir invalid — refusing to start core" >&2
+    cat "$_ccd_err" >&2
+    rm -f "$_ccd_err"
+    exit 1
+  fi
+  rm -f "$_ccd_err"
+fi
+
+# Optional context-window pin (graceful-degradation hook for the 1M
+# usage-credit-gate wedge — see src/health-check.py recover_core_if_wedged).
+# When SUTANDO_CORE_MODEL is set we pass it through as `--model`; otherwise we
+# add NO flag, so the core inherits the user's global model (e.g. `opus[1m]`
+# from ~/.claude/settings.json) and 1M stays the default — we never disable it.
+# health-check's --recover-core escalation only sets SUTANDO_CORE_MODEL=opus
+# AFTER a 1M restart fails to hold, so a re-wedging core falls back to standard
+# 200K context (no gate) and keeps working instead of looping. The
+# ${arr[@]+...} guard keeps an empty array safe on bash 3.2 even under `set -u`
+# (mirrors the empty-array care in PR #1391).
+MODEL_ARGS=()
+if [ -n "${SUTANDO_CORE_MODEL:-}" ]; then
+  MODEL_ARGS=(--model "$SUTANDO_CORE_MODEL")
+fi
+
+# --restart: kill any existing session before starting fresh. Without this,
+# the script's "already running → attach" path returns and the old session
+# keeps running.
+#
+# HAZARD: --restart MUST NOT be invoked from inside the sutando-core
+# session itself — kill-session terminates the running agent mid-task.
+# Safe callers: Sutando.app menu, terminal one-off, future health-check
+# emit-task. Unsafe: a future agent processing a "restart core" task by
+# exec'ing this script from within sutando-core. Per Mini's #608 review.
+if [ "$1" = "--restart" ]; then
+  if pgrep -f "claude.*--name.*$SESSION" > /dev/null 2>&1; then
+    echo "Killing existing $SESSION session..."
+    tmux -S "$TMUX_SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
+    # Poll for actual shutdown — robust on slow machines, faster on fast
+    # ones (~1s ceiling) than a fixed sleep.
+    for _ in 1 2 3 4 5; do
+      pgrep -f "claude.*--name.*$SESSION" > /dev/null 2>&1 || break
+      sleep 0.2
+    done
+  fi
+fi
+
+# Already running — attach if interactive, else exit cleanly. This branch
+# also catches the !--restart path so re-running the script is idempotent.
+if pgrep -f "claude.*--name.*$SESSION" > /dev/null 2>&1; then
+  if [ -t 1 ] && command -v tmux > /dev/null 2>&1; then
+    echo "Attaching to existing $SESSION (Ctrl-b d to detach)..."
+    exec tmux -S "$TMUX_SOCKET" attach -t "$SESSION"
+  fi
+  echo "$SESSION already running."
+  echo "To attach: tmux -S $TMUX_SOCKET attach -t $SESSION"
+  exit 0
+fi
+
+# Auto-install tmux via Homebrew if missing. Sutando.app's
+# watcher-auto-restart depends on a tmux-wrapped CLI pane.
+if ! command -v tmux > /dev/null 2>&1 && command -v brew > /dev/null 2>&1; then
+  echo "tmux not found — installing via Homebrew (~30s, required for Sutando.app watcher-auto-restart)..."
+  brew install tmux 2>&1 | tail -3
+fi
+
+# Fall back to a bare `exec claude` if tmux is still missing.
+if ! command -v tmux > /dev/null 2>&1; then
+  echo "  ⚠ tmux not found — running without tmux wrapper"
+  echo "    (Sutando.app's watcher-auto-restart won't work; brew install tmux to enable)"
+  exec claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --dangerously-skip-permissions --add-dir "$HOME" \
+    -- "/schedule-crons"
+fi
+
+# Explicit -S socket path so Sutando.app (which runs under a different
+# TMPDIR due to macOS sandboxing when launched via `open`) can reach the
+# same tmux server as the user shell (per #PR_444 watcher-auto-restart).
+#
+# Sutando-friendly tmux defaults — applied to the server before the session
+# attaches. `mouse on` lets users two-finger scrollback in the Claude Code
+# pane (the default behavior, where Up-arrow goes to readline history and
+# you can't easily review prior agent output, is confusing for new installs).
+#
+# Tradeoff: `mouse on` intercepts native Cmd+drag text selection in the pane.
+# To copy text the macOS-native way, hold Option while dragging (Terminal.app,
+# iTerm2, Ghostty all honor Option-drag as a tmux-bypass). Documenting here
+# so future readers don't think this is a regression.
+#
+# Idempotent: re-running it on an already-configured server is a no-op.
+tmux -S "$TMUX_SOCKET" start-server 2>/dev/null || true
+tmux -S "$TMUX_SOCKET" set-option -g mouse on 2>/dev/null || true
+# Wheel-scroll fix for alternate-screen TUIs (Claude Code, vim, etc.):
+# `mouse on` alone doesn't help because Claude Code consumes wheel events in
+# alternate-screen mode before tmux can enter copy-mode. These two bindings
+# force copy-mode on WheelUp when the pane is running an alternate-screen app
+# so the user gets tmux scrollback instead of a no-op.
+# WheelDown is passed through so normal (non-alt-screen) scrolling still works.
+# Fixes sutando-plus#46.
+tmux -S "$TMUX_SOCKET" bind -n WheelUpPane if-shell -F -t = '#{alternate_on}' 'copy-mode -e; send-keys -M' 'send-keys -M' 2>/dev/null || true
+tmux -S "$TMUX_SOCKET" bind -n WheelDownPane send-keys -M 2>/dev/null || true
+#
+# Branch on whether we have a TTY:
+#   - TTY (user running from terminal): exec attach so the user sees the
+#     Claude Code prompt and the script process IS the tmux client.
+#   - No TTY (Sutando.app's Restart Core or any background invocation):
+#     start detached so we don't hang, server keeps running.
+if [ -t 1 ]; then
+  exec tmux -S "$TMUX_SOCKET" new-session -A -s "$SESSION" \
+    claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --dangerously-skip-permissions --add-dir "$HOME" \
+    -- "/schedule-crons"
+else
+  tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION" \
+    claude --name "$SESSION" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --remote-control "Sutando" --dangerously-skip-permissions --add-dir "$HOME" \
+    -- "/schedule-crons"
+  echo "Started $SESSION detached. Attach via Open Core CLI in menu bar, or:"
+  echo "  tmux -S $TMUX_SOCKET attach -t $SESSION"
+fi
