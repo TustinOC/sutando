@@ -657,6 +657,41 @@ def _extract_body(text: str, start: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Battery / power state
+# ---------------------------------------------------------------------------
+
+def check_battery() -> dict:
+    """Warn when running on battery — power loss mid-task corrupts results. Issue #1486."""
+    name = "battery"
+    warn_pct = int(os.environ.get("SUTANDO_BATTERY_WARN_PCT", "20"))
+    try:
+        result = subprocess.run(
+            ["pmset", "-g", "batt"],
+            capture_output=True, text=True, timeout=5
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {"name": name, "status": "ok", "detail": "pmset not available (non-macOS or VM)"}
+
+    import re as _re
+    m = _re.search(r'(\d+)%', output)
+    pct = int(m.group(1)) if m else None
+
+    if "AC Power" in output:
+        detail = "AC power" + (f", {pct}% charged" if pct is not None else "")
+        return {"name": name, "status": "ok", "detail": detail}
+
+    if "Battery Power" in output or "'Battery Power'" in output:
+        if pct is None:
+            return {"name": name, "status": "warn", "detail": "on battery — level unknown"}
+        if pct <= warn_pct:
+            return {"name": name, "status": "fail",
+                    "detail": f"on battery at {pct}% — critically low (threshold {warn_pct}%)"}
+        return {"name": name, "status": "warn", "detail": f"on battery at {pct}% — no AC power"}
+
+    return {"name": name, "status": "ok", "detail": "power state unknown"}
+
+
 # Stuck-loop / dead-watcher detection
 # ---------------------------------------------------------------------------
 # These two checks together catch the failure mode observed 2026-05-06 where
@@ -1132,6 +1167,7 @@ def run_all_checks() -> list[dict]:
     loop_stale_sec = int(os.environ.get("SUTANDO_HEALTH_LOOP_STALE_SEC", "600"))
     queue_age_sec = int(os.environ.get("SUTANDO_HEALTH_QUEUE_AGE_SEC", "300"))
     queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
+    checks.append(check_battery())
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
 
