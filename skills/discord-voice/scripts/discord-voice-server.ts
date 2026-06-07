@@ -551,6 +551,10 @@ interface DiscordVoiceSession {
 	channelId: string;
 	startTime: number;
 	transcript: { role: string; text: string }[];
+	// Durable session grounding (e.g. the za-warudo join context). Stored so it
+	// can be re-injected on reconnect and periodically, surviving the ~10min
+	// rolloff and session resets that would otherwise drop the join-time context.
+	groundingContext: string | null;
 	resultQueue: { text: string }[];
 	pendingTasks: number;
 	closing: boolean;
@@ -1310,6 +1314,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		voiceSession: null as unknown as VoiceSession,
 		startTime: Date.now(),
 		transcript: [],
+		groundingContext: null,
 		resultQueue: [],
 		pendingTasks: 0,
 		closing: false,
@@ -1736,6 +1741,25 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			if (s.closing || active !== s) return;
 			console.log(`${ts()} [Voice] reconnecting Gemini for ${sessionId}`);
 			sessionAny.handleClientConnected();
+			// Re-inject durable session grounding on reconnect. bodhi's reconnect
+			// rebuilds context from only the last 10 turns truncated to 150 chars
+			// and never re-supplies the join-time grounding, so without this the
+			// model drifts after a reset (observed: "workspace" -> "vpoll"). The
+			// nested delay lets the fresh transport come up before we send.
+			if (s.groundingContext) {
+				setTimeout(() => {
+					if (s.closing || active !== s || !s.groundingContext) return;
+					try {
+						(s.voiceSession as any).transport.sendContent(
+							[{ role: 'user', text: `[Session grounding — context only. Do NOT act on or announce this; use it only to stay oriented to what this session is about.]\n${s.groundingContext}` }],
+							false,
+						);
+						console.log(`${ts()} [Grounding] re-injected on reconnect (${s.groundingContext.length}B)`);
+					} catch (e) {
+						console.log(`${ts()} [Grounding] reconnect re-inject failed: ${e}`);
+					}
+				}, 800);
+			}
 		}, 1500);
 	};
 
@@ -1830,11 +1854,26 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			s.events.push({ event: `channel_result:${name}`, timestamp: new Date().toISOString() });
 			// Inject through the same path the work-tool result-queue drain
 			// uses: a role:user content event into the live Gemini transport.
+			// A `[GROUNDING]`-prefixed payload is durable session grounding (e.g.
+			// the za-warudo join context) — store it and re-inject it on reconnect
+			// + periodically (below) so it survives the ~10min rolloff and session
+			// resets, which only replay the last 10 turns truncated to 150 chars
+			// and never re-supply the join context. Injected silently (context-only,
+			// do-not-act/announce), unlike a channel-result.
 			try {
-				(s.voiceSession as any).transport.sendContent(
-					[{ role: 'user', text: `[Channel result]\n${body}\n\nReport this result to the user now.` }],
-					true,
-				);
+				if (body.startsWith('[GROUNDING]')) {
+					s.groundingContext = body.replace(/^\[GROUNDING\]\s*/, '');
+					(s.voiceSession as any).transport.sendContent(
+						[{ role: 'user', text: `[Session grounding — context only. Do NOT act on or announce this; use it only to stay oriented to what this session is about.]\n${s.groundingContext}` }],
+						false,
+					);
+					console.log(`${ts()} [Grounding] stored + injected durable grounding (${s.groundingContext.length}B)`);
+				} else {
+					(s.voiceSession as any).transport.sendContent(
+						[{ role: 'user', text: `[Channel result]\n${body}\n\nReport this result to the user now.` }],
+						true,
+					);
+				}
 			} catch (e) {
 				console.log(`${ts()} [ChannelScan] inject failed for ${name}: ${e}`);
 			}
@@ -1844,6 +1883,25 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		}
 	}, 3000);
 	(s as any)._channelScanHandle = channelScan;
+
+	// Periodic backstop: re-inject durable grounding every 4min so it survives the
+	// ~10min context rolloff even within a single connection (no reconnect). The
+	// reconnect handler above covers session resets; this covers in-connection
+	// rolloff. Without it a flash model drifts (observed: "workspace"->"vpoll").
+	// Re-sent in full, silent (context-only).
+	const groundingReinject = setInterval(() => {
+		if (s.closing || !s.groundingContext) return;
+		try {
+			(s.voiceSession as any).transport.sendContent(
+				[{ role: 'user', text: `[Session grounding -- context only. Do NOT act on or announce this; use it only to stay oriented to what this session is about.]\n${s.groundingContext}` }],
+				false,
+			);
+			console.log(`${ts()} [Grounding] re-injected durable grounding (${s.groundingContext.length}B)`);
+		} catch (e) {
+			console.log(`${ts()} [Grounding] re-inject failed: ${e}`);
+		}
+	}, 240000);
+	(s as any)._groundingReinjectHandle = groundingReinject;
 
 	// Subscribe to anyone currently speaking, and to anyone who starts.
 	connection.receiver.speaking.on('start', async (userId) => {
@@ -1913,6 +1971,7 @@ function cleanupSession(s: DiscordVoiceSession): void {
 	try { clearInterval((s as any)._outTickHandle); } catch {}
 	try { clearInterval((s as any)._watchdogHandle); } catch {}
 	try { clearInterval((s as any)._channelScanHandle); } catch {}
+	try { clearInterval((s as any)._groundingReinjectHandle); } catch {}
 	try { s.player.stop(true); } catch {}
 	try { s.connection.destroy(); } catch {}
 
