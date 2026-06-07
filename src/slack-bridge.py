@@ -33,7 +33,6 @@ File round-trip:
 
 from __future__ import annotations
 
-
 import json
 import mimetypes
 import os
@@ -48,8 +47,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
-from task_archive import find_task_file  # noqa: E402
-from single_instance import acquire as _single_instance_acquire  # noqa: E402
 
 try:
     from slack_bolt import App
@@ -70,10 +67,26 @@ TASKS_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
 
+# Credentials live in ~/.claude/channels/slack/.env (written by the Settings
+# UI, via web-server.ts), same convention as the Discord/Telegram bridges.
+# Ambient env vars still win — useful for one-off overrides in startup.sh.
+# Use CLAUDE_CONFIG_DIR (workspace-local runtime dir) with ~/.claude fallback.
+_claude_config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+channels_env = _claude_config / "channels" / "slack" / ".env"
+if channels_env.is_file():
+    for line in channels_env.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
 BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
 if not BOT_TOKEN or not APP_TOKEN:
-    print("SLACK_BOT_TOKEN and/or SLACK_APP_TOKEN not set", file=sys.stderr)
+    print(
+        "SLACK_BOT_TOKEN and/or SLACK_APP_TOKEN not set — add them in the "
+        "Settings page or write ~/.claude/channels/slack/.env",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -169,48 +182,7 @@ def presenter_mode_active() -> bool:
         return False
 
 
-ACCESS_FILE = Path.home() / ".claude" / "channels" / "slack" / "access.json"
-
-# In-memory mirror of access.json. Updated on every successful read.
-# Used by tofu_onboard() to detect and recover from external deletions
-# (#899: Sutando.app Settings or another process can delete the file
-# between bridge events; without this cache the bridge re-TOFUs on the
-# next inbound message, wiping tierMap / manually-added allowFrom entries).
-_access_cache: dict | None = None
-_access_cache_mtime: float = 0.0
-_access_cache_lock = threading.Lock()
-
-
-def _update_access_cache(data: dict) -> None:
-    global _access_cache, _access_cache_mtime
-    try:
-        mtime = ACCESS_FILE.stat().st_mtime
-    except OSError:
-        mtime = 0.0
-    with _access_cache_lock:
-        _access_cache = data
-        _access_cache_mtime = mtime
-
-
-def _restore_access_from_cache() -> bool:
-    """Write _access_cache back to ACCESS_FILE. Returns True if restored."""
-    with _access_cache_lock:
-        cached = _access_cache
-    if not cached or not cached.get("tofuOwner"):
-        return False
-    try:
-        ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ACCESS_FILE.write_text(json.dumps(cached, indent=2) + "\n")
-        os.chmod(ACCESS_FILE, 0o600)
-        print(
-            "  [access] restored access.json from in-memory cache "
-            "(external deletion detected — #899)",
-            flush=True,
-        )
-        return True
-    except Exception as e:
-        print(f"  [access] cache restore failed: {e}", flush=True)
-        return False
+ACCESS_FILE = _claude_config / "channels" / "slack" / "access.json"
 
 
 def load_allowed():
@@ -220,7 +192,6 @@ def load_allowed():
     empty allowFrom means admin explicitly locked it down (no TOFU)."""
     try:
         data = json.loads(ACCESS_FILE.read_text())
-        _update_access_cache(data)
         return set(data.get("allowFrom", []))
     except FileNotFoundError:
         return None
@@ -228,40 +199,31 @@ def load_allowed():
         return set()
 
 
+def load_owner_dm_channel() -> str | None:
+    """Return cached ownerDmChannel from access.json, or None if absent."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        return data.get("ownerDmChannel") or None
+    except Exception:
+        return None
+
+
 def load_tier_map() -> dict:
     """Return the per-user-id → tier map from access.json `tierMap`, or
     empty dict if missing. Recognized tiers: "owner", "team", "other".
     Unmapped users default to "owner" — preserves the pre-tierMap behavior
     where every entry in `allowFrom` was treated as owner-tier."""
-    with _access_cache_lock:
-        cached = _access_cache
-        cached_mtime = _access_cache_mtime
-    if cached is not None:
-        try:
-            if ACCESS_FILE.stat().st_mtime == cached_mtime:
-                return cached.get("tierMap") or {}
-        except OSError:
-            pass  # file deleted — fall through to re-read (will return {})
     try:
         data = json.loads(ACCESS_FILE.read_text())
-        _update_access_cache(data)
         return data.get("tierMap") or {}
     except Exception:
         return {}
 
 
 def tofu_onboard(user_id: str, username: str | None) -> set:
-    """First-time auto-onboard — same contract as telegram-bridge.py.
-
-    Before running TOFU, check for external file deletion (#899): if the
-    file is missing but _access_cache holds a valid prior state, restore
-    from cache instead of wiping tierMap / allowFrom with a fresh TOFU."""
+    """First-time auto-onboard — same contract as telegram-bridge.py."""
     if ACCESS_FILE.exists():
         return load_allowed() or set()
-    # File is missing. Was it externally deleted after a prior onboarding?
-    if _restore_access_from_cache():
-        return load_allowed() or set()
-    # Genuine first-time TOFU.
     ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "allowFrom": [user_id],
@@ -271,7 +233,6 @@ def tofu_onboard(user_id: str, username: str | None) -> set:
     }
     ACCESS_FILE.write_text(json.dumps(payload, indent=2) + "\n")
     os.chmod(ACCESS_FILE, 0o600)
-    _update_access_cache(payload)
     print(
         f"  TOFU: auto-onboarded @{username} (id={user_id}) as owner — wrote {ACCESS_FILE}",
         flush=True,
@@ -280,20 +241,10 @@ def tofu_onboard(user_id: str, username: str | None) -> set:
 
 
 # Track which Slack channel/thread to reply into for each task we wrote.
-# Keyed by task_id; value is {channel, thread_ts, submitted_at, timed_out}
-# so we can reply in-thread for @mentions and at top-level for DMs, and so
-# the result_watcher can detect tasks the core never answered.
+# Keyed by task_id; value is {channel, thread_ts} so we can reply in-thread
+# for @mentions and at top-level for DMs.
 pending_replies: dict[str, dict] = {}
 pending_replies_lock = threading.Lock()
-
-# Per-task timeout. Mirrors task-bridge.ts's DEFAULT_TASK_TIMEOUT_MS (10 min):
-# if the core session wedges (e.g. hits the 1M-context usage-credit gate and
-# loops on the API error), no result file is ever written and the Slack user
-# gets silence. After this many seconds we post a one-time "still working /
-# may have hit a limit" reply so the failure is visible instead of silent.
-# The pending entry is KEPT after notifying, so if the core later recovers and
-# writes a result, the real answer still gets delivered. 0 disables.
-TASK_TIMEOUT_SEC = int(os.environ.get("SLACK_TASK_TIMEOUT_SEC", "600"))
 
 # Username cache — users.info is rate-limited (Tier 4 = 100/min). One
 # cache lookup per known user saves a network hop on every DM. Cache
@@ -453,12 +404,7 @@ def _write_task(event: dict, prefix: str, text: str, username: str | None) -> st
         f"priority: {priority}\n"
     )
     with pending_replies_lock:
-        pending_replies[task_id] = {
-            "channel": channel,
-            "thread_ts": thread_ts,
-            "submitted_at": time.time(),
-            "timed_out": False,
-        }
+        pending_replies[task_id] = {"channel": channel, "thread_ts": thread_ts}
 
     global _event_count
     with _event_count_lock:
@@ -635,68 +581,12 @@ def _send_reply(channel: str, thread_ts: str | None, text: str, task_id: str | N
                 pass
 
 
-def _check_task_timeouts() -> None:
-    """Post a one-time reply for tasks the core never answered in time.
-
-    Without this, a wedged core session (e.g. stuck looping on the
-    1M-context usage-credit API error) leaves the Slack task orphaned in
-    pending_replies forever — the user just sees silence. We mark the entry
-    `timed_out` (so we notify at most once) but DO NOT pop it: if the core
-    later recovers and writes results/<task_id>.txt, the normal reply path
-    still delivers the real answer.
-    """
-    if TASK_TIMEOUT_SEC <= 0:
-        return
-    now = time.time()
-    to_notify = []
-    with pending_replies_lock:
-        for task_id, info in pending_replies.items():
-            if info.get("timed_out"):
-                continue
-            if now - info.get("submitted_at", now) > TASK_TIMEOUT_SEC:
-                # Collect only — do NOT set timed_out here. Marking before the
-                # send means a single Slack API hiccup (which raises below and
-                # is merely logged) leaves the flag True forever, so the next
-                # pass's `if info.get("timed_out"): continue` skips it and the
-                # user never sees the warning — recreating the exact silent
-                # no-op this watchdog exists to prevent. Mark only AFTER a
-                # successful send. (Per @sonichi PR #1428 review, blocker 1.)
-                to_notify.append((task_id, info["channel"], info.get("thread_ts")))
-    if not to_notify:
-        return
-    mins = TASK_TIMEOUT_SEC // 60
-    msg = (
-        f":hourglass_flowing_sand: Still working on this — it's been over "
-        f"{mins} min with no result. The core session may have hit a context "
-        f"or usage-credit limit (check the Sutando CLI / `/usage-credits`). "
-        f"I'll still post the answer here if it finishes."
-    )
-    for task_id, channel, thread_ts in to_notify:
-        try:
-            _send_reply(channel, thread_ts, msg, task_id=task_id)
-        except Exception as e:
-            # Send failed — leave timed_out unset so the next pass retries.
-            print(f"[Slack] timeout notify failed for {task_id}: {e}", flush=True)
-            continue
-        # Notified once, successfully. Mark so we don't repeat. The entry may
-        # have been popped by result_watcher if a real result landed meanwhile
-        # — guard with get() so we don't resurrect a delivered task.
-        with pending_replies_lock:
-            entry = pending_replies.get(task_id)
-            if entry is not None:
-                entry["timed_out"] = True
-        print(f"  [timeout] notified Slack for {task_id} after {TASK_TIMEOUT_SEC}s", flush=True)
-
-
 def result_watcher():
     """Background thread: polls results/ for replies + proactive messages."""
     heartbeat_file = REPO / "state" / "slack-bridge.heartbeat"
     last_heartbeat = 0.0
     while True:
         try:
-            # Surface tasks the core never answered (timeout → visible reply).
-            _check_task_timeouts()
-
             # Replies to pending tasks
             with pending_replies_lock:
                 pending_ids = list(pending_replies.keys())
@@ -725,13 +615,25 @@ def result_watcher():
                         print(f"[Slack] reply error: {e}", flush=True)
 
                 archive_file(result_file, "results", task_id)
-                archive_file(find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt", "tasks", task_id)
+                archive_file(TASKS_DIR / f"{task_id}.txt", "tasks", task_id)
 
             # Proactive messages (sent to owner DM)
             if not presenter_mode_active():
                 for f in list(RESULTS_DIR.iterdir()):
                     if not (f.name.startswith("proactive-") and f.suffix == ".txt"):
                         continue
+                    # Peek before claiming: skip Discord-targeted proactive files.
+                    # [channel: <17-20 digit snowflake>] marker is Discord-only;
+                    # claiming it here would dump the literal marker text to DM.
+                    # Leave it for discord-bridge to claim. (#1401)
+                    try:
+                        peek = f.read_text(errors="ignore").lstrip()
+                    except OSError:
+                        continue
+                    if peek.startswith("[channel:"):
+                        import re as _re
+                        if _re.match(r'\[channel:\s*\d{17,20}\]', peek):
+                            continue
                     claim = f.with_suffix(".sending")
                     try:
                         f.rename(claim)
@@ -744,10 +646,13 @@ def result_watcher():
                     owner_ids = load_allowed()
                     if owner_ids:
                         owner_id = next(iter(owner_ids))
-                        # Open a DM channel to the owner (idempotent).
+                        # Use cached DM channel to avoid im:write scope requirement.
+                        # Fall back to conversations_open if cache is absent.
                         try:
-                            resp = app.client.conversations_open(users=owner_id)
-                            dm_channel = resp["channel"]["id"]
+                            dm_channel = load_owner_dm_channel()
+                            if not dm_channel:
+                                resp = app.client.conversations_open(users=owner_id)
+                                dm_channel = resp["channel"]["id"]
                             _send_reply(dm_channel, None, text)
                             print(f"  [proactive] sent to {owner_id}: {text[:80]}", flush=True)
                         except Exception as e:
@@ -798,57 +703,8 @@ def _no_events_hint_thread():
         )
 
 
-
-def _recover_orphan_sending_files() -> int:
-    """Restart-safety: rename any orphan `results/proactive-*.sending`
-    files back to `*.txt` so they get re-claimed on the next poll.
-    Returns the number of files recovered.
-
-    Atomic-claim-by-rename (`proactive-*.txt` → `.sending`) prevents
-    same-tick double-deliveries between concurrent poll iterations.
-    But if the bridge crashes BETWEEN the rename and the delivery,
-    the `.sending` file sits orphaned in `results/` — no poll
-    iteration ever looks at `.sending` suffixes, so the owner
-    notification is silently dropped until next manual intervention.
-
-    Mirrors `_recover_orphan_sending_files` in discord-bridge.py and
-    telegram-bridge.py (PR #1046). See those docstrings for the full
-    bug-class write-up.
-    """
-    if not RESULTS_DIR.exists():
-        return 0
-    recovered = 0
-    for f in RESULTS_DIR.iterdir():
-        if not (f.name.startswith("proactive-") and f.suffix == ".sending"):
-            continue
-        target = f.with_suffix(".txt")
-        try:
-            if target.exists():
-                print(
-                    f"  [startup] skipping orphan recovery: {target.name} "
-                    f"already exists (collision with {f.name})",
-                    flush=True,
-                )
-                continue
-            f.rename(target)
-            recovered += 1
-            print(f"  [startup] recovered orphan {f.name} → {target.name}", flush=True)
-        except FileNotFoundError:
-            # Lost the race to another process; fine.
-            pass
-        except Exception as e:
-            print(f"  [startup] failed to recover {f.name}: {e}", flush=True)
-    if recovered:
-        print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
-    return recovered
-
 def main():
-    _single_instance_acquire("slack-bridge")
     print("Slack bridge started. Socket Mode connecting...", flush=True)
-    _recover_orphan_sending_files()
-    # Prime the in-memory access cache so tofu_onboard() can detect external
-    # deletions even on the very first inbound message after a restart (#899).
-    load_allowed()
     threading.Thread(target=result_watcher, name="slack-result-watcher", daemon=True).start()
     threading.Thread(target=_no_events_hint_thread, name="slack-no-events-hint", daemon=True).start()
     handler = SocketModeHandler(app, APP_TOKEN)
@@ -857,4 +713,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
