@@ -95,7 +95,10 @@ except Exception:  # pragma: no cover
 # Load token — env var takes precedence (allows test injection without a real .env file)
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 if not TOKEN:
-    channels_env = claude_home_path("channels", "discord", ".env")
+    # Use CLAUDE_CONFIG_DIR for channels (workspace-local config after migration).
+    _channels_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR",
+                         str(Path.home() / ".claude")))
+    channels_env = _channels_dir / "channels" / "discord" / ".env"
     if channels_env.exists():
         for line in channels_env.read_text().splitlines():
             if line.startswith("DISCORD_BOT_TOKEN="):
@@ -504,7 +507,9 @@ seen_message_ids = set()  # Discord message IDs already processed
 
 
 # Load access config
-ACCESS_FILE = claude_home_path("channels", "discord", "access.json")
+_channels_dir_global = Path(os.environ.get("CLAUDE_CONFIG_DIR",
+                             str(Path.home() / ".claude")))
+ACCESS_FILE = _channels_dir_global / "channels" / "discord" / "access.json"
 def load_allowed():
     try:
         data = json.loads(ACCESS_FILE.read_text())
