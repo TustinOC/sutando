@@ -73,9 +73,10 @@ _catchup_hook_command() {
 
 _sutando_hook_manifest() {
   # Path to the manifest that installers write and _known_sutando_substrings reads.
-  # Defaults to ~/.claude/sutando-hook-manifest.json (user-level config dir).
-  # Override by setting CLAUDE_CONFIG_DIR before running this script.
-  echo "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sutando-hook-manifest.json"
+  # Resolves via the M0 helper (#1536) so this honors $CLAUDE_CONFIG_DIR and emits
+  # the deprecation banner on fallback. Pre-#1536 this used the inline
+  # `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` shorthand, which bypassed both.
+  bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sutando-config.sh" claude-home-path sutando-hook-manifest.json
 }
 
 _known_sutando_substrings() {
