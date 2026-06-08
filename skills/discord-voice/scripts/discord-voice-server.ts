@@ -258,6 +258,11 @@ function _namesThisBot(text: string): boolean {
 // Gemini session to vision-tools (attachVisionToSession), so join_discord_screen
 // streams frames into THIS session — no discord-voice-side push code needed.
 
+// Susan 2026-06-08: reverted 2.5-pro → 2.5-flash. The pro upgrade did NOT fix the clause-2
+// false-negatives (her "submit a work task" command, buried in a discursive utterance, was
+// still read as non-action) — confirming a side-classifier can't beat the live model's full
+// context and loses the dispatch timing race. Moving intent judgment INTO the live model
+// (option B) instead; no point paying for pro on the side classifier.
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 // #1456: per-speaker STT model for the dedicated recording path. Mirrors the
 // describe_screen / describeScreenshot REST pattern (src/browser-tools.ts) —
@@ -440,6 +445,35 @@ async function _setScreenIndicators(s: DiscordVoiceSession, on: boolean): Promis
 		const base = (me.nickname || me.user.username).replace(/^👁\s*/, '');
 		await me.setNickname(on ? `👁 ${base}` : base);
 	} catch (e) { console.error(`${ts()} [ScreenShare] nickname update failed:`, e); }
+}
+
+// Mode indicator on the bot's guild nickname: active -> 🗣, meeting/旁听 -> 🔇.
+// (Susan 2026-06-08 — wanted a mute icon for 旁听, not 👁; 👁 stays for screen-share
+// via VC-status.) Driven by the 2s voice-mode poll; the only-on-change guard means
+// setNickname fires only on an actual mode flip, so Discord's nickname rate limit isn't
+// spammed, and a swallowed rate-limit error self-corrects on the next flip. Strip regex
+// uses codepoints (🔇 U+1F507, 🗣 U+1F5E3, 👁 U+1F441) so a prior prefix never stacks.
+async function _setModeIndicator(s: DiscordVoiceSession, active: boolean): Promise<void> {
+	const want = active ? '🗣' : '🔇';
+	if ((s as any)._modeEmoji === want) return;
+	(s as any)._modeEmoji = want;
+	try {
+		const g = await s.client.guilds.fetch(s.guildId);
+		const me = await g.members.fetchMe();
+		const base = (me.nickname || me.user.username).replace(/^(?:\u{1F507}|\u{1F5E3}|\u{1F441}\u{FE0F}?)\s*/u, '');
+		await me.setNickname(`${want} ${base}`);
+	} catch (e) { console.error(`${ts()} [ModeIndicator] nickname update failed:`, e); }
+}
+
+// Strip the mode emoji on session end so the nickname never lingers.
+async function _clearModeIndicator(s: DiscordVoiceSession): Promise<void> {
+	(s as any)._modeEmoji = undefined;
+	try {
+		const g = await s.client.guilds.fetch(s.guildId);
+		const me = await g.members.fetchMe();
+		const base = (me.nickname || me.user.username).replace(/^(?:\u{1F507}|\u{1F5E3}|\u{1F441}\u{FE0F}?)\s*/u, '');
+		if ((me.nickname || '') !== base) await me.setNickname(base);
+	} catch { /* best-effort cleanup */ }
 }
 
 // Show / hide the full screen-share indicator: VC-status + nickname + a posted
@@ -995,7 +1029,12 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	// Tools whose argument is FREE-FORM CONTENT (a task description, a note body) rather than a
 	// spoken TARGET — clause 3's "entity must be in recent speech" check is wrong for these and
 	// silently swallows legit requests. They are gated by clause 2 (explicit intent) only.
-	const _clause3Skip = new Set<string>((process.env.SUTANDO_CLAUSE3_SKIP || 'work,add_to_vault').split(',').map(x => x.trim()).filter(Boolean));
+	// open_url added 2026-06-08: clause 3 matched the URL's tokens against recent speech, but
+	// STT garbles proper nouns ("Sutando" heard as "蘇丹娜") so a legit "open the Sutando page"
+	// got blocked — brutal for bilingual speech. clause 2 (explicit "open" intent) already
+	// gates chit-chat, so open_url relies on that alone now (tradeoff: the model may open an
+	// unnamed page when asked to "open something" without a clear target).
+	const _clause3Skip = new Set<string>((process.env.SUTANDO_CLAUSE3_SKIP || 'work,add_to_vault,open_url').split(',').map(x => x.trim()).filter(Boolean));
 	// clause-3 helper: does any meaningful token of the tool's string args appear in
 	// recent speech? Returns true (allow) when the call has no checkable string arg.
 	const _entitySpoken = (args: any): boolean => {
@@ -1014,6 +1053,37 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		if (!_tokens.length) return true; // no checkable entity (e.g. capture_screen) — clause 2 governs
 		return _tokens.some(t => _recent.includes(t));
 	};
+
+	// #1427 option B (Susan 2026-06-08): dispatch-time intent check. The pre-computed
+	// per-utterance actionIntent flag (clause 2) missed commands buried in discursive speech
+	// and raced the tool call; the entity check (clause 3) broke on STT-garbled proper nouns
+	// ("Sutando"→"蘇丹娜"). Instead, the moment a side-effecting tool fires, ask a model whether
+	// the FULL recent transcript actually requested THIS tool+args — full context, semantic
+	// (tolerates STT garble + bilingual), synchronous (no timing race). Fails OPEN (allow) on
+	// error so a transient hiccup never blocks a real command (Susan's pain is false-negatives).
+	const _liveIntentCheck = async (toolName: string, args: any): Promise<{ ok: boolean; reason: string }> => {
+		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text).join(' / ').trim();
+		if (!_recent) return { ok: false, reason: 'no recent user speech' };
+		const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_VOICE_API_KEY;
+		if (!apiKey) return { ok: true, reason: 'no api key — fail open' };
+		const prompt = `You gate an assistant's tool calls. Recent user speech (oldest→newest, may contain speech-to-text errors): "${_recent}". The assistant is about to run tool \`${toolName}\` with arguments ${JSON.stringify(args).slice(0, 400)}. Did the user EXPLICITLY ask for THIS action just now? Account for STT garbling proper nouns and for bilingual / indirect phrasing. Answer ONLY JSON: {"ok": true|false, "reason": "<=10 words"}. ok=true ONLY if the user clearly requested this kind of action on this target; ok=false for chit-chat, thinking aloud, or merely mentioning something without asking to act on it.`;
+		try {
+			const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${STT_MODEL}:generateContent?key=${apiKey}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }),
+			});
+			const data = await res.json() as any;
+			const raw = (data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim();
+			const m = raw.match(/\{[\s\S]*\}/);
+			if (m) { const j = JSON.parse(m[0]) as { ok?: boolean; reason?: string }; return { ok: j.ok === true, reason: String(j.reason ?? '').slice(0, 80) }; }
+			return { ok: true, reason: 'unparseable — fail open' };
+		} catch (e) {
+			console.error(`${ts()} [DispatchGate] intent-check error (fail open):`, e);
+			return { ok: true, reason: 'check error — fail open' };
+		}
+	};
+	void _entitySpoken; // retained for reference / env fallback; superseded by _liveIntentCheck
 
 	for (let i = 0; i < tools.length; i++) {
 		const t = tools[i];
@@ -1051,21 +1121,12 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					console.log(`${ts()} [Tier] '${t.name}' denied — speaker tier=${tier}, needs ${need}`);
 					return { status: 'denied', message: `That needs ${need}-tier access; the current speaker is ${tier}-tier.` };
 				}
-				// #1427 clause 2+3 dispatch gate — only for side-effecting tools.
+				// #1427 option B - dispatch-time intent check (replaces pre-computed clause 2/3).
 				if (DISPATCH_GATE_ON && actionGatedNames.has(t.name)) {
-					const _intentFresh = Date.now() - ((s as any)._actionIntentAt || 0) < _ACTION_INTENT_FRESH_MS;
-					if (!_intentFresh) {
-						console.log(`${ts()} [DispatchGate] '${t.name}' blocked — clause 2: no fresh explicit action-intent (chit-chat, not a request)`);
-						return { status: 'not_requested', message: 'Not performed: nobody asked for this action. Keep listening; only act on an explicit request.' };
-					}
-					// clause 3 (entity must be spoken) applies to TARGET-naming tools (open_url,
-					// switch_app…) but NOT free-form-CONTENT tools (work, add_to_vault) — Susan
-					// 2026-06-08: a `work` submit got clause-3-blocked because the task wording wasn't
-					// verbatim in her last 25s, so it silently never submitted while the model claimed
-					// it had ("幻觉说 submit 了，其实没有 task 文件"). Content tools: clause 2 alone gates them.
-					if (!_clause3Skip.has(t.name) && !_entitySpoken(args)) {
-						console.log(`${ts()} [DispatchGate] '${t.name}' blocked — clause 3: argument entity not present in recent speech (likely hallucinated): ${JSON.stringify(args).slice(0, 120)}`);
-						return { status: 'not_requested', message: 'Not performed: the target was never mentioned out loud. Do not act on an invented argument.' };
+					const _v = await _liveIntentCheck(t.name, args);
+					if (!_v.ok) {
+						console.log(`${ts()} [DispatchGate] '${t.name}' blocked - intent-check: ${_v.reason} | args=${JSON.stringify(args).slice(0, 100)}`);
+						return { status: 'not_requested', message: 'BLOCKED - this tool did NOT run; you did NOT perform this action. Do NOT tell the user you did it or that anything was opened / written / saved. If the user wants it, ask them to state it clearly.' };
 					}
 				}
 				return inner(args);
@@ -1338,6 +1399,10 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 
 	let chunks = 0;
 	resampler.on('data', (pcm16Mono: Buffer) => {
+		// #1465 defense-in-depth (from #1516): never pipe our own TTS output back
+		// to Gemini as user input. If the isBot check raced (fetch error →
+		// isBot=false), this catches the bot's own audio before handleAudioFromClient.
+		if (userId === s.client.user?.id) return;
 		chunks++;
 		try { (s.voiceSession as any).handleAudioFromClient(pcm16Mono); } catch {}
 		// #1456: ALSO accumulate this user's clean PCM into a per-user buffer for
@@ -1560,6 +1625,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// IN the channel, so a disconnected session can't clear its own status). We
 	// ARE connected now — clear it; a fresh share this session re-sets it.
 	try { await _setScreenIndicators(s, false); } catch {}
+	try { await _clearModeIndicator(s); } catch {}
 
 	// [Outbound] Gemini PCM 24k mono → upsample to 48k stereo → pipe to AudioPlayer.
 	const sessionAny = session as any;
@@ -1659,6 +1725,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				}
 			} catch { /* file absent = active mode */ }
 		}
+		// Mode indicator (🗣 active / 🔇 旁听) — runs in gate and non-gate mode; the
+		// only-on-change guard inside keeps this from spamming the nickname rate limit.
+		_setModeIndicator(s, !s.meetingMode).catch(() => {});
 	}, 2_000);
 
 	// AUTO_MEETING_TIMEOUT_MS === 0 means auto-meeting is disabled.
