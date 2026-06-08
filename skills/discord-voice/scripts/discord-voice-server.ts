@@ -856,6 +856,22 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					return { status: 'meeting_mode', instruction: 'Reply OUT LOUD with ONE short, normal sentence acknowledging you will take notes (e.g. "Got it, I\'ll take notes."). Speak it naturally — exactly as you would voice any other reply. Do NOT say you are going silent, stopping, or being quiet; just the brief spoken acknowledgement.' };
 				}
 				if (s.meetingMode || s.meetingEntered) {
+					// #1427 over-fire guard: do NOT exit meeting mode just because the
+					// bot's name was said. The audio classifier (above) sets _aiWakeAt
+					// ONLY on a genuine WAKE — a greeting / re-establish-contact or a
+					// by-name request to respond ("hi Lucy", "Lucy can you hear me",
+					// "hi Lucy, <question>") — and NOT on a bare passing "Lucy" or a quiet
+					// command ("Lucy, stay silent / take notes"). (Susan 2026-06-07: a name
+					// alone is not a wake; "Lucy, stay silent" is the OPPOSITE of a wake —
+					// the model kept flipping meeting→active on bare names and wouldn't stay
+					// quiet.) Require a FRESH wake signal to leave meeting, so the model
+					// can't pull itself out of the silence the user asked for.
+					const _WAKE_FRESH_MS = Number(process.env.SUTANDO_WAKE_FRESH_MS) || 12000;
+					const _wokenFresh = Date.now() - ((s as any)._aiWakeAt || 0) < _WAKE_FRESH_MS;
+					if (!_wokenFresh) {
+						console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
+						return { status: 'stayed_meeting', instruction: 'Stay silent and keep taking notes. The user has not greeted you or asked you anything to bring you active — they only mentioned your name or told you to stay quiet. Do NOT speak, do NOT call tools; keep listening.' };
+					}
 					s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 					try { recordConversation('discord-agent', '⇄ MODE → active (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
 					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
@@ -941,6 +957,64 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	const ownerOnlyNames = new Set<string>(ownerOnlyTools.map(t => t.name));
 	ownerOnlyNames.add('switch_mode');  // #1456: classify as owner-tier so the controller-gate wrapper applies (only the controller may switch the bot's mode)
 	const teamNames = new Set<string>(configurableTools.map(t => t.name));
+
+	// #1427 clause 2+3 dispatch gate (Susan 2026-06-08): the tier/name gate alone
+	// let Gemini fire side-effecting tools during plain chit-chat (logged: open_url
+	// ×3, capture_screen, get_current_time, switch_app, add_to_vault — none requested).
+	// Gate these tools on BOTH (clause 2) a FRESH explicit action-intent signal from
+	// the per-utterance classifier AND (clause 3) — when the call carries a string
+	// argument — that some token of that argument was actually SPOKEN recently, so a
+	// hallucinated URL/app/note can't slip through. switch_mode is intentionally NOT
+	// here (the wake-gate already governs it); only read-only/conversational tools
+	// (recent_context, get_task_status, get_current_time) are exempt — destructive and
+	// session-ending tools (close_tab/close_window/dismiss) ARE gated (see below).
+	// Kill switch: SUTANDO_DISPATCH_GATE=0. Override set via
+	// SUTANDO_DISPATCH_GATE_TOOLS (comma-separated names).
+	const DISPATCH_GATE_ON = process.env.SUTANDO_DISPATCH_GATE !== '0';
+	// Destructive/session-ending tools (close_tab, close_window, dismiss) are gated TOO —
+	// Susan 2026-06-08 live test: after a legit "open GitHub", the model spuriously fired
+	// close_tab then dismiss ("My owner left — leaving too") ~26s later with NO user ask,
+	// closing her tab + ENDING the meeting. dismiss is NOT exempt: a spurious session-end is
+	// worse than a missed leave, and an explicit "leave/bye" still sets actionIntent so a real
+	// leave passes clause 2. (Legit owner-actually-left auto-leave is a code path, not this LLM tool.)
+	// Zoom tools (summon/share_screen/join_zoom) added Susan 2026-06-08 retest: `summon` (join
+	// Zoom + share screen) fired spuriously mid-conversation (she: "你怎么调用 salmon?") — same
+	// ungated-tool gap as close_tab. NOTE: this allowlist keeps needing additions per tool; the
+	// robust follow-up is to flip to an EXEMPT-list (gate every tier tool except read-only
+	// recent_context/get_task_status/get_current_time + switch_mode) — proposed to Susan.
+	const _defaultGated = ['open_url', 'capture_screen', 'switch_tab', 'switch_app', 'close_tab', 'close_window', 'dismiss', 'summon', 'share_screen', 'join_zoom', 'clipboard', 'set_clipboard', 'read_clipboard', 'brightness', 'set_brightness', 'volume', 'set_volume', 'add_to_vault', 'play', 'point_at', 'work'];
+	const _gatedEnv = (process.env.SUTANDO_DISPATCH_GATE_TOOLS || '').split(',').map(x => x.trim()).filter(Boolean);
+	const actionGatedNames = new Set<string>(_gatedEnv.length ? _gatedEnv : _defaultGated);
+	// Window was 12s; Susan 2026-06-08 live test: she commanded "open the repo" but the
+	// model (stuck in the interruption/apology loop) didn't actually fire open_url until
+	// 23-45s later — past 12s → her LEGIT call got blocked as "no intent" while the model
+	// narrated "已经打开了". Widen to 30s so a genuine request survives the model's firing
+	// latency. (Option A interruption fix is the real cure — it makes the model fire promptly;
+	// this is insurance.) clause 3 (entity must be spoken) still bounds what can fire in-window.
+	const _ACTION_INTENT_FRESH_MS = Number(process.env.SUTANDO_ACTION_INTENT_FRESH_MS) || 30000;
+	// Tools whose argument is FREE-FORM CONTENT (a task description, a note body) rather than a
+	// spoken TARGET — clause 3's "entity must be in recent speech" check is wrong for these and
+	// silently swallows legit requests. They are gated by clause 2 (explicit intent) only.
+	const _clause3Skip = new Set<string>((process.env.SUTANDO_CLAUSE3_SKIP || 'work,add_to_vault').split(',').map(x => x.trim()).filter(Boolean));
+	// clause-3 helper: does any meaningful token of the tool's string args appear in
+	// recent speech? Returns true (allow) when the call has no checkable string arg.
+	const _entitySpoken = (args: any): boolean => {
+		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text).join(' ').toLowerCase();
+		if (!_recent) return false;
+		const _vals: string[] = [];
+		const _collect = (v: any) => {
+			if (typeof v === 'string') _vals.push(v);
+			else if (v && typeof v === 'object') Object.values(v).forEach(_collect);
+		};
+		_collect(args);
+		// tokens worth checking: words/domains length >= 3 (drop punctuation, scheme)
+		const _tokens = _vals.join(' ').toLowerCase()
+			.replace(/https?:\/\//g, ' ').replace(/[^a-z0-9一-鿿]+/g, ' ')
+			.split(' ').filter(t => t.length >= 3);
+		if (!_tokens.length) return true; // no checkable entity (e.g. capture_screen) — clause 2 governs
+		return _tokens.some(t => _recent.includes(t));
+	};
+
 	for (let i = 0; i < tools.length; i++) {
 		const t = tools[i];
 		const need: Tier | null = toolNeed(t.name, ownerOnlyNames, teamNames);
@@ -976,6 +1050,23 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				if (!ok) {
 					console.log(`${ts()} [Tier] '${t.name}' denied — speaker tier=${tier}, needs ${need}`);
 					return { status: 'denied', message: `That needs ${need}-tier access; the current speaker is ${tier}-tier.` };
+				}
+				// #1427 clause 2+3 dispatch gate — only for side-effecting tools.
+				if (DISPATCH_GATE_ON && actionGatedNames.has(t.name)) {
+					const _intentFresh = Date.now() - ((s as any)._actionIntentAt || 0) < _ACTION_INTENT_FRESH_MS;
+					if (!_intentFresh) {
+						console.log(`${ts()} [DispatchGate] '${t.name}' blocked — clause 2: no fresh explicit action-intent (chit-chat, not a request)`);
+						return { status: 'not_requested', message: 'Not performed: nobody asked for this action. Keep listening; only act on an explicit request.' };
+					}
+					// clause 3 (entity must be spoken) applies to TARGET-naming tools (open_url,
+					// switch_app…) but NOT free-form-CONTENT tools (work, add_to_vault) — Susan
+					// 2026-06-08: a `work` submit got clause-3-blocked because the task wording wasn't
+					// verbatim in her last 25s, so it silently never submitted while the model claimed
+					// it had ("幻觉说 submit 了，其实没有 task 文件"). Content tools: clause 2 alone gates them.
+					if (!_clause3Skip.has(t.name) && !_entitySpoken(args)) {
+						console.log(`${ts()} [DispatchGate] '${t.name}' blocked — clause 3: argument entity not present in recent speech (likely hallucinated): ${JSON.stringify(args).slice(0, 120)}`);
+						return { status: 'not_requested', message: 'Not performed: the target was never mentioned out loud. Do not act on an invented argument.' };
+					}
 				}
 				return inner(args);
 			},
@@ -1104,7 +1195,7 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 							// name appearing as an unrelated word ("may I…", "on Monday") or a
 							// "go quiet"/standby command. Replaces the brittle string name-match.
 							{ text:
-								`Transcribe this audio verbatim. Then decide: is the speaker directly CALLING ON or ADDRESSING an assistant named "${STAND_NAME || 'the assistant'}" to get its attention or have it act/respond? Account for speech-to-text errors that garble the name into a similar-sounding word — treat a clearly-intended call to that assistant as addressed=true. Do NOT set addressed=true when the name merely appears as an ordinary unrelated word, when the speaker is only telling it to be quiet / stand by, or when addressing someone else. Reply with ONLY a JSON object, no prose: {"transcript":"<verbatim>","addressed":true|false}. If silence/no speech: {"transcript":"","addressed":false}.` },
+								`Transcribe this audio verbatim. Then decide: is the speaker directly CALLING ON or ADDRESSING an assistant named "${STAND_NAME || 'the assistant'}" to get its attention or have it act/respond? Account for speech-to-text errors that garble the name into a similar-sounding word — treat a clearly-intended call to that assistant as addressed=true. Do NOT set addressed=true when the name merely appears as an ordinary unrelated word, when the speaker is only telling it to be quiet / stand by, or when addressing someone else. ALSO set "wake":true when the speaker is GREETING / RE-ESTABLISHING CONTACT to bring the assistant active OR calling on it by name to answer or do something now — e.g. "hi <name>", "hey <name>", "<name>, can you hear me", "<name>, you there", or "hi <name>, <a question or request>". Set "wake":false when the name is only mentioned in passing mid-conversation (not being asked anything), and set "wake":false when they are telling it to be quiet / take notes / stay silent / stand by / enter meeting mode (the OPPOSITE of a wake). A bare name with no greeting and no request is NOT a wake. ALSO set "actionIntent":true when the speaker EXPLICITLY asks for a concrete action to be performed now — e.g. open a URL/app/tab, capture/describe the screen, read or set the clipboard, change brightness/volume, save a note, search the web, or delegate a task (verbs like open / go to / show me / capture / screenshot / copy / paste / set / turn up / play / save / look up / find / check). Set "actionIntent":false for ordinary discussion, thinking out loud, story-telling, or merely MENTIONING a thing (a repo, a file, a website) without asking for an action on it — naming something is not requesting an action. Reply with ONLY a JSON object, no prose: {"transcript":"<verbatim>","addressed":true|false,"wake":true|false,"actionIntent":true|false}. If silence/no speech: {"transcript":"","addressed":false,"wake":false,"actionIntent":false}.` },
 							{ inlineData: { mimeType: 'audio/wav', data: audioData } },
 						],
 					}],
@@ -1126,12 +1217,34 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		try {
 			const _m = _raw.match(/\{[\s\S]*\}/);
 			if (_m) {
-				const _j = JSON.parse(_m[0]) as { transcript?: string; addressed?: boolean };
+				const _j = JSON.parse(_m[0]) as { transcript?: string; addressed?: boolean; wake?: boolean; actionIntent?: boolean };
 				transcript = String(_j.transcript ?? '').trim();
 				_aiAddressed = _j.addressed === true;
+				// Wake intent (Susan's distinction): a greeting / re-establish-contact that
+				// should bring the bot ACTIVE — as opposed to a bare name or a quiet command.
+				// switch_mode("active") reads this to decide whether to EXIT meeting mode.
+				if (_j.wake === true) (s as any)._aiWakeAt = Date.now();
+				// Action intent (#1427 clause 2 — Susan 2026-06-08): the speaker EXPLICITLY
+				// asked for a concrete action. The tool-dispatch gate reads this freshness
+				// stamp so Gemini can't fire a side-effecting tool (open_url, capture_screen,
+				// …) during plain chit-chat — the model kept hallucinating actions
+				// ("loading files to cache", open_url with a URL no one named). See the
+				// dispatch gate in buildAgent().
+				if (_j.actionIntent === true) (s as any)._actionIntentAt = Date.now();
 			}
 		} catch { /* non-JSON reply — keep _raw as transcript, addressed=false */ }
 		if (!transcript) return; // skip empty/whitespace
+		// #1427 clause 3 — rolling recent-speech buffer (Susan 2026-06-08): the
+		// tool-dispatch gate checks that a side-effecting tool's argument entity was
+		// actually SPOKEN (verbatim) in the last few seconds, so Gemini can't open a
+		// URL / switch to an app / save a note it invented. Keep ~25s, pruned by age.
+		{
+			const _now = Date.now();
+			const _RECENT_MS = Number(process.env.SUTANDO_RECENT_SPEECH_MS) || 25000;
+			const _buf = ((s as any)._recentUserSpeech || []) as { text: string; at: number }[];
+			_buf.push({ text: transcript, at: _now });
+			(s as any)._recentUserSpeech = _buf.filter(e => _now - e.at < _RECENT_MS);
+		}
 		// #1456 PRECISE name-gate: the gate must key off EXACTLY who spoke — not a
 		// loose "if anyone named the bot" rule. It keys ONLY off the CONTROLLER's OWN clean per-
 		// user utterance — a relay account / peer bot naming the bot can NOT open it, because this is
@@ -1189,7 +1302,13 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	s.subscribedUsers.add(userId);
 
 	const opusStream = s.connection.receiver.subscribe(userId, {
-		end: { behavior: EndBehaviorType.AfterSilence, duration: 200 },
+		// #1427 interruption fix (Susan 2026-06-08): 200ms was too eager — a normal
+		// mid-sentence pause (esp. her bilingual "…让你查一下〔stops to think〕…") exceeded
+		// it, ending the utterance → Gemini turn-end → the bot cut her off (she: "你为什么打断我").
+		// Phone never does this because it streams continuously and lets Gemini's native VAD
+		// decide; here we just give the pause more room. ~800ms default, env-tunable. Cost:
+		// ~+0.6s/turn latency. (Proper phone-parity = continuous-stream barge-in = option B follow-up.)
+		end: { behavior: EndBehaviorType.AfterSilence, duration: Number(process.env.SUTANDO_AFTERSILENCE_MS) || 800 },
 	});
 	const decoder = new prism.opus.Decoder({ frameSize: 960, channels: 2, rate: 48000 });
 	// Resample 48k stereo s16le → 16k mono s16le via ffmpeg (anti-aliased).
@@ -1370,7 +1489,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		speechConfig: { voiceName: 'Aoede' },
 		// Shorten Gemini's end-of-speech silence wait so turn-end (and the
 		// reply) is detected faster. Default ~1s+; env-overridable for tuning.
-		vadConfig: { silenceDurationMs: Number(process.env.SUTANDO_VAD_SILENCE_MS) || 500 },
+		vadConfig: { silenceDurationMs: Number(process.env.SUTANDO_VAD_SILENCE_MS) || 800 },  // #1427 interruption fix (Susan 2026-06-08): 500→800 so Gemini's VAD also waits longer before turn-end, in step with the AfterSilence bump above
 		hooks: {
 			onToolCall: (e) => {
 				console.log(`${ts()} [Tool] ${e.toolName} (${e.execution})`);
