@@ -124,7 +124,21 @@ def check_memory_sync() -> dict:
                 break
     if not repo_url:
         return {"name": name, "status": "warn", "detail": "SUTANDO_MEMORY_REPO not set — cross-machine sync disabled"}
-    # Memory-sync clone dir: PR #764 renamed legacy ~/.sutando-memory-sync/
+    # Current model (sync-workspace.sh): the workspace ITSELF is a git repo with
+    # the vault as a remote — sync = git fetch/merge/push on the workspace, no
+    # separate clone dir. So the freshness signal is the workspace's own
+    # .git/FETCH_HEAD. Prefer this whenever the workspace is a git repo; the
+    # legacy ~/.sutando/memory-sync clone (sync-memory.sh, deprecated) often
+    # lingers on disk abandoned and would otherwise read as permanently stale.
+    ws_git_fetch = WORKSPACE_DIR / ".git" / "FETCH_HEAD"
+    if (WORKSPACE_DIR / ".git").exists():
+        if ws_git_fetch.exists():
+            age_h = (time.time() - ws_git_fetch.stat().st_mtime) / 3600
+            if age_h > 48:
+                return {"name": name, "status": "warn", "detail": f"last sync {age_h:.0f}h ago (stale)"}
+            return {"name": name, "status": "ok", "detail": f"last sync {age_h:.1f}h ago"}
+        return {"name": name, "status": "ok", "detail": "workspace git repo, never fetched"}
+    # Legacy memory-sync clone dir: PR #764 renamed legacy ~/.sutando-memory-sync/
     # → ~/.sutando/memory-sync/. Check new path first; fall back to legacy
     # for installs that haven't migrated yet (sync-memory.sh auto-migrates
     # on next run when env is unset).
