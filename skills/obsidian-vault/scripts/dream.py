@@ -44,6 +44,14 @@ from typing import Iterable
 
 import subprocess
 
+# Feature gate: the Obsidian mirror is opt-in (SUTANDO_OBSIDIAN_MIRROR=1).
+# When disabled, no-op cleanly *before* importing anthropic — the SDK may not
+# be installed in minimal envs, and the nightly cron would otherwise crash with
+# ModuleNotFoundError instead of the documented no-op.
+if os.environ.get("SUTANDO_OBSIDIAN_MIRROR") != "1":
+    print("obsidian-dream: SUTANDO_OBSIDIAN_MIRROR != 1 — feature off, skipping (no-op)")
+    raise SystemExit(0)
+
 import anthropic
 
 DEFAULT_MODEL = os.environ.get("SUTANDO_DREAM_MODEL", "claude-opus-4-7")
