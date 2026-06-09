@@ -38,8 +38,8 @@ import { recordConversation, recordSession, recordToolCall } from '../../../src/
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
-import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
 import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
+import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTool, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, type GateState } from './name-gate.js';
 
@@ -450,11 +450,14 @@ async function _setScreenIndicators(s: DiscordVoiceSession, on: boolean): Promis
 	} catch (e) { console.error(`${ts()} [ScreenShare] nickname update failed:`, e); }
 }
 
-// Mode indicator on the bot's guild nickname: active -> 🗣, meeting/旁听 -> 🔇.
-// (Susan 2026-06-08 — wanted a mute icon for 旁听, not 👁; 👁 stays for screen-share
-// via VC-status.) Driven by the 2s voice-mode poll; the only-on-change guard means
-// setNickname fires only on an actual mode flip, so Discord's nickname rate limit isn't
-// spammed, and a swallowed rate-limit error self-corrects on the next flip. Strip regex
+// Mode indicator on the bot's guild NICKNAME (next to Lucy's name): active -> 🗣,
+// meeting/旁听 -> 🔇. Susan 2026-06-09: keep it on the nickname, NOT the voice-channel
+// status. Driven by the 2s voice-mode poll; the only-on-change guard avoids spamming
+// Discord's (rate-limited) nickname endpoint. Fix vs the prior version: on a FAILED
+// update, reset `_modeEmoji` so the next 2s tick RETRIES — the old code left the guard
+// optimistically set, so a dropped/throttled update never self-corrected (looked stuck).
+// (Heavy rapid mode-toggling can still lag — Discord rate-limits nickname changes and
+// there's no faster path for this field; normal use updates within ~2s.) Strip regex
 // uses codepoints (🔇 U+1F507, 🗣 U+1F5E3, 👁 U+1F441) so a prior prefix never stacks.
 async function _setModeIndicator(s: DiscordVoiceSession, active: boolean): Promise<void> {
 	const want = active ? '🗣' : '🔇';
@@ -463,18 +466,30 @@ async function _setModeIndicator(s: DiscordVoiceSession, active: boolean): Promi
 	try {
 		const g = await s.client.guilds.fetch(s.guildId);
 		const me = await g.members.fetchMe();
-		const base = (me.nickname || me.user.username).replace(/^(?:\u{1F507}|\u{1F5E3}|\u{1F441}\u{FE0F}?)\s*/u, '');
+		const base = (me.nickname || me.user.username).replace(/^(?:[\u{1F507}\u{1F5E3}\u{1F441}]\u{FE0F}?\s*)+/u, '');
 		await me.setNickname(`${want} ${base}`);
-	} catch (e) { console.error(`${ts()} [ModeIndicator] nickname update failed:`, e); }
+	} catch (e) {
+		(s as any)._modeEmoji = undefined;  // reset so the next 2s tick retries — don't leave it stuck
+		console.error(`${ts()} [ModeIndicator] nickname update failed:`, e);
+	}
 }
 
-// Strip the mode emoji on session end so the nickname never lingers.
+// Strip the mode emoji on session end so the nickname never lingers. Also clears any VC
+// status left by the short-lived 2026-06-09 voice-status experiment (migration cleanup).
 async function _clearModeIndicator(s: DiscordVoiceSession): Promise<void> {
 	(s as any)._modeEmoji = undefined;
+	(s as any)._modeStatus = undefined;
+	try {
+		await fetch(`https://discord.com/api/v10/channels/${s.channelId}/voice-status`, {
+			method: 'PUT',
+			headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ status: '' }),
+		});
+	} catch { /* best-effort: clear interim VC-status experiment */ }
 	try {
 		const g = await s.client.guilds.fetch(s.guildId);
 		const me = await g.members.fetchMe();
-		const base = (me.nickname || me.user.username).replace(/^(?:\u{1F507}|\u{1F5E3}|\u{1F441}\u{FE0F}?)\s*/u, '');
+		const base = (me.nickname || me.user.username).replace(/^(?:[\u{1F507}\u{1F5E3}\u{1F441}]\u{FE0F}?\s*)+/u, '');
 		if ((me.nickname || '') !== base) await me.setNickname(base);
 	} catch { /* best-effort cleanup */ }
 }
@@ -908,66 +923,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// Opens via `open`; summaries via read-only `gh` (best-effort — if gh isn't
 		// authed in this process, the open still works, summary is omitted).
 		// execFileSync (array args) — no shell, `who` sanitized → no injection.
-		tools.push({
-			name: 'open_github_url',
-			description:
-				'Open or summarize ANYTHING in the canonical Sutando GitHub repo (sonichi/sutando). ' +
-				'ALWAYS PREFER THIS over the generic open_url for any GitHub/repo/PR/issue request — ' +
-				'including vague or bilingual phrasings like "open a webpage pointing to the repository", ' +
-				'"open the repo page", "go to GitHub / our repo", "show me the project on GitHub", ' +
-				'"打开仓库网页 / 打开 repository / 指向 repository". Whenever the user wants to OPEN, SHOW, or GO TO ' +
-				'the repository / a PR / an issue, use THIS tool, not open_url. ' +
-				'kind=open_repo → open the repo homepage ("open the sutando repo" / "open upstream" / ' +
-				'"open a webpage pointing to the repository" / "go to GitHub"); ' +
-				'kind=open_pr (n) → open PR #n and summarize its title/author/state ("open PR 1409", ' +
-				'"what\'s the status of PR 1409 / this pull request" — PR status questions go HERE, not get_task_status); ' +
-				'kind=open_issue (n) → open issue #n; ' +
-				'kind=recent_prs → list the latest pull requests ("what are the recent PRs"); ' +
-				'kind=issues_by (who) → list issues opened by a GitHub user ("john-the-dev\'s issues"). ' +
-				'ALWAYS resolves to sonichi/sutando — never a private mirror or a guessed URL. ' +
-				'Default to kind=open_repo when the user just wants the repository/GitHub opened without naming a PR or issue.',
-			parameters: z.object({
-				kind: z.enum(['open_repo', 'open_pr', 'open_issue', 'recent_prs', 'issues_by']),
-				n: z.number().int().positive().optional().describe('PR or issue number (open_pr / open_issue)'),
-				who: z.string().optional().describe('GitHub username (issues_by)'),
-				limit: z.number().int().positive().optional().describe('max items for recent_prs (default 5)'),
-			}),
-			execution: 'inline',
-			async execute(args) {
-				const { kind, n, who, limit } = args as { kind: GithubKind; n?: number; who?: string; limit?: number };
-				const openUrl = (u: string): boolean => {
-					try { execFileSync('open', [u], { timeout: 4_000 }); return true; } catch { return false; }
-				};
-				const ghJson = (a: string[]): any => {
-					try { return JSON.parse(execFileSync('gh', a, { timeout: 8_000, encoding: 'utf-8', env: process.env }).toString() || 'null'); }
-					catch { return null; }
-				};
-				try {
-					// Pure resolution (canonical repo, no remote guessing) — see github-url.ts.
-					const tgt = resolveGithubTarget(kind, { n, who, limit });
-					if (tgt.error) return { error: tgt.error };
-					if (tgt.url) {
-						const ok = openUrl(tgt.url);
-						if (kind === 'open_pr' && n) {
-							const pr = ghJson(['pr', 'view', String(n), '--repo', CANONICAL_REPO, '--json', 'number,title,author,state']);
-							return { opened: tgt.url, ok, summary: pr?.number ? `PR #${pr.number}: "${pr.title}" by ${pr.author?.login ?? '?'} — ${pr.state}` : undefined };
-						}
-						if (kind === 'open_issue' && n) {
-							const is = ghJson(['issue', 'view', String(n), '--repo', CANONICAL_REPO, '--json', 'number,title,state']);
-							return { opened: tgt.url, ok, summary: is?.number ? `Issue #${is.number}: "${is.title}" — ${is.state}` : undefined };
-						}
-						return { opened: tgt.url, ok };
-					}
-					if (tgt.ghArgs) {
-						const rows = ghJson(tgt.ghArgs);
-						if (!Array.isArray(rows)) return { error: 'gh unavailable', repo: CANONICAL_REPO };
-						if (kind === 'recent_prs') return { repo: CANONICAL_REPO, prs: rows.map((p: any) => ({ n: p.number, title: p.title, author: p.author?.login })) };
-						return { repo: CANONICAL_REPO, author: who, issues: rows.map((i: any) => ({ n: i.number, title: i.title })) };
-					}
-					return { error: 'unknown kind' };
-				} catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
-			},
-		});
+		tools.push(openGithubUrlTool);  // moved to discord-voice-tools.ts (Susan 2026-06-09)
 		// Skill-local override of `dismiss` — in a Discord voice context, the
 		// generic core dismissTool (which runs Zoom AppleScript) is wrong; here
 		// dismiss = SIGTERM self so cleanupSession() handler runs.
@@ -978,105 +934,15 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// "meeting mode" → "switch to me" and silently failed to flip the flag). Mirrors
 		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
 		// is addressing the bot, in either mode (so it can also EXIT meeting mode).
-		tools.push({
-			name: 'switch_mode',
-			description:
-				'Switch THIS bot between active mode and silent meeting / note-taking mode. ' +
-				'Call switch_mode("meeting") when the user asks you to take notes, go silent, be quiet, stand by / standby, hold on, wait, or enter meeting/passive mode. ' +
-				'Call switch_mode("active") when the user asks you to come back, resume, wake up, or be active. ' +
-				'IMPORTANT: only call this when the user is addressing YOU BY NAME in the command (e.g. "Hi <your name>, …" / "<your name>, …"). If they say a switch command WITHOUT your name, do NOT call it — it is meant for the other bot. ' +
-				'And only call it when they genuinely mean to switch your mode — not when "stand by" appears inside a narrative sentence ("…I told you to stand by so…"). ' +
-				'Prefer THIS tool over inferring the mode from raw words — speech-to-text mangles phrases like "meeting mode".',
-			parameters: z.object({ mode: z.enum(['active', 'meeting']) }),
-			execution: 'inline',
-			async execute(args) {
-				const { mode } = args as { mode: 'active' | 'meeting' };
-				(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
-				if (mode === 'meeting') {
-					if (!s.meetingMode && !(s as any)._pendingMeeting) {
-						(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
-						console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
-					}
-					// #1456: do NOT tell Gemini it is going silent — when the
-					// model thinks it is entering silent mode it emits the ack as TEXT-ONLY (no audio),
-					// so the confirmation is never heard. Ask for a NORMAL spoken reply; the CODE
-					// engages silence at turn.end (deferred _pendingMeeting), AFTER the ack is voiced.
-					return { status: 'meeting_mode', instruction: 'Reply OUT LOUD with ONE short, normal sentence acknowledging you will take notes (e.g. "Got it, I\'ll take notes."). Speak it naturally — exactly as you would voice any other reply. Do NOT say you are going silent, stopping, or being quiet; just the brief spoken acknowledgement.' };
-				}
-				if (s.meetingMode || s.meetingEntered) {
-					// #1427 over-fire guard: do NOT exit meeting mode just because the
-					// bot's name was said. The audio classifier (above) sets _aiWakeAt
-					// ONLY on a genuine WAKE — a greeting / re-establish-contact or a
-					// by-name request to respond ("hi Lucy", "Lucy can you hear me",
-					// "hi Lucy, <question>") — and NOT on a bare passing "Lucy" or a quiet
-					// command ("Lucy, stay silent / take notes"). (Susan 2026-06-07: a name
-					// alone is not a wake; "Lucy, stay silent" is the OPPOSITE of a wake —
-					// the model kept flipping meeting→active on bare names and wouldn't stay
-					// quiet.) Require a FRESH wake signal to leave meeting, so the model
-					// can't pull itself out of the silence the user asked for.
-					const _WAKE_FRESH_MS = Number(process.env.SUTANDO_WAKE_FRESH_MS) || 12000;
-					const _wokenFresh = Date.now() - ((s as any)._aiWakeAt || 0) < _WAKE_FRESH_MS;
-					if (!_wokenFresh) {
-						console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
-						return { status: 'stayed_meeting', instruction: 'Stay silent and keep taking notes. The user has not greeted you or asked you anything to bring you active — they only mentioned your name or told you to stay quiet. Do NOT speak, do NOT call tools; keep listening.' };
-					}
-					s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
-					try { recordConversation('discord-agent', '⇄ MODE → active (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: STAND_NAME || 'bot', speakerType: 'agent' }); } catch {}
-					try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
-					console.log(`${ts()} [Meeting] switch_mode tool → active`);
-				}
-				return { status: 'active_mode', instruction: 'Back to active mode. Respond normally and use tools as needed.' };
-			},
-		});
-		tools.push({
-			name: 'dismiss',
-			description:
-				'Leave the current Discord voice channel and exit the voice session. ' +
-				'Use when user says "dismiss", "leave", "leave discord", "log off", "bye", "end this", "退出", "下线", "你走吧". ' +
-				'NOT for ending an in-progress task or hanging up a phone call.',
-			parameters: z.object({}),
-			execution: 'inline',
-			async execute() {
-				// #1456: only the designated controller may dismiss the bot.
-				// dismiss SIGTERMs the session out of the channel; the tier gate alone
-				// is insufficient because a relay account (a peer bot via a relay user-id) is owner-tier
-				// in the allowlist, so it (or a misfired tool-call) was making the bot
-				// dismiss ITSELF mid-session (observed: the bot dismissed itself —
-				// that's a bug). Mirror the meeting-mode controller-gate: require the
-				// controller to be the sole human speaker of the current turn.
-				if (VOICE_CONTROLLER) {
-					const _humans = [...s.turnSpeakers].filter(
-						id => s.speakerNameCache.get(id)?.type !== 'agent');
-					const _byController = _humans.includes(VOICE_CONTROLLER);  // controller participated (not necessarily sole)
-					if (!_byController) {
-						console.log(`${ts()} [Dismiss] refused — not the controller (last=${s.lastSpeaker}, humans=${JSON.stringify(_humans)})`);
-						return { status: 'refused', message: 'Only the controller can dismiss this bot.' };
-					}
-				}
-				console.log(`${ts()} [Dismiss] Discord voice context — SIGTERM`);
-				setTimeout(() => { try { process.kill(process.pid, 'SIGTERM'); } catch {} }, 400);
-				return { status: 'left_discord_voice' };
-			},
-		});
+		tools.push(makeSwitchModeTool(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME }));  // moved to discord-voice-tools.ts
+		tools.push(makeDismissTool(s, { voiceController: VOICE_CONTROLLER }));  // moved to discord-voice-tools.ts
 		// Upstream sutando does NOT ship a screen-share implementation — it lives
 		// in the operator's private repo. Without an explicit `share_screen` tool
 		// that always returns unavailable, Gemini may silently route a "share my
 		// screen" utterance to a sibling tool (switch_tab / core summon → Zoom.app)
 		// — wrong behavior, no signal to the user. This stub guarantees a clean
 		// unavailability reply.
-		tools.push({
-			name: 'share_screen',
-			description:
-				'Reply that screen share is NOT available in this build of sutando. ' +
-				'Match for any "share screen" / "share my screen" / "screen share" / "屏幕共享" / "分享屏幕" utterance. ' +
-				'In this (upstream) build the share-screen implementation is not installed; the tool always returns unavailable so the user gets an explicit message instead of a silent no-op.',
-			parameters: z.object({}),
-			execution: 'inline',
-			async execute() {
-				return { status: 'unavailable',
-				         message: 'Screen share is not available in this build of sutando — the share-screen implementation lives in the operator\'s private repo and is not installed. Tell the user briefly that screen share is unavailable in this version.' };
-			},
-		});
+		tools.push(shareScreenTool);  // moved to discord-voice-tools.ts
 		const seen = new Set(tools.map(t => t.name));
 		for (const t of inlineTools) {
 			if (!seen.has(t.name)) { tools.push(t); seen.add(t.name); }
@@ -1084,16 +950,18 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		for (const t of [...ownerOnlyTools, ...configurableTools]) {
 			if (!seen.has(t.name)) { tools.push(t); seen.add(t.name); }
 		}
-		tools.push({
-			name: 'get_task_status',
-			description: 'Check whether an INTERNAL delegated/background task (a `work` job) is still in progress — e.g. "are you still working on that?" / "is that task done yet?". ' +
-				'Do NOT use this for the status of a GitHub PULL REQUEST or issue — "the status of this/that pull request / PR / issue" means a GitHub item; use open_github_url (kind=open_pr / open_issue) for that, NOT get_task_status.',
-			parameters: z.object({}),
-			execution: 'inline',
-			async execute() {
-				return { inProgress: s.pendingTasks > 0, pendingCount: s.pendingTasks };
-			},
-		});
+		// get_task_status REMOVED (Susan 2026-06-09): a read-only status tool, but it
+		// drove an unsolicited spoken turn ("still working in the background") when the
+		// model fired it spontaneously — and being read-only it was exempt from the
+		// dispatch gate, so nothing stopped it. Delegated-`work` results already
+		// auto-inject ("Report this result to the user now") when ready, so the model
+		// just waits; checking progress goes back through `work` if needed. No bespoke
+		// status tool.
+
+		// send_discord_message — voice-session-scoped inline tool (needs s.client), so it
+		// lives in discord-voice-tools.ts (Susan 2026-06-09: voice-specific tools belong
+		// in their own module, not inlined here). Owner-tier (below) + dispatch-gated.
+		tools.push(makeSendDiscordMessageTool(s));
 	}
 
 	// Per-speaker tier gate. The Gemini session's tool list is fixed at start,
@@ -1105,6 +973,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	//   open       — inlineTools + get_task_status (read-only surface)
 	const ownerOnlyNames = new Set<string>(ownerOnlyTools.map(t => t.name));
 	ownerOnlyNames.add('switch_mode');  // #1456: classify as owner-tier so the controller-gate wrapper applies (only the controller may switch the bot's mode)
+	ownerOnlyNames.add('send_discord_message');  // Susan 2026-06-09: only the owner may post to channels via the voice bot
 	const teamNames = new Set<string>(configurableTools.map(t => t.name));
 
 	// #1427 clause 2+3 dispatch gate (Susan 2026-06-08): the tier/name gate alone
@@ -1138,7 +1007,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	// ones. New tools are gated automatically — no per-tool maintenance, no more whack-a-mole.
 	// The only exempts are conversational/status reads + switch_mode (governed by its own
 	// controller/name-gate). Env override (SUTANDO_DISPATCH_GATE_TOOLS) still wins for testing.
-	const _exemptFromGate = new Set<string>(['recent_context', 'get_task_status', 'get_current_time', 'switch_mode']);
+	const _exemptFromGate = new Set<string>(['recent_context', 'get_current_time', 'switch_mode']);
 	const _gatedEnv = (process.env.SUTANDO_DISPATCH_GATE_TOOLS || '').split(',').map(x => x.trim()).filter(Boolean);
 	const _gatedEnvSet: Set<string> | null = _gatedEnv.length ? new Set<string>(_gatedEnv) : null;
 	// gate unless exempt (or, if an env override list is set, gate only those named).
