@@ -38,6 +38,7 @@ import { recordConversation, recordSession, recordToolCall } from '../../../src/
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
+import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
 import { createGate, decideForTurn, isStandby, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
@@ -919,9 +920,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			}),
 			execution: 'inline',
 			async execute(args) {
-				const { kind, n, who, limit } = args as { kind: string; n?: number; who?: string; limit?: number };
-				const REPO = process.env.SUTANDO_GH_REPO || 'sonichi/sutando';
-				const base = `https://github.com/${REPO}`;
+				const { kind, n, who, limit } = args as { kind: GithubKind; n?: number; who?: string; limit?: number };
 				const openUrl = (u: string): boolean => {
 					try { execFileSync('open', [u], { timeout: 4_000 }); return true; } catch { return false; }
 				};
@@ -930,30 +929,26 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					catch { return null; }
 				};
 				try {
-					if (kind === 'open_repo') { return { opened: base, ok: openUrl(base) }; }
-					if (kind === 'open_pr') {
-						if (!n) return { error: 'PR number required' };
-						const url = `${base}/pull/${n}`; const ok = openUrl(url);
-						const pr = ghJson(['pr', 'view', String(n), '--repo', REPO, '--json', 'number,title,author,state']);
-						return { opened: url, ok, summary: pr?.number ? `PR #${pr.number}: "${pr.title}" by ${pr.author?.login ?? '?'} — ${pr.state}` : undefined };
+					// Pure resolution (canonical repo, no remote guessing) — see github-url.ts.
+					const tgt = resolveGithubTarget(kind, { n, who, limit });
+					if (tgt.error) return { error: tgt.error };
+					if (tgt.url) {
+						const ok = openUrl(tgt.url);
+						if (kind === 'open_pr' && n) {
+							const pr = ghJson(['pr', 'view', String(n), '--repo', CANONICAL_REPO, '--json', 'number,title,author,state']);
+							return { opened: tgt.url, ok, summary: pr?.number ? `PR #${pr.number}: "${pr.title}" by ${pr.author?.login ?? '?'} — ${pr.state}` : undefined };
+						}
+						if (kind === 'open_issue' && n) {
+							const is = ghJson(['issue', 'view', String(n), '--repo', CANONICAL_REPO, '--json', 'number,title,state']);
+							return { opened: tgt.url, ok, summary: is?.number ? `Issue #${is.number}: "${is.title}" — ${is.state}` : undefined };
+						}
+						return { opened: tgt.url, ok };
 					}
-					if (kind === 'open_issue') {
-						if (!n) return { error: 'issue number required' };
-						const url = `${base}/issues/${n}`; const ok = openUrl(url);
-						const is = ghJson(['issue', 'view', String(n), '--repo', REPO, '--json', 'number,title,state']);
-						return { opened: url, ok, summary: is?.number ? `Issue #${is.number}: "${is.title}" — ${is.state}` : undefined };
-					}
-					if (kind === 'recent_prs') {
-						const prs = ghJson(['pr', 'list', '--repo', REPO, '--limit', String(limit || 5), '--json', 'number,title,author']);
-						if (!Array.isArray(prs)) return { error: 'gh unavailable', repo: REPO };
-						return { repo: REPO, prs: prs.map((p: any) => ({ n: p.number, title: p.title, author: p.author?.login })) };
-					}
-					if (kind === 'issues_by') {
-						if (!who) return { error: 'username required' };
-						const safe = who.replace(/[^A-Za-z0-9_-]/g, '');
-						const iss = ghJson(['issue', 'list', '--repo', REPO, '--author', safe, '--limit', '10', '--json', 'number,title']);
-						if (!Array.isArray(iss)) return { error: 'gh unavailable', author: safe };
-						return { author: safe, issues: iss.map((i: any) => ({ n: i.number, title: i.title })) };
+					if (tgt.ghArgs) {
+						const rows = ghJson(tgt.ghArgs);
+						if (!Array.isArray(rows)) return { error: 'gh unavailable', repo: CANONICAL_REPO };
+						if (kind === 'recent_prs') return { repo: CANONICAL_REPO, prs: rows.map((p: any) => ({ n: p.number, title: p.title, author: p.author?.login })) };
+						return { repo: CANONICAL_REPO, author: who, issues: rows.map((i: any) => ({ n: i.number, title: i.title })) };
 					}
 					return { error: 'unknown kind' };
 				} catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
