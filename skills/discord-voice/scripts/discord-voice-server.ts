@@ -1355,16 +1355,28 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		// (from decideForTurn): my-name→allow+sticky, peer-name→drop, standby→drop, neither→
 		// carries. Confirmed need via the ✂ log: a reply was cut "name-window expired 41190ms"
 		// because the controller named the bot once and kept talking 41s without re-naming.
+		// #1427 deterministic wake (clean per-user STT stream): OR the fixed-phrase
+		// matcher with the classifier's wake=true — the classifier alone missed
+		// obvious wakes ("Hi Lucy, wake up") and switch_mode("active") stayed refused.
+		// Applies in BOTH gate models — controller mode accepts only the controller's
+		// stream; legacy (no controller, the live deployment) accepts an owner-tier
+		// speaker. Without the legacy arm both stamps sat in controller-gated blocks
+		// and the no-controller config silently kept the classifier as the single
+		// point of failure (found verifying the 2026-06-09 live test).
+		{
+			const _wakeEligible = VOICE_CONTROLLER
+				? userId === VOICE_CONTROLLER
+				: effectiveTier(new Set([userId]), ACCESS, TREAT_AS_OWNER) === 'owner';
+			if (_wakeEligible && _isWakePhrase(transcript) && !_isEnterMeetingPhrase(transcript)) {
+				(s as any)._aiWakeAt = Date.now();
+			}
+		}
 		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && s.gate) {
 			const _wasAddressed = s.gate.lastAddressedToMe;
 			// Track when the controller EXPLICITLY named THIS bot (not the sticky state) —
 			// switch_mode is gated on this so only "Hi <bot name>, switch …" switches this bot, and a
 			// bare "switch to active mode" (no name) switches nobody.
 			if (_aiAddressed || _namesThisBot(transcript)) (s as any)._namedThisBotAt = Date.now();
-			// #1427 deterministic wake (clean controller stream): OR the fixed-phrase
-			// matcher with the classifier's wake=true — the classifier alone missed
-			// obvious wakes ("Hi Lucy, wake up") and switch_mode("active") stayed refused.
-			if (_isWakePhrase(transcript) && !_isEnterMeetingPhrase(transcript)) (s as any)._aiWakeAt = Date.now();
 			decideForTurn(s.gate, transcript);  // updates s.gate.lastAddressedToMe in-place
 			// AI-semantic wake (#1427): the model judged the controller is addressing
 			// THIS bot — tolerating ASR garble of the name ("hi Maddy"→"hi May") that the
