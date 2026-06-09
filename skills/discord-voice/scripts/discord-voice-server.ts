@@ -739,6 +739,11 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 	const taskId = `task-discord-voice-${Date.now()}`;
 	const taskPath = join(TASKS_DIR, `${taskId}.txt`);
 	const resultPath = join(RESULTS_DIR, `${taskId}.txt`);
+	// Layered 2-min protocol (Susan 2026-06-09): core MUST write an interim
+	// summary here within 2 minutes (then keep working); the poll below relays
+	// it the moment it lands. The voice-side check-in prompt is only the
+	// FALLBACK for when core stays silent past the deadline.
+	const partialPath = join(RESULTS_DIR, `${taskId}.partial.txt`);
 
 	s.pendingTasks++;
 	console.log(`${ts()} [Task] delegated: ${taskId} — "${taskDescription}" (pending: ${s.pendingTasks})`);
@@ -759,6 +764,7 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 		`access_tier: ${currentTier(s)}\n` +
 		`task: ${taskDescription}\n` +
 		`hint: Check ~/.claude/skills/ for a matching skill before using raw commands.\n` +
+		`deadline_protocol: MANDATORY — within 2 minutes of reading this task, write an interim summary (1-3 sentences: what you understood, findings so far or current step, rough ETA) to results/${taskId}.partial.txt. Then KEEP WORKING and write the full result to results/${taskId}.txt as usual. If you can fully answer within 2 minutes, skip the partial and write the full result directly.\n` +
 		`transcript:\n${fullTranscript}\n`;
 	writeFileSync(taskPath, content);
 
@@ -770,8 +776,22 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 			s.pendingTasks = Math.max(0, s.pendingTasks - 1);
 			return;
 		}
-		// 2-minute check-in (see TASK_CHECKIN_MS). Fires ONCE, from THIS timer —
-		// the user gets feedback even if core processes silently for 25 minutes.
+		// Layer 1: core's interim summary (deadline_protocol in the task file).
+		// Relay it the moment it lands; it satisfies the 2-min feedback contract,
+		// so the fallback check-in below is suppressed.
+		if (!_checkinSent && existsSync(partialPath)) {
+			_checkinSent = true;
+			try {
+				const partial = readFileSync(partialPath, 'utf-8').trim();
+				unlinkSync(partialPath);
+				console.log(`${ts()} [Task] interim summary ${taskId} (${Date.now() - startTime}ms): ${partial.slice(0, 120)}`);
+				(s.voiceSession as any).transport.sendContent([
+					{ role: 'user', text: `[Interim update for task "${taskDescription.slice(0, 80)}" — report this to the user now in one or two short sentences, then ask if they want to keep waiting in this call or get the final result as a Discord message later:]\n${partial}` },
+				], true);
+			} catch {}
+		}
+		// Layer 2 (fallback): core stayed silent past the deadline — prompt from
+		// THIS timer so the user gets feedback even if core ignores the protocol.
 		if (!_checkinSent && Date.now() - startTime > TASK_CHECKIN_MS) {
 			_checkinSent = true;
 			console.log(`${ts()} [Task] check-in ${taskId} — no result after ${Math.round(TASK_CHECKIN_MS / 1000)}s, prompting model to ask the user`);
@@ -789,6 +809,7 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 			console.log(`${ts()} [Task] result ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			s.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
 			try { unlinkSync(resultPath); } catch {}
+			try { unlinkSync(partialPath); } catch {}  // final result supersedes a lingering interim
 			if (!s.taskResultCache) s.taskResultCache = new Map();
 			s.taskResultCache.set(taskDescription, result);
 			s.resultQueue.push({
