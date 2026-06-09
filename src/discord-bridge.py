@@ -2905,6 +2905,37 @@ async def _handle_discord_message(message, force=False):
         if getattr(message, "reference", None) and message.reference.message_id
         else ""
     )
+    # Inject skill instructions for owner tasks so the agent follows the
+    # notify-before-work and transcription protocol after compaction.
+    # Only injected when the referenced skills are installed on this node.
+    _notify_py = Path(os.path.expanduser("~/.claude/skills/task-progress/scripts/notify.py"))
+    _transcribe_py = Path(os.path.expanduser("~/.claude/skills/audio-transcribe/scripts/transcribe.py"))
+    discord_skill_hints = ""
+    if access_tier == "owner" and (_notify_py.exists() or _transcribe_py.exists()):
+        channel_id_str = str(message.channel.id)
+        has_audio = "[File attached:" in attachment_note and any(
+            attachment_note.lower().find(ext) != -1
+            for ext in (".m4a", ".mp3", ".ogg", ".opus", ".wav", ".webm", ".aac")
+        )
+        lines = ["===SKILL INSTRUCTIONS (follow before any other action)==="]
+        step = 1
+        if _notify_py.exists():
+            notify_cmd = (
+                f"python3 ~/.claude/skills/task-progress/scripts/notify.py"
+                f" --source discord --channel-id {channel_id_str}"
+            )
+            if has_audio:
+                lines.append(f'{step}. NOTIFY FIRST: {notify_cmd} --message "Got your voice message, give me a moment."')
+            else:
+                lines.append(f'{step}. NOTIFY FIRST (if task takes >60s): {notify_cmd} --message "On it — back in a moment."')
+            step += 1
+        if has_audio and _transcribe_py.exists():
+            attached_path = attachment_note.split("[File attached: ")[-1].rstrip("]").split("\n")[0]
+            lines.append(f"{step}. TRANSCRIBE: python3 ~/.claude/skills/audio-transcribe/scripts/transcribe.py '{attached_path}'")
+            step += 1
+        lines.append(f"{step}. Process transcript and write result to results/{task_id}.txt")
+        discord_skill_hints = "\n" + "\n".join(lines) + "\n"
+
     task_file.write_text(
         f"id: {task_id}\n"
         f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
@@ -2919,6 +2950,7 @@ async def _handle_discord_message(message, force=False):
         f"access_tier: {access_tier}\n"
         f"priority: {priority}\n"
         f"{tier_instructions.get(access_tier, tier_instructions['other'])}"
+        f"{discord_skill_hints}"
     )
     pending_replies[task_id] = message.channel
     # Track source-message-id so the result-sender can auto-attach reply_to
