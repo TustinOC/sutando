@@ -9,7 +9,9 @@
  * classification (owner/team/open) and the dispatch gate are applied by the caller.
  */
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { recordConversation } from '../../../src/conversation-store.js';
@@ -17,42 +19,46 @@ import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-u
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
+// Read a name→id map from a user-private Discord config file (NOT in the repo). These
+// ids are private info (Susan 2026-06-09: "don't hardcode my mini/maddy secret info —
+// read it from access.json or similar"), so channel/user ids live under
+// ~/.claude/channels/discord/ alongside access.json, never in source.
+function _readDiscordConfig(filename: string): Record<string, string> {
+	try {
+		const o = JSON.parse(readFileSync(join(homedir(), '.claude', 'channels', 'discord', filename), 'utf-8'));
+		const out: Record<string, string> = {};
+		for (const k in o) out[k.toLowerCase()] = String(o[k]);
+		return out;
+	} catch { return {}; }
+}
+
 /**
- * Allowlisted send-target channels: keyword -> channel id. The env var
- * `SUTANDO_SEND_CHANNELS` (a JSON object) extends/overrides the defaults so ids
- * aren't hard-bound to one deployment.
+ * Allowlisted send-target channels: keyword -> channel id. Read from
+ * ~/.claude/channels/discord/send-channels.json (user-private); env
+ * `SUTANDO_SEND_CHANNELS` (JSON) overrides. NO ids hardcoded in source.
  */
 export function sendChannels(): Record<string, string> {
-	const base: Record<string, string> = {
-		dev: '1485653767402553457',
-		general: '1487549592089137317',
-		susan: '1494747451285049527',
-		susan_private: '1507122184576045206',
-	};
+	const base = _readDiscordConfig('send-channels.json');
 	try {
 		const o = JSON.parse(process.env.SUTANDO_SEND_CHANNELS || '{}');
 		for (const k in o) base[k.toLowerCase()] = String(o[k]);
-	} catch { /* keep defaults */ }
+	} catch { /* keep file values */ }
 	return base;
 }
 
 /**
  * Allowlisted @-mention targets: handle/name -> Discord user id. Lets the model
- * @-mention a user BY NAME (it can't look up ids itself). Env `SUTANDO_MENTION_USERS`
- * (JSON) extends/overrides. (Susan 2026-06-09: "send a message to mini" was posting
- * without a correct @-mention because the tool had no name→id mapping.)
+ * @-mention a user BY NAME (it can't look up ids itself). Read from
+ * ~/.claude/channels/discord/mention-users.json (user-private); env
+ * `SUTANDO_MENTION_USERS` (JSON) overrides. NO ids hardcoded in source (Susan
+ * 2026-06-09: these handle→id mappings are private, must not live in the repo).
  */
 export function mentionUsers(): Record<string, string> {
-	const base: Record<string, string> = {
-		mini: '1490412828065267872',
-		maddy: '1485656249705169031',
-		lucy: '1494435872949665953',
-		susan: '1025785494862315690',
-	};
+	const base = _readDiscordConfig('mention-users.json');
 	try {
 		const o = JSON.parse(process.env.SUTANDO_MENTION_USERS || '{}');
 		for (const k in o) base[k.toLowerCase()] = String(o[k]);
-	} catch { /* keep defaults */ }
+	} catch { /* keep file values */ }
 	return base;
 }
 
