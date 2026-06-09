@@ -905,13 +905,20 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		tools.push({
 			name: 'open_github_url',
 			description:
-				'Open or summarize something in the canonical Sutando GitHub repo (sonichi/sutando). ' +
-				'kind=open_repo → open the repo ("open the sutando repo" / "open upstream"); ' +
+				'Open or summarize ANYTHING in the canonical Sutando GitHub repo (sonichi/sutando). ' +
+				'ALWAYS PREFER THIS over the generic open_url for any GitHub/repo/PR/issue request — ' +
+				'including vague or bilingual phrasings like "open a webpage pointing to the repository", ' +
+				'"open the repo page", "go to GitHub / our repo", "show me the project on GitHub", ' +
+				'"打开仓库网页 / 打开 repository / 指向 repository". Whenever the user wants to OPEN, SHOW, or GO TO ' +
+				'the repository / a PR / an issue, use THIS tool, not open_url. ' +
+				'kind=open_repo → open the repo homepage ("open the sutando repo" / "open upstream" / ' +
+				'"open a webpage pointing to the repository" / "go to GitHub"); ' +
 				'kind=open_pr (n) → open PR #n and summarize ("open PR 1409"); ' +
 				'kind=open_issue (n) → open issue #n; ' +
 				'kind=recent_prs → list the latest pull requests ("what are the recent PRs"); ' +
 				'kind=issues_by (who) → list issues opened by a GitHub user ("john-the-dev\'s issues"). ' +
-				'ALWAYS resolves to sonichi/sutando — never a private mirror or a guessed URL.',
+				'ALWAYS resolves to sonichi/sutando — never a private mirror or a guessed URL. ' +
+				'Default to kind=open_repo when the user just wants the repository/GitHub opened without naming a PR or issue.',
 			parameters: z.object({
 				kind: z.enum(['open_repo', 'open_pr', 'open_issue', 'recent_prs', 'issues_by']),
 				n: z.number().int().positive().optional().describe('PR or issue number (open_pr / open_issue)'),
@@ -1116,7 +1123,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	// ungated-tool gap as close_tab. NOTE: this allowlist keeps needing additions per tool; the
 	// robust follow-up is to flip to an EXEMPT-list (gate every tier tool except read-only
 	// recent_context/get_task_status/get_current_time + switch_mode) — proposed to Susan.
-	const _defaultGated = ['open_url', 'capture_screen', 'switch_tab', 'switch_app', 'close_tab', 'close_window', 'dismiss', 'summon', 'share_screen', 'join_zoom', 'clipboard', 'set_clipboard', 'read_clipboard', 'brightness', 'set_brightness', 'volume', 'set_volume', 'add_to_vault', 'play', 'point_at', 'work'];
+	const _defaultGated = ['open_url', 'open_github_url', 'capture_screen', 'switch_tab', 'switch_app', 'close_tab', 'close_window', 'dismiss', 'summon', 'share_screen', 'join_zoom', 'clipboard', 'set_clipboard', 'read_clipboard', 'brightness', 'set_brightness', 'volume', 'set_volume', 'add_to_vault', 'play', 'point_at', 'work'];
 	const _gatedEnv = (process.env.SUTANDO_DISPATCH_GATE_TOOLS || '').split(',').map(x => x.trim()).filter(Boolean);
 	const actionGatedNames = new Set<string>(_gatedEnv.length ? _gatedEnv : _defaultGated);
 	// Window was 12s; Susan 2026-06-08 live test: she commanded "open the repo" but the
