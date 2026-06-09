@@ -46,7 +46,7 @@ _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.en
 import { fileURLToPath } from 'node:url';
 import { voiceApiKey } from '../../../src/voice-key.js';
 import { loadVoiceConfig, resolveOwnerMode } from '../../../src/voice-config.js';
-import { execSync, spawn } from 'node:child_process';
+import { execSync, execFileSync, spawn } from 'node:child_process';
 import { VoiceSession, type ToolDefinition, type MainAgent } from 'bodhi-realtime-agent';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
@@ -476,6 +476,33 @@ async function _clearModeIndicator(s: DiscordVoiceSession): Promise<void> {
 	} catch { /* best-effort cleanup */ }
 }
 
+// #1427 dynamic task board (Susan 2026-06-09): a single live-edited message in
+// the bound text channel acts as a task list — ⚙️ a line when a task is
+// delegated, ✅/⏱ when it finishes. Discord-native equivalent of the web UI's
+// #tasks panel. Best-effort: if the post/edit fails, the task still runs.
+async function _renderTaskBoard(s: DiscordVoiceSession): Promise<void> {
+	const board = s.taskBoard;
+	if (!board || board.length === 0 || s.closing) return;
+	const icon = (st: string) => (st === 'done' ? '✅' : st === 'timeout' ? '⏱' : '⚙️');
+	const lines = board.slice(-10).map(t => `${icon(t.status)} ${t.desc.slice(0, 80)}`);
+	const running = board.filter(t => t.status === 'running').length;
+	const header = running > 0 ? `📋 **Tasks** · ⚙️ ${running} running` : '📋 **Tasks**';
+	const text = `${header}\n${lines.join('\n')}`;
+	try {
+		const ch = await s.client.channels.fetch(s.channelId);
+		if (!ch || !('send' in ch)) return;
+		if (s.taskBoardMsgId) {
+			try {
+				const m = await (ch as { messages: { fetch: (id: string) => Promise<{ edit: (t: string) => Promise<unknown> }> } }).messages.fetch(s.taskBoardMsgId);
+				await m.edit(text);
+				return;
+			} catch { s.taskBoardMsgId = null; /* message gone — repost below */ }
+		}
+		const m = await (ch as { send: (t: string) => Promise<{ id: string }> }).send(text);
+		s.taskBoardMsgId = m.id;
+	} catch (e) { console.error(`${ts()} [TaskBoard] update failed:`, e); }
+}
+
 // Show / hide the full screen-share indicator: VC-status + nickname + a posted
 // message that live-updates the frame count (proof frames are actually flowing).
 // Driven by the join_discord_screen tool-call, cleared on stop_vision / exit.
@@ -591,6 +618,10 @@ interface DiscordVoiceSession {
 	groundingContext: string | null;
 	resultQueue: { text: string }[];
 	pendingTasks: number;
+	// #1427 dynamic task board: live-edited message in the bound text channel
+	// (➕ on delegate, ✅/⏱ on finish). taskBoardMsgId is the message being edited.
+	taskBoard?: { id: string; desc: string; status: 'running' | 'done' | 'timeout' }[];
+	taskBoardMsgId?: string | null;
 	closing: boolean;
 	taskResultCache?: Map<string, string>;
 	_toolIdMap?: Map<string, string>;
@@ -688,6 +719,9 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 	s.pendingTasks++;
 	console.log(`${ts()} [Task] delegated: ${taskId} — "${taskDescription}" (pending: ${s.pendingTasks})`);
 	s.events.push({ event: `task_delegated:${taskDescription.slice(0, 60)}`, timestamp: new Date().toISOString() });
+	if (!s.taskBoard) s.taskBoard = [];
+	s.taskBoard.push({ id: taskId, desc: taskDescription, status: 'running' });
+	void _renderTaskBoard(s);
 
 	const fullTranscript = s.transcript.slice(-20)
 		.map(t => `${t.role === 'sutando' ? 'Sutando' : 'User'}: ${t.text}`)
@@ -714,6 +748,7 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 		if (existsSync(resultPath)) {
 			clearInterval(poll);
 			s.pendingTasks = Math.max(0, s.pendingTasks - 1);
+			{ const _bt = s.taskBoard?.find(t => t.id === taskId); if (_bt) _bt.status = 'done'; void _renderTaskBoard(s); }
 			const result = readFileSync(resultPath, 'utf-8').trim();
 			console.log(`${ts()} [Task] result ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			s.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
@@ -728,6 +763,7 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 		if (Date.now() - startTime > TASK_POLL_TIMEOUT_MS) {
 			clearInterval(poll);
 			s.pendingTasks = Math.max(0, s.pendingTasks - 1);
+			{ const _bt = s.taskBoard?.find(t => t.id === taskId); if (_bt) _bt.status = 'timeout'; void _renderTaskBoard(s); }
 			console.log(`${ts()} [Task] timeout ${taskId}`);
 			try {
 				(s.voiceSession as any).transport.sendContent([
@@ -769,10 +805,13 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 
 	let instructions: string;
 	if (isOwner) {
-		const repoUrl = (() => {
-			try { return execSync('git remote get-url origin', { timeout: 2_000 }).toString().trim().replace(/\.git$/, ''); }
-			catch { return ''; }
-		})();
+		// Canonical Sutando repo. Was `git remote get-url origin`, but `origin` is
+		// the per-instance PRIVATE mirror (liususan091219/sutando-private) → the
+		// model was told the wrong repo and kept opening the private fork for
+		// "open the sutando repo / PR N" (Susan 2026-06-09). Hardcode the canonical
+		// public repo (env-overridable) so the prompt + open_github_url always
+		// resolve to sonichi/sutando, never a remote-derived guess.
+		const repoUrl = process.env.SUTANDO_GH_REPO_URL || 'https://github.com/sonichi/sutando';
 		instructions = [
 			`You are Sutando, a personal AI assistant. You are in a Discord voice channel with your owner${OWNER_NAME ? ` ${OWNER_NAME}` : ''}.`,
 			'YOU are Sutando — the AI assistant. The person speaking is your OWNER, a human. Do NOT confuse yourself with them.',
@@ -852,6 +891,72 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 			async execute(args) {
 				const { task } = args as { task: string };
 				return delegateTask(s, task);
+			},
+		});
+		// open_github_url (#1427 demo, Susan 2026-06-09): resolve + open/answer
+		// GitHub items in the CANONICAL repo (sonichi/sutando), never the private
+		// mirror. The model kept opening liususan091219/sutando-private because it
+		// guessed URLs from the origin remote; this tool removes the guessing —
+		// canonical repo baked in, PR/issue numbers map deterministically.
+		// Opens via `open`; summaries via read-only `gh` (best-effort — if gh isn't
+		// authed in this process, the open still works, summary is omitted).
+		// execFileSync (array args) — no shell, `who` sanitized → no injection.
+		tools.push({
+			name: 'open_github_url',
+			description:
+				'Open or summarize something in the canonical Sutando GitHub repo (sonichi/sutando). ' +
+				'kind=open_repo → open the repo ("open the sutando repo" / "open upstream"); ' +
+				'kind=open_pr (n) → open PR #n and summarize ("open PR 1409"); ' +
+				'kind=open_issue (n) → open issue #n; ' +
+				'kind=recent_prs → list the latest pull requests ("what are the recent PRs"); ' +
+				'kind=issues_by (who) → list issues opened by a GitHub user ("john-the-dev\'s issues"). ' +
+				'ALWAYS resolves to sonichi/sutando — never a private mirror or a guessed URL.',
+			parameters: z.object({
+				kind: z.enum(['open_repo', 'open_pr', 'open_issue', 'recent_prs', 'issues_by']),
+				n: z.number().int().positive().optional().describe('PR or issue number (open_pr / open_issue)'),
+				who: z.string().optional().describe('GitHub username (issues_by)'),
+				limit: z.number().int().positive().optional().describe('max items for recent_prs (default 5)'),
+			}),
+			execution: 'inline',
+			async execute(args) {
+				const { kind, n, who, limit } = args as { kind: string; n?: number; who?: string; limit?: number };
+				const REPO = process.env.SUTANDO_GH_REPO || 'sonichi/sutando';
+				const base = `https://github.com/${REPO}`;
+				const openUrl = (u: string): boolean => {
+					try { execFileSync('open', [u], { timeout: 4_000 }); return true; } catch { return false; }
+				};
+				const ghJson = (a: string[]): any => {
+					try { return JSON.parse(execFileSync('gh', a, { timeout: 8_000, encoding: 'utf-8', env: process.env }).toString() || 'null'); }
+					catch { return null; }
+				};
+				try {
+					if (kind === 'open_repo') { return { opened: base, ok: openUrl(base) }; }
+					if (kind === 'open_pr') {
+						if (!n) return { error: 'PR number required' };
+						const url = `${base}/pull/${n}`; const ok = openUrl(url);
+						const pr = ghJson(['pr', 'view', String(n), '--repo', REPO, '--json', 'number,title,author,state']);
+						return { opened: url, ok, summary: pr?.number ? `PR #${pr.number}: "${pr.title}" by ${pr.author?.login ?? '?'} — ${pr.state}` : undefined };
+					}
+					if (kind === 'open_issue') {
+						if (!n) return { error: 'issue number required' };
+						const url = `${base}/issues/${n}`; const ok = openUrl(url);
+						const is = ghJson(['issue', 'view', String(n), '--repo', REPO, '--json', 'number,title,state']);
+						return { opened: url, ok, summary: is?.number ? `Issue #${is.number}: "${is.title}" — ${is.state}` : undefined };
+					}
+					if (kind === 'recent_prs') {
+						const prs = ghJson(['pr', 'list', '--repo', REPO, '--limit', String(limit || 5), '--json', 'number,title,author']);
+						if (!Array.isArray(prs)) return { error: 'gh unavailable', repo: REPO };
+						return { repo: REPO, prs: prs.map((p: any) => ({ n: p.number, title: p.title, author: p.author?.login })) };
+					}
+					if (kind === 'issues_by') {
+						if (!who) return { error: 'username required' };
+						const safe = who.replace(/[^A-Za-z0-9_-]/g, '');
+						const iss = ghJson(['issue', 'list', '--repo', REPO, '--author', safe, '--limit', '10', '--json', 'number,title']);
+						if (!Array.isArray(iss)) return { error: 'gh unavailable', author: safe };
+						return { author: safe, issues: iss.map((i: any) => ({ n: i.number, title: i.title })) };
+					}
+					return { error: 'unknown kind' };
+				} catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
 			},
 		});
 		// Skill-local override of `dismiss` — in a Discord voice context, the
