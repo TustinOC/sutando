@@ -39,6 +39,7 @@ import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-ke
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
+import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { createGate, decideForTurn, isStandby, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
@@ -617,6 +618,10 @@ interface DiscordVoiceSession {
 	// can be re-injected on reconnect and periodically, surviving the ~10min
 	// rolloff and session resets that would otherwise drop the join-time context.
 	groundingContext: string | null;
+	// #1585 provenance action lease — minted ONLY when a real user STT turn lands; a gated
+	// tool may dispatch only while a fresh lease is held. Model-fabricated "user:" turns never
+	// run the STT path → never mint one → can't trigger tools.
+	actionLease: ActionLease | null;
 	resultQueue: { text: string }[];
 	pendingTasks: number;
 	// #1427 dynamic task board: live-edited message in the bound text channel
@@ -1123,9 +1128,18 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	// ungated-tool gap as close_tab. NOTE: this allowlist keeps needing additions per tool; the
 	// robust follow-up is to flip to an EXEMPT-list (gate every tier tool except read-only
 	// recent_context/get_task_status/get_current_time + switch_mode) — proposed to Susan.
-	const _defaultGated = ['open_url', 'open_github_url', 'capture_screen', 'switch_tab', 'switch_app', 'close_tab', 'close_window', 'dismiss', 'summon', 'share_screen', 'join_zoom', 'clipboard', 'set_clipboard', 'read_clipboard', 'brightness', 'set_brightness', 'volume', 'set_volume', 'add_to_vault', 'play', 'point_at', 'work'];
+	// #1585 — EXEMPT-LIST, not allowlist (Susan/Mini 2026-06-09). The old `_defaultGated`
+	// allowlist meant any NEW action tool was UNGATED until someone remembered to add it —
+	// that's how `switch_voice_config` slipped through and a fabricated turn fired it. Flip it:
+	// gate EVERY tier-classified action tool by default, exempting only read-only / self-governed
+	// ones. New tools are gated automatically — no per-tool maintenance, no more whack-a-mole.
+	// The only exempts are conversational/status reads + switch_mode (governed by its own
+	// controller/name-gate). Env override (SUTANDO_DISPATCH_GATE_TOOLS) still wins for testing.
+	const _exemptFromGate = new Set<string>(['recent_context', 'get_task_status', 'get_current_time', 'switch_mode']);
 	const _gatedEnv = (process.env.SUTANDO_DISPATCH_GATE_TOOLS || '').split(',').map(x => x.trim()).filter(Boolean);
-	const actionGatedNames = new Set<string>(_gatedEnv.length ? _gatedEnv : _defaultGated);
+	const _gatedEnvSet: Set<string> | null = _gatedEnv.length ? new Set<string>(_gatedEnv) : null;
+	// gate unless exempt (or, if an env override list is set, gate only those named).
+	const isActionGated = (name: string): boolean => _gatedEnvSet ? _gatedEnvSet.has(name) : !_exemptFromGate.has(name);
 	// Window was 12s; Susan 2026-06-08 live test: she commanded "open the repo" but the
 	// model (stuck in the interruption/apology loop) didn't actually fire open_url until
 	// 23-45s later — past 12s → her LEGIT call got blocked as "no intent" while the model
@@ -1228,8 +1242,20 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					console.log(`${ts()} [Tier] '${t.name}' denied — speaker tier=${tier}, needs ${need}`);
 					return { status: 'denied', message: `That needs ${need}-tier access; the current speaker is ${tier}-tier.` };
 				}
-				// #1427 option B - dispatch-time intent check (replaces pre-computed clause 2/3).
-				if (DISPATCH_GATE_ON && actionGatedNames.has(t.name)) {
+				// #1427/#1585 dispatch gate. isActionGated = exempt-list (gate all action tools
+				// except read-only/self-governed) so no new tool is ever silently ungated.
+				if (DISPATCH_GATE_ON && isActionGated(t.name)) {
+					// #1585 STRUCTURAL gate (provenance lease): a gated tool may fire only while a
+					// fresh lease minted from a REAL user STT turn is held. A model-fabricated
+					// "user:" turn never runs the STT path → no lease → dropped here, regardless of
+					// content. This is the boundary that makes role-continuation harmless.
+					const _LEASE_TTL = Number(process.env.SUTANDO_ACTION_LEASE_TTL_MS) || _ACTION_INTENT_FRESH_MS;
+					if (!leaseValid(s.actionLease, Date.now(), _LEASE_TTL)) {
+						console.log(`${ts()} [ActionLease] '${t.name}' blocked - no fresh real-STT lease (fabricated / unprompted) | args=${JSON.stringify(args).slice(0, 100)}`);
+						return { status: 'not_requested', message: 'BLOCKED - no real user request backs this action; it did NOT run. Do NOT claim you did it. Wait for the user to actually ask.' };
+					}
+					// #1427 option B SEMANTIC check: confirm the real recent speech requested THIS
+					// tool (content-match against the lease's real transcript / recent STT).
 					const _v = await _liveIntentCheck(t.name, args);
 					if (!_v.ok) {
 						console.log(`${ts()} [DispatchGate] '${t.name}' blocked - intent-check: ${_v.reason} | args=${JSON.stringify(args).slice(0, 100)}`);
@@ -1453,6 +1479,10 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 			}
 		}
 		const spk = s.speakerNameCache.get(userId);
+		// #1585 MINT the action lease — a REAL user STT turn just landed (this path runs only
+		// on inbound Discord audio/VAD). This is the ONLY place a lease is minted, so a
+		// model-fabricated "user:" turn can never produce one. Gated tool dispatch requires it.
+		s.actionLease = mintLease(transcript, Date.now());
 		recordConversation('discord-user', transcript, s.sessionId, {
 			speakerId: userId,
 			speakerName: spk?.name,
@@ -1606,6 +1636,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		startTime: Date.now(),
 		transcript: [],
 		groundingContext: null,
+		actionLease: null,
 		resultQueue: [],
 		pendingTasks: 0,
 		closing: false,
