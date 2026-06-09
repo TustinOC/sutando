@@ -93,6 +93,12 @@ const RESULTS_DIR = process.env.DISCORD_VOICE_RESULTS_DIR || join(WORKSPACE_DIR,
 const TASKS_DIR = join(WORKSPACE_DIR, 'tasks');
 const TASK_POLL_INTERVAL_MS = 500;
 const TASK_POLL_TIMEOUT_MS = 300_000;
+// #1427 (Susan 2026-06-09, code-enforced — not agent-memory): if a delegated
+// task has no result after this long, the SERVER prompts the model to check in
+// with the user (restate the task, say it's still running, ask keep-waiting vs
+// finish-offline). The 25-min review incident: core worked silently, voice said
+// "idle", the user concluded the task was lost and left before the result came.
+const TASK_CHECKIN_MS = Number(process.env.SUTANDO_TASK_CHECKIN_MS) || 120_000;
 const OWNER_NAME = process.env.owner ?? '';
 
 // Speak-gate (name-gate, reused from sutando-skills PR #16 name-gate.ts).
@@ -756,11 +762,23 @@ function delegateTask(s: DiscordVoiceSession, taskDescription: string): Promise<
 	writeFileSync(taskPath, content);
 
 	const startTime = Date.now();
+	let _checkinSent = false;
 	const poll = setInterval(() => {
 		if (s.closing || s !== active) {
 			clearInterval(poll);
 			s.pendingTasks = Math.max(0, s.pendingTasks - 1);
 			return;
+		}
+		// 2-minute check-in (see TASK_CHECKIN_MS). Fires ONCE, from THIS timer —
+		// the user gets feedback even if core processes silently for 25 minutes.
+		if (!_checkinSent && Date.now() - startTime > TASK_CHECKIN_MS) {
+			_checkinSent = true;
+			console.log(`${ts()} [Task] check-in ${taskId} — no result after ${Math.round(TASK_CHECKIN_MS / 1000)}s, prompting model to ask the user`);
+			try {
+				(s.voiceSession as any).transport.sendContent([
+					{ role: 'user', text: `[Status check from the task system, speak to the user now: the task "${taskDescription.slice(0, 120)}" is still running after ${Math.round((Date.now() - startTime) / 1000)} seconds. In ONE short sentence: tell the user it's still in progress and ask whether they want to keep waiting in this call, or have it finish offline so the result arrives as a Discord message later. Do not invent a result.]` },
+				], true);
+			} catch {}
 		}
 		if (existsSync(resultPath)) {
 			clearInterval(poll);
