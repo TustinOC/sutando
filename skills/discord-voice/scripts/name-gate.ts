@@ -180,6 +180,51 @@ export function decideForTurn(state: GateState, userText: string): Decision {
 	return state.lastAddressedToMe ? 'allow' : 'drop';
 }
 
+/**
+ * Normalize spoken text for phrase matching: lowercase, strip punctuation to
+ * spaces, collapse whitespace. STT renders "Hi, Lucy! Wake up." — a raw
+ * substring match misses "hi lucy" / "lucy wake up" because of the commas, so
+ * every fixed-phrase matcher must compare against THIS form, never the raw
+ * transcript. Keeps letters/digits in any script (CJK survives).
+ */
+export function normalizeSpoken(text: string): string {
+	return text.toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Deterministic meeting→active wake matcher (#1427): does `text` carry a
+ * name-qualified wake command for any of `names` (stand name + ASR aliases)?
+ *
+ * This is the fixed-phrase HALF of the wake decision — it is OR-ed with the
+ * LLM audio classifier's wake=true judgment, so an obvious spoken wake
+ * ("Hi Lucy, wake up" / "Lucy, can you hear me?") flips the bot active even
+ * when the classifier misses or lags. Wake stays name-qualified: a bare
+ * verb ("wake up", "active mode") without a name matches NOTHING, so channel
+ * echo of a peer/own sentence can't wake this bot (the #1427 over-fire bug).
+ *
+ * Matching is word-boundary on the normalized form (space-padded includes),
+ * so an alias can't fire as a prefix of a longer word ("may" vs "maybe").
+ */
+export function isWakePhrase(text: string, names: string[]): boolean {
+	if (!text) return false;
+	const t = ` ${normalizeSpoken(text)} `;
+	if (t.includes(' stop meeting mode ')) return true;
+	for (const raw of names) {
+		const n = normalizeSpoken(raw);
+		if (!n) continue;
+		const forms = [
+			`hi ${n}`, `hey ${n}`, `hello ${n}`, `okay ${n}`, `ok ${n}`,
+			`${n} wake up`, `wake up ${n}`,
+			`${n} active mode`, `${n} you can talk`,
+			`${n} resume`, `${n} come back`,
+			`${n} can you hear me`, `can you hear me ${n}`,
+			`${n} are you there`, `${n} you there`,
+		];
+		if (forms.some(f => t.includes(` ${f} `))) return true;
+	}
+	return false;
+}
+
 // --- internals ---
 
 function escape(s: string): string {

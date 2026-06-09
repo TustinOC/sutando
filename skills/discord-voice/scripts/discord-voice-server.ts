@@ -41,7 +41,7 @@ import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shoul
 import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTool, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
-import { createGate, decideForTurn, isStandby, type GateState } from './name-gate.js';
+import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -201,17 +201,11 @@ const AUTO_MEETING_TIMEOUT_MS = parseInt(process.env.SUTANDO_VOICE_AUTO_MEETING_
 // #1427: wake = a DELIBERATE, NAME-QUALIFIED command, never a loose
 // substring. Earlier 'active mode' / 'wake up' matched incidental conversation — a bot
 // saying "I'm in active mode now" (heard via channel echo) woke this bot from its OWN words.
-// Now wake fires ONLY on "<name> wake up" / "wake up <name>" / "<name> active mode" etc.
-// Bare "hi <name>" no longer exits meeting — it just addresses (the name-gate answers
-// that one turn but the bot STAYS in meeting). Enter = "stand by"/"hold on" (unchanged).
-const _standWakeForms = [STAND_NAME, ...STAND_NAME_ALIASES]
-	.map(n => n.toLowerCase().trim()).filter(Boolean)
-	.flatMap(n => [`hi ${n}`, `hey ${n}`, `okay ${n}`, `${n} wake up`, `wake up ${n}`, `${n} active mode`, `${n} you can talk`, `${n} resume`, `${n} come back`]);
-const WAKE_PHRASES = ['stop meeting mode',
-	..._standWakeForms];
+// Matching lives in name-gate.ts isWakePhrase (unit-tested): punctuation-normalized,
+// word-boundary, name-qualified forms — STT renders "Hi, Lucy! Wake up." and the old
+// raw `includes('hi lucy')` missed it (the meeting→active "won't wake" bug).
 function _isWakePhrase(text: string): boolean {
-	const lower = text.toLowerCase();
-	return WAKE_PHRASES.some(p => lower.includes(p));
+	return isWakePhrase(text, [STAND_NAME, ...STAND_NAME_ALIASES]);
 }
 // Enter-meeting cues (#1427): the bot joins active and switches to silent
 // meeting/note-taker mode only when the user cues it with one of these.
@@ -224,7 +218,8 @@ const ENTER_MEETING_PHRASES = ['meeting mode', 'be silent', 'go silent',
 	'start the meeting', 'start meeting',
 	'会议模式', '安静', '静音'];
 function _isEnterMeetingPhrase(text: string): boolean {
-	const lower = text.toLowerCase();
+	// normalizeSpoken: punctuation-robust ("Lucy, stand by." → "lucy stand by").
+	const lower = normalizeSpoken(text);
 	return ENTER_MEETING_PHRASES.some(p => lower.includes(p));
 }
 // A mode command is a SHORT imperative ("<bot name>, stand by"), NOT the phrase
@@ -1366,6 +1361,10 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 			// switch_mode is gated on this so only "Hi <bot name>, switch …" switches this bot, and a
 			// bare "switch to active mode" (no name) switches nobody.
 			if (_aiAddressed || _namesThisBot(transcript)) (s as any)._namedThisBotAt = Date.now();
+			// #1427 deterministic wake (clean controller stream): OR the fixed-phrase
+			// matcher with the classifier's wake=true — the classifier alone missed
+			// obvious wakes ("Hi Lucy, wake up") and switch_mode("active") stayed refused.
+			if (_isWakePhrase(transcript) && !_isEnterMeetingPhrase(transcript)) (s as any)._aiWakeAt = Date.now();
 			decideForTurn(s.gate, transcript);  // updates s.gate.lastAddressedToMe in-place
 			// AI-semantic wake (#1427): the model judged the controller is addressing
 			// THIS bot — tolerating ASR garble of the name ("hi Maddy"→"hi May") that the
@@ -1675,7 +1674,19 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		if (_nt && VOICE_CONTROLLER) {
 			const _origNT = _nt.onInputTranscription?.bind(_nt);
 			_nt.onInputTranscription = (text: string) => {
-				try { if (_namesThisBot(text) && s.lastSpeaker === VOICE_CONTROLLER) (s as any)._namedThisBotAt = Date.now(); } catch {}
+				try {
+					if (s.lastSpeaker === VOICE_CONTROLLER) {
+						if (_namesThisBot(text)) (s as any)._namedThisBotAt = Date.now();
+						// #1427 deterministic wake fast path: the switch_mode("active") gate
+						// requires a fresh _aiWakeAt, but that was set ONLY by the async per-user
+						// STT classifier — which missed/lagged obvious wakes ("Hi Lucy, wake up",
+						// "Hi Lucy, can you hear me") and the tool got refused in a loop. A
+						// name-qualified fixed wake phrase in the LIVE input is unambiguous —
+						// stamp the wake here too, so EITHER signal (classifier wake=true OR
+						// deterministic phrase) opens the gate. Enter-cue still wins in-turn.
+						if (_isWakePhrase(text) && !_isEnterMeetingPhrase(text)) (s as any)._aiWakeAt = Date.now();
+					}
+				} catch {}
 				_origNT?.(text);
 			};
 		}
