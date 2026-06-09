@@ -98,7 +98,8 @@ const TASK_POLL_TIMEOUT_MS = 300_000;
 // with the user (restate the task, say it's still running, ask keep-waiting vs
 // finish-offline). The 25-min review incident: core worked silently, voice said
 // "idle", the user concluded the task was lost and left before the result came.
-const TASK_CHECKIN_MS = Number(process.env.SUTANDO_TASK_CHECKIN_MS) || 120_000;
+// Fixed constant — no env knob (Susan: don't introduce new env variables).
+const TASK_CHECKIN_MS = 120_000;
 const OWNER_NAME = process.env.owner ?? '';
 
 // Speak-gate (name-gate, reused from sutando-skills PR #16 name-gate.ts).
