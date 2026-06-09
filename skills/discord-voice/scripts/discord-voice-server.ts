@@ -40,6 +40,7 @@ import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
 import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
+import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, type GateState } from './name-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
@@ -1244,20 +1245,42 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					console.log(`${ts()} [Tier] '${t.name}' denied — speaker tier=${tier}, needs ${need}`);
 					return { status: 'denied', message: `That needs ${need}-tier access; the current speaker is ${tier}-tier.` };
 				}
-				// #1427/#1585 dispatch gate. isActionGated = exempt-list (gate all action tools
-				// except read-only/self-governed) so no new tool is ever silently ungated.
+				// #1427/#1585 dispatch gate (merged): exempt-list (gate all action tools except
+				// read-only/self-governed) → gate-wait (don't judge stale speech) → provenance
+				// lease → semantic content-check.
 				if (DISPATCH_GATE_ON && isActionGated(t.name)) {
-					// #1585 STRUCTURAL gate (provenance lease): a gated tool may fire only while a
-					// fresh lease minted from a REAL user STT turn is held. A model-fabricated
-					// "user:" turn never runs the STT path → no lease → dropped here, regardless of
-					// content. This is the boundary that makes role-continuation harmless.
+					// (a) GATE-WAIT (stt-gate.ts): Gemini fires off LIVE AUDIO faster than the STT
+					// path transcribes, so the triggering utterance may not be in the buffer yet —
+					// judging now would block a legit request against stale speech. If a burst just
+					// ended but its transcript hasn't landed, wait for it before judging.
+					const _STT_MAX_LAG = Number(process.env.SUTANDO_STT_MAX_LAG_MS) || 5000;
+					let _sttLagged = false;
+					for (;;) {
+						const _d = sttGateDecision({
+							speechEndAt: Number((s as any)._lastSpeechEndAt || 0),
+							sttAt: Number((s as any)._lastSttAt || 0),
+							now: Date.now(),
+							maxLagMs: _STT_MAX_LAG,
+						});
+						if (_d === 'wait') { await new Promise(r => setTimeout(r, 150)); continue; }
+						if (_d === 'failopen') _sttLagged = true;
+						break;
+					}
+					// (b) #1585 PROVENANCE LEASE: a gated tool may fire only while a fresh lease,
+					// minted from a REAL user speech burst, is held. A model-fabricated "user:" turn
+					// produces no real audio → no lease → dropped, regardless of content. Exception:
+					// if a real burst ended but its STT never landed (lagged), we KNOW the user just
+					// spoke → fail open rather than block a real request.
 					const _LEASE_TTL = Number(process.env.SUTANDO_ACTION_LEASE_TTL_MS) || _ACTION_INTENT_FRESH_MS;
 					if (!leaseValid(s.actionLease, Date.now(), _LEASE_TTL)) {
+						if (_sttLagged) {
+							console.log(`${ts()} [DispatchGate] '${t.name}' STT lag fail-open (real burst, transcript not landed within ${_STT_MAX_LAG}ms)`);
+							return inner(args);
+						}
 						console.log(`${ts()} [ActionLease] '${t.name}' blocked - no fresh real-STT lease (fabricated / unprompted) | args=${JSON.stringify(args).slice(0, 100)}`);
 						return { status: 'not_requested', message: 'BLOCKED - no real user request backs this action; it did NOT run. Do NOT claim you did it. Wait for the user to actually ask.' };
 					}
-					// #1427 option B SEMANTIC check: confirm the real recent speech requested THIS
-					// tool (content-match against the lease's real transcript / recent STT).
+					// (c) SEMANTIC content-check: confirm the real recent speech requested THIS tool.
 					const _v = await _liveIntentCheck(t.name, args);
 					if (!_v.ok) {
 						console.log(`${ts()} [DispatchGate] '${t.name}' blocked - intent-check: ${_v.reason} | args=${JSON.stringify(args).slice(0, 100)}`);
@@ -1445,6 +1468,9 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 			const _buf = ((s as any)._recentUserSpeech || []) as { text: string; at: number }[];
 			_buf.push({ text: transcript, at: _now });
 			(s as any)._recentUserSpeech = _buf.filter(e => _now - e.at < _RECENT_MS);
+			// STT-calibration (stt-gate.ts): stamp when a transcript landed so the dispatch
+			// gate can tell whether the utterance that triggered a tool has been transcribed yet.
+			(s as any)._lastSttAt = _now;
 		}
 		// #1456 PRECISE name-gate: the gate must key off EXACTLY who spoke — not a
 		// loose "if anyone named the bot" rule. It keys ONLY off the CONTROLLER's OWN clean per-
@@ -1566,6 +1592,10 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	resampler.on('end', () => {
 		s.subscribedUsers.delete(userId);
 		console.log(`${ts()} [Voice] user ${userId} stopped speaking (${chunks} chunks) — silence burst`);
+		// STT-calibration (stt-gate.ts): stamp when a speech burst ended so the dispatch gate
+		// knows an utterance is pending transcription (Gemini fires tools off live audio before
+		// this burst's STT lands; the gate must wait for it rather than judge stale speech).
+		(s as any)._lastSpeechEndAt = Date.now();
 		// #1456: utterance just ended (AfterSilence 200ms). Flush this user's
 		// accumulated clean PCM and transcribe it on the dedicated STT path —
 		// fire-and-forget so the audio pipeline is never blocked. Clear the
