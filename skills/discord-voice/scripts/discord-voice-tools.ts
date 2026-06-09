@@ -37,37 +37,67 @@ export function sendChannels(): Record<string, string> {
 }
 
 /**
+ * Allowlisted @-mention targets: handle/name -> Discord user id. Lets the model
+ * @-mention a user BY NAME (it can't look up ids itself). Env `SUTANDO_MENTION_USERS`
+ * (JSON) extends/overrides. (Susan 2026-06-09: "send a message to mini" was posting
+ * without a correct @-mention because the tool had no name→id mapping.)
+ */
+export function mentionUsers(): Record<string, string> {
+	const base: Record<string, string> = {
+		mini: '1490412828065267872',
+		maddy: '1485656249705169031',
+		lucy: '1494435872949665953',
+		susan: '1025785494862315690',
+	};
+	try {
+		const o = JSON.parse(process.env.SUTANDO_MENTION_USERS || '{}');
+		for (const k in o) base[k.toLowerCase()] = String(o[k]);
+	} catch { /* keep defaults */ }
+	return base;
+}
+
+/**
  * send_discord_message — post a message DIRECTLY to an allowlisted text channel via
- * the voice bot's discord.js client (no round-trip through core/`work`). Channels are
- * allowlist-resolved (never guess an id). Owner-tier + dispatch-gated by the caller.
+ * the voice bot's discord.js client (no round-trip through core/`work`). Channels AND
+ * @-mention users are allowlist-resolved (never guess an id). Owner-tier + dispatch-gated.
  */
 export function makeSendDiscordMessageTool(s: any): ToolDefinition {
 	const CHANNELS = sendChannels();
+	const USERS = mentionUsers();
 	return {
 		name: 'send_discord_message',
 		description:
 			'Send a text message to a Discord CHANNEL the user names. Use ONLY when the user EXPLICITLY asks to send/post a message to a specific channel — ' +
-			'e.g. "tell the team in #dev that…", "post in general …", "send a message to susan_private …". ' +
+			'e.g. "tell the team in #dev that…", "post in general …", "send a message to susan_private …", "tell mini in #susan that…". ' +
 			'The channel is resolved by name against an allowlist (dev / general / susan / susan_private). ' +
-			'If the named channel is NOT in the allowlist (e.g. a made-up "student private channel"), this returns an error asking the user to clarify — it NEVER guesses a channel id. ' +
+			'To @-MENTION someone (e.g. "tell mini …", "let maddy know …"), pass their name in `mention` (mini / maddy / lucy / susan) — it is resolved to a proper <@id> mention prepended to the message. ' +
+			'If the named channel or mention is NOT in the allowlist, this returns an error asking the user to clarify — it NEVER guesses an id. ' +
 			'Send exactly ONE message per explicit user request; do not re-send.',
 		parameters: z.object({
 			channel: z.string().describe('Target channel name/keyword: dev, general, susan, or susan_private'),
 			text: z.string().describe('The exact message text to send'),
+			mention: z.string().optional().describe('Optional: a user to @-mention by name (mini / maddy / lucy / susan). Resolved to <@id> and prepended to the message.'),
 		}),
 		execution: 'inline',
 		async execute(args) {
-			const { channel, text } = args as { channel: string; text: string };
+			const { channel, text, mention } = args as { channel: string; text: string; mention?: string };
 			const key = String(channel || '').toLowerCase().replace(/^#/, '').replace(/[\s-]+/g, '_').trim();
 			const id = CHANNELS[key];
 			if (!id) return { status: 'unknown_channel', message: `No channel called "${channel}". Known: ${Object.keys(CHANNELS).join(', ')}. Ask the user which one — do NOT guess.` };
 			if (!text || !text.trim()) return { status: 'empty', message: 'No message text — nothing was sent.' };
+			let body = text;
+			if (mention && mention.trim()) {
+				const mkey = mention.toLowerCase().replace(/^@/, '').replace(/[\s-]+/g, '_').trim();
+				const uid = USERS[mkey];
+				if (!uid) return { status: 'unknown_user', message: `No user called "${mention}". Known: ${Object.keys(USERS).join(', ')}. Ask the user who to mention — do NOT guess an id.` };
+				body = `<@${uid}> ${text}`;
+			}
 			try {
 				const ch: any = await s.client.channels.fetch(id);
 				if (!ch || typeof ch.send !== 'function') return { status: 'not_sendable', message: `Channel "${channel}" can't receive messages.` };
-				await ch.send(text);
-				console.log(`${ts()} [SendMsg] → #${key} (${id}): ${text.slice(0, 80)}`);
-				return { status: 'sent', channel: key };
+				await ch.send(body);
+				console.log(`${ts()} [SendMsg] → #${key} (${id})${mention ? ' @' + mention : ''}: ${body.slice(0, 80)}`);
+				return { status: 'sent', channel: key, mentioned: mention || null };
 			} catch (e) {
 				return { status: 'error', message: `Send failed: ${e instanceof Error ? e.message : String(e)}` };
 			}
