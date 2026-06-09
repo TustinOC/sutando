@@ -918,7 +918,8 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 				'the repository / a PR / an issue, use THIS tool, not open_url. ' +
 				'kind=open_repo → open the repo homepage ("open the sutando repo" / "open upstream" / ' +
 				'"open a webpage pointing to the repository" / "go to GitHub"); ' +
-				'kind=open_pr (n) → open PR #n and summarize ("open PR 1409"); ' +
+				'kind=open_pr (n) → open PR #n and summarize its title/author/state ("open PR 1409", ' +
+				'"what\'s the status of PR 1409 / this pull request" — PR status questions go HERE, not get_task_status); ' +
 				'kind=open_issue (n) → open issue #n; ' +
 				'kind=recent_prs → list the latest pull requests ("what are the recent PRs"); ' +
 				'kind=issues_by (who) → list issues opened by a GitHub user ("john-the-dev\'s issues"). ' +
@@ -1084,7 +1085,8 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		}
 		tools.push({
 			name: 'get_task_status',
-			description: 'Check whether a delegated task is still in progress. Use when someone asks "are you still working on that?"',
+			description: 'Check whether an INTERNAL delegated/background task (a `work` job) is still in progress — e.g. "are you still working on that?" / "is that task done yet?". ' +
+				'Do NOT use this for the status of a GitHub PULL REQUEST or issue — "the status of this/that pull request / PR / issue" means a GitHub item; use open_github_url (kind=open_pr / open_issue) for that, NOT get_task_status.',
 			parameters: z.object({}),
 			execution: 'inline',
 			async execute() {
