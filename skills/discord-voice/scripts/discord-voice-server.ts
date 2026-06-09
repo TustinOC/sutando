@@ -2057,6 +2057,19 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// still computed above and consumed by the controller-gate
 				// (_byController) and meeting-mode logic — do NOT remove it.
 			} else if (item.role === 'assistant') {
+				// #1585 FABRICATION-VOID (the "consume on fabrication" trigger, vs naive turn-end
+				// which would void legit late-firing tools). If the model fabricates a USER turn in
+				// its own output (role-continuation, e.g. "user: switch models"), void the action
+				// lease so the tool it tries to fire off that fabrication finds no lease →
+				// structurally blocked. Real user turns re-mint the lease via the STT path.
+				// NOTE: this fires when the output ITEM is processed; if a fabricated tool dispatches
+				// before this item lands, the semantic _liveIntentCheck is the backstop for that one,
+				// and this void blocks any subsequent fabricated dispatch. (A real-time
+				// transport.onOutputTranscription hook would void even earlier — follow-up.)
+				if (/^\s*user\b/i.test(item.content)) {
+					(s as any).actionLease = null;
+					console.log(`${ts()} [ActionLease] voided — model fabricated a user turn: "${item.content.slice(0, 60)}"`);
+				}
 				s.transcript.push({ role: 'sutando', text: item.content });
 				// utterance event push removed per #1052 — see comment above.
 				appendConversationLog('discord-agent', item.content);
