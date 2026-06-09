@@ -45,7 +45,14 @@ export const scrollTool: ToolDefinition = {
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { direction, amount, target } = args as { direction: 'down' | 'up' | 'top' | 'bottom'; amount?: 'small' | 'medium' | 'large'; target?: string };
+		const { direction, amount, target: _rawTarget } = args as { direction: 'down' | 'up' | 'top' | 'bottom'; amount?: 'small' | 'medium' | 'large'; target?: string };
+		// "window"/"page"/"main" etc. mean the MAIN page, not a CSS selector. The model
+		// habitually passes target:"window" (2026-06-09 live test): the selector branch
+		// matched nothing, its <500px-wide fallback skipped GitHub's full-width scroller,
+		// and every scroll silently no-oped while still reporting success. Normalize
+		// main-ish targets to "no target" so they take the robust multi-candidate path.
+		const target = _rawTarget && /^(window|page|main|screen|browser|content|body|document|whole page|the page)$/i.test(_rawTarget.trim())
+			? undefined : _rawTarget;
 		const px = amount === 'small' ? 150 : amount === 'large' ? 800 : 400;
 		try {
 			// Check which app is frontmost
@@ -95,18 +102,28 @@ export const scrollTool: ToolDefinition = {
 					} catch { console.log(`${ts()} [Scroll] unparseable out: ${_out.slice(0, 80)}`); }
 				} else { console.log(`${ts()} [Scroll] osascript returned EMPTY (AppleEvent denied/dropped or no front Chrome window)`); }
 			} else if (isChrome && target) {
-				// Chrome with target selector
+				// Chrome with target selector. Same observability contract as the
+				// no-target path (2026-06-09): report whether anything ACTUALLY moved —
+				// this branch used to scroll-or-not in total silence and always claim
+				// success, which made "scroll is broken" undiagnosable from the log.
 				const targetSelector = target.match(/side|nav|history|menu/i) ? 'nav' : target.match(/code/i) ? 'pre,code' : target;
 				const scrollFn = (cmd: string) =>
-					`(function(){var sel='${targetSelector}';var e=null;document.querySelectorAll(sel).forEach(function(el){if(!e&&el.scrollHeight-el.clientHeight>50)e=el});if(!e){var best=null,bh=0;document.querySelectorAll('*').forEach(function(el){var d=el.scrollHeight-el.clientHeight;if(d>50&&el.clientHeight>100&&el.getBoundingClientRect().width<500){if(d>bh){best=el;bh=d}}});e=best}if(e){${cmd}}})()`;
+					`(function(){var sel='${targetSelector}';var e=null;try{document.querySelectorAll(sel).forEach(function(el){if(!e&&el.scrollHeight-el.clientHeight>50)e=el})}catch(_){}if(!e){var best=null,bh=0;document.querySelectorAll('*').forEach(function(el){var d=el.scrollHeight-el.clientHeight;if(d>50&&el.clientHeight>100&&el.getBoundingClientRect().width<500){if(d>bh){best=el;bh=d}}});e=best}if(!e)return JSON.stringify({found:false,moved:false});var b4=e.scrollTop;${cmd};return JSON.stringify({found:true,moved:e.scrollTop!==b4,b4:b4,aft:e.scrollTop});})()`;
 				let js: string;
 				if (direction === 'top') js = scrollFn('e.scrollTop=0');
 				else if (direction === 'bottom') js = scrollFn('e.scrollTop=e.scrollHeight');
 				else js = scrollFn(`e.scrollBy(0,${direction === 'down' ? px : -px})`);
 				const tmpScroll = `/tmp/sutando-scroll-${Date.now()}.scpt`;
 				writeFileSync(tmpScroll, `tell application "Google Chrome" to tell active tab of front window to execute javascript "${js.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
-				execSync(`osascript ${tmpScroll}`, { timeout: 5_000 });
+				let _out = '';
+				try { _out = execSync(`osascript ${tmpScroll}`, { timeout: 5_000 }).toString().trim(); }
+				catch (e) { console.log(`${ts()} [Scroll] osascript error (target branch): ${e instanceof Error ? e.message : e}`); }
 				try { unlinkSync(tmpScroll); } catch {}
+				try {
+					const d = JSON.parse(_out);
+					_scrollMoved = !!d.moved;
+					console.log(`${ts()} [Scroll] target="${target}" sel="${targetSelector}" found=${d.found} moved=${d.moved} ${d.found ? `${d.b4}->${d.aft}` : ''}`);
+				} catch { console.log(`${ts()} [Scroll] target="${target}" out unparseable/empty: ${_out.slice(0, 80)}`); }
 			}
 
 			// Keyboard scroll on the frontmost app (works in any app, no focus steal)
