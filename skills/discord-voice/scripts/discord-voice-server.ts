@@ -39,10 +39,10 @@ import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-ke
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
 import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
-import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTool, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
+import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTools, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
-import { decideSpeak, regimeFor } from './speak-gate.js';
+import { addressingClassifierPrompt, decideSpeak, regimeFor } from './speak-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -984,7 +984,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// "meeting mode" → "switch to me" and silently failed to flip the flag). Mirrors
 		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
 		// is addressing the bot, in either mode (so it can also EXIT meeting mode).
-		tools.push(makeSwitchModeTool(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME, getHumanCount: () => (s as any)._humanCount ?? 1 }));  // moved to discord-voice-tools.ts; #1427 regime-aware
+		tools.push(...makeSwitchModeTools(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME, getHumanCount: () => (s as any)._humanCount ?? 1 }));  // #1427: TWO tools — switch_mode (solo) + switch_mode_group
 		tools.push(makeDismissTool(s, { voiceController: VOICE_CONTROLLER }));  // moved to discord-voice-tools.ts
 		// Upstream sutando does NOT ship a screen-share implementation — it lives
 		// in the operator's private repo. Without an explicit `share_screen` tool
@@ -1023,6 +1023,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	//   open       — inlineTools + get_task_status (read-only surface)
 	const ownerOnlyNames = new Set<string>(ownerOnlyTools.map(t => t.name));
 	ownerOnlyNames.add('switch_mode');  // #1456: classify as owner-tier so the controller-gate wrapper applies (only the controller may switch the bot's mode)
+	ownerOnlyNames.add('switch_mode_group');  // #1427: the group-regime sibling — same owner-tier classification
 	ownerOnlyNames.add('send_discord_message');  // Susan 2026-06-09: only the owner may post to channels via the voice bot
 	const teamNames = new Set<string>(configurableTools.map(t => t.name));
 
@@ -1057,7 +1058,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 	// ones. New tools are gated automatically — no per-tool maintenance, no more whack-a-mole.
 	// The only exempts are conversational/status reads + switch_mode (governed by its own
 	// controller/name-gate). Env override (SUTANDO_DISPATCH_GATE_TOOLS) still wins for testing.
-	const _exemptFromGate = new Set<string>(['recent_context', 'get_current_time', 'switch_mode']);
+	const _exemptFromGate = new Set<string>(['recent_context', 'get_current_time', 'switch_mode', 'switch_mode_group']);
 	const _gatedEnv = (process.env.SUTANDO_DISPATCH_GATE_TOOLS || '').split(',').map(x => x.trim()).filter(Boolean);
 	const _gatedEnvSet: Set<string> | null = _gatedEnv.length ? new Set<string>(_gatedEnv) : null;
 	// gate unless exempt (or, if an env override list is set, gate only those named).
@@ -1152,7 +1153,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 					const _SWITCH_FRESH_MS = Number(process.env.SUTANDO_SWITCHMODE_FRESH_MS) || 10000;
 					const _namedFresh = Date.now() - ((s as any)._namedThisBotAt || 0) < _SWITCH_FRESH_MS;
 					const _allowed = s.allowAckAudible
-						|| (t.name === 'switch_mode' ? _namedFresh : (!s.meetingMode && _addressed));
+						|| ((t.name === 'switch_mode' || t.name === 'switch_mode_group') ? _namedFresh : (!s.meetingMode && _addressed));
 					if (!_allowed) {
 						console.log(`${ts()} [NameGate] tool '${t.name}' blocked — controller hasn't addressed the bot`);
 						return { status: 'silent', message: 'Gated: the bot is silent until the controller addresses it.' };
@@ -1344,8 +1345,7 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 							// ("hi Maddy" often comes through as "hi May"), WITHOUT firing on the
 							// name appearing as an unrelated word ("may I…", "on Monday") or a
 							// "go quiet"/standby command. Replaces the brittle string name-match.
-							{ text:
-								`Transcribe this audio verbatim. Then decide: is the speaker directly CALLING ON or ADDRESSING an assistant named "${STAND_NAME || 'the assistant'}" to get its attention or have it act/respond? Account for speech-to-text errors that garble the name into a similar-sounding word — treat a clearly-intended call to that assistant as addressed=true. Do NOT set addressed=true when the name merely appears as an ordinary unrelated word, when the speaker is only telling it to be quiet / stand by, or when addressing someone else. ALSO set "wake":true when the speaker is GREETING / RE-ESTABLISHING CONTACT to bring the assistant active OR calling on it by name to answer or do something now — e.g. "hi <name>", "hey <name>", "<name>, can you hear me", "<name>, you there", or "hi <name>, <a question or request>". Set "wake":false when the name is only mentioned in passing mid-conversation (not being asked anything), and set "wake":false when they are telling it to be quiet / take notes / stay silent / stand by / enter meeting mode (the OPPOSITE of a wake). A bare name with no greeting and no request is NOT a wake. ALSO set "actionIntent":true when the speaker EXPLICITLY asks for a concrete action to be performed now — e.g. open a URL/app/tab, capture/describe the screen, read or set the clipboard, change brightness/volume, save a note, search the web, or delegate a task (verbs like open / go to / show me / capture / screenshot / copy / paste / set / turn up / play / save / look up / find / check). Set "actionIntent":false for ordinary discussion, thinking out loud, story-telling, or merely MENTIONING a thing (a repo, a file, a website) without asking for an action on it — naming something is not requesting an action. Reply with ONLY a JSON object, no prose: {"transcript":"<verbatim>","addressed":true|false,"wake":true|false,"actionIntent":true|false}. If silence/no speech: {"transcript":"","addressed":false,"wake":false,"actionIntent":false}.` },
+							{ text: addressingClassifierPrompt(STAND_NAME)  },
 							{ inlineData: { mimeType: 'audio/wav', data: audioData } },
 						],
 					}],

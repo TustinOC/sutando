@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { recordConversation, recordEvent } from '../../../src/conversation-store.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
+import { hasFreshWake, namedRecently } from './speak-gate.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -181,11 +182,94 @@ export const openGithubUrlTool: ToolDefinition = {
  * mode. Needs `s` + the session's mode-file path and stand name (passed in to avoid
  * a circular import back into discord-voice-server.ts). Body preserved verbatim.
  */
-export function makeSwitchModeTool(s: any, opts: { voiceModeFile: string; standName: string; getHumanCount?: () => number }): ToolDefinition {
-	return {
+type SwitchModeOpts = { voiceModeFile: string; standName: string; getHumanCount?: () => number };
+type SwitchResult = { status: string; instruction: string };
+
+/**
+ * SOLO (1 human + bot) mode switch — the verified-clean 1:1 logic, byte-for-
+ * byte the pre-regime behavior (Susan 2026-06-09: "一人一bot用已有的那个
+ * switch function"). Do not grow group-specific behavior here.
+ */
+export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: SwitchModeOpts): SwitchResult {
+	(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
+	if (mode === 'meeting') {
+		if (!s.meetingMode && !(s as any)._pendingMeeting) {
+			(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
+			console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
+		}
+		// #1456: do NOT tell Gemini it is going silent — when the
+		// model thinks it is entering silent mode it emits the ack as TEXT-ONLY (no audio),
+		// so the confirmation is never heard. Ask for a NORMAL spoken reply; the CODE
+		// engages silence at turn.end (deferred _pendingMeeting), AFTER the ack is voiced.
+		return { status: 'meeting_mode', instruction: 'Reply OUT LOUD with ONE short, normal sentence acknowledging you will take notes (e.g. "Got it, I\'ll take notes."). Speak it naturally — exactly as you would voice any other reply. Do NOT say you are going silent, stopping, or being quiet; just the brief spoken acknowledgement.' };
+	}
+	if (s.meetingMode || s.meetingEntered) {
+		// #1427 over-fire guard: do NOT exit meeting mode just because the
+		// bot's name was said. The audio classifier sets _aiWakeAt ONLY on a
+		// genuine WAKE — a greeting / re-establish-contact or a by-name request
+		// to respond — NOT on a bare passing name or a quiet command. (Susan
+		// 2026-06-07: a name alone is not a wake; "Lucy, stay silent" is the
+		// OPPOSITE of a wake.) Require a FRESH wake signal to leave meeting.
+		// AI-gate consumption: _aiWakeAt is stamped by the addressing classifier
+		// (speak-gate.ts addressingClassifierPrompt, run in the STT pipeline) OR
+		// the deterministic isWakePhrase fast path. hasFreshWake reads that stamp.
+		if (!hasFreshWake(s)) {
+			console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
+			return { status: 'stayed_meeting', instruction: 'Stay silent and keep taking notes. The user has not greeted you or asked you anything to bring you active — they only mentioned your name or told you to stay quiet. Do NOT speak, do NOT call tools; keep listening.' };
+		}
+		s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
+		try { recordConversation('discord-agent', '⇄ MODE → active (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: opts.standName || 'bot', speakerType: 'agent' }); } catch {}
+		try { writeFileSync(opts.voiceModeFile, 'active'); } catch {}
+		console.log(`${ts()} [Meeting] switch_mode tool → active`);
+	}
+	return { status: 'active_mode', instruction: 'Back to active mode. Respond normally and use tools as needed.' };
+}
+
+/**
+ * GROUP (≥2 humans) mode switch — separately-defined logic per Susan's
+ * 2026-06-09 spec ("超过一人一bot,需要调用多人模式下新定义的switch function").
+ * Differences from solo, today:
+ *   - Gate: the bot must have been NAMED within 10s for ANY switch — with
+ *     several people talking, a bare "meeting mode" / "wake up" heard in the
+ *     room is not addressed to us.
+ *   - Exit-meeting wake check is the same FRESH-wake requirement as solo, but
+ *     the refusal wording reflects the room context.
+ * Group-specific future behavior (room-aware acks, per-conversation rather
+ * than global mode, confirmation prompts) grows HERE, never in solo.
+ */
+export function executeGroupSwitch(s: any, mode: 'active' | 'meeting', opts: SwitchModeOpts): SwitchResult {
+	// AI-gate consumption: _namedThisBotAt is stamped when the addressing
+	// classifier judges addressed=true OR the deterministic name matcher hits
+	// (both in the STT pipeline). namedRecently reads that stamp.
+	if (!namedRecently(s)) {
+		console.log(`${ts()} [Meeting] group switch_mode("${mode}") REFUSED — bot not addressed by name`);
+		return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay exactly as you are; do not speak.' };
+	}
+	// Named + (for active) fresh-wake checks below are shared mechanics; the
+	// shared state transitions are delegated so the two functions can't drift
+	// on the #1456 deferred-ack invariants. Group-only behavior goes above.
+	return executeSoloSwitch(s, mode, opts);
+}
+
+/**
+ * TWO explicitly separate Gemini tools (Susan 2026-06-10: "我有点prefer 两个
+ * 显示分开的tool"): `switch_mode` = the solo (1 human + bot) function;
+ * `switch_mode_group` = the multi-person function. Gemini cannot reliably
+ * know the VC population, so EACH tool validates the regime at execute()
+ * time and redirects the model to the other tool on mismatch — the
+ * population check in code remains authoritative. Every call records a
+ * mode_switch_regime sqlite row (tool used, actual regime, humans).
+ */
+export function makeSwitchModeTools(s: any, opts: SwitchModeOpts): ToolDefinition[] {
+	const humans = () => opts.getHumanCount?.() ?? 1;
+	const audit = (tool: string, regime: string, mode: string) => {
+		try { recordEvent('discord-voice', 'mode_switch_regime', JSON.stringify({ tool, regime, humans: humans(), requested: mode }), s.sessionId); } catch {}
+	};
+	const soloTool: ToolDefinition = {
 		name: 'switch_mode',
 		description:
-			'Switch THIS bot between active mode and silent meeting / note-taking mode. ' +
+			'Switch THIS bot between active mode and silent meeting / note-taking mode WHEN EXACTLY ONE HUMAN is in the voice channel (a 1:1 conversation). ' +
+			'If MULTIPLE humans are present, use switch_mode_group instead. ' +
 			'Call switch_mode("meeting") when the user asks you to take notes, go silent, be quiet, stand by / standby, hold on, wait, or enter meeting/passive mode. ' +
 			'Call switch_mode("active") when the user asks you to come back, resume, wake up, or be active. ' +
 			'IMPORTANT: only call this when the user is addressing YOU BY NAME in the command (e.g. "Hi <your name>, …" / "<your name>, …"). If they say a switch command WITHOUT your name, do NOT call it — it is meant for the other bot. ' +
@@ -195,59 +279,36 @@ export function makeSwitchModeTool(s: any, opts: { voiceModeFile: string; standN
 		execution: 'inline',
 		async execute(args) {
 			const { mode } = args as { mode: 'active' | 'meeting' };
-			// #1427 regime selection (Susan's 2026-06-09 spec: solo keeps the
-			// verified-clean switch path untouched; group gets its own handler
-			// rules). Group (≥2 humans) requires the bot to have been NAMED in
-			// the last 10s for ANY mode switch — with several people talking, a
-			// bare "meeting mode" / "wake up" heard in the room is not for us.
-			// Which regime handled the switch is recorded for sqlite auditing.
-			const _humans = opts.getHumanCount?.() ?? 1;
-			const _regime = _humans <= 1 ? 'solo' : 'group';
+			const _regime = humans() <= 1 ? 'solo' : 'group';
+			audit('switch_mode', _regime, mode);
 			if (_regime === 'group') {
-				const _namedFresh = Date.now() - ((s as any)._namedThisBotAt || 0) < 10_000;
-				if (!_namedFresh) {
-					console.log(`${ts()} [Meeting] switch_mode("${mode}") REFUSED (group regime) — bot not addressed by name`);
-					return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay exactly as you are; do not speak.' };
-				}
+				// Wrong tool for the room — group rules must apply. Redirect, don't bypass.
+				return executeGroupSwitch(s, mode, opts);
 			}
-			try { recordEvent('discord-voice', 'mode_switch_regime', JSON.stringify({ regime: _regime, humans: _humans, requested: mode }), s.sessionId); } catch {}
-			(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
-			if (mode === 'meeting') {
-				if (!s.meetingMode && !(s as any)._pendingMeeting) {
-					(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
-					console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
-				}
-				// #1456: do NOT tell Gemini it is going silent — when the
-				// model thinks it is entering silent mode it emits the ack as TEXT-ONLY (no audio),
-				// so the confirmation is never heard. Ask for a NORMAL spoken reply; the CODE
-				// engages silence at turn.end (deferred _pendingMeeting), AFTER the ack is voiced.
-				return { status: 'meeting_mode', instruction: 'Reply OUT LOUD with ONE short, normal sentence acknowledging you will take notes (e.g. "Got it, I\'ll take notes."). Speak it naturally — exactly as you would voice any other reply. Do NOT say you are going silent, stopping, or being quiet; just the brief spoken acknowledgement.' };
-			}
-			if (s.meetingMode || s.meetingEntered) {
-				// #1427 over-fire guard: do NOT exit meeting mode just because the
-				// bot's name was said. The audio classifier (above) sets _aiWakeAt
-				// ONLY on a genuine WAKE — a greeting / re-establish-contact or a
-				// by-name request to respond ("hi Lucy", "Lucy can you hear me",
-				// "hi Lucy, <question>") — and NOT on a bare passing "Lucy" or a quiet
-				// command ("Lucy, stay silent / take notes"). (Susan 2026-06-07: a name
-				// alone is not a wake; "Lucy, stay silent" is the OPPOSITE of a wake —
-				// the model kept flipping meeting→active on bare names and wouldn't stay
-				// quiet.) Require a FRESH wake signal to leave meeting, so the model
-				// can't pull itself out of the silence the user asked for.
-				const _WAKE_FRESH_MS = Number(process.env.SUTANDO_WAKE_FRESH_MS) || 12000;
-				const _wokenFresh = Date.now() - ((s as any)._aiWakeAt || 0) < _WAKE_FRESH_MS;
-				if (!_wokenFresh) {
-					console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
-					return { status: 'stayed_meeting', instruction: 'Stay silent and keep taking notes. The user has not greeted you or asked you anything to bring you active — they only mentioned your name or told you to stay quiet. Do NOT speak, do NOT call tools; keep listening.' };
-				}
-				s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
-				try { recordConversation('discord-agent', '⇄ MODE → active (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: opts.standName || 'bot', speakerType: 'agent' }); } catch {}
-				try { writeFileSync(opts.voiceModeFile, 'active'); } catch {}
-				console.log(`${ts()} [Meeting] switch_mode tool → active`);
-			}
-			return { status: 'active_mode', instruction: 'Back to active mode. Respond normally and use tools as needed.' };
+			return executeSoloSwitch(s, mode, opts);
 		},
 	};
+	const groupTool: ToolDefinition = {
+		name: 'switch_mode_group',
+		description:
+			'Switch THIS bot between active mode and silent meeting / note-taking mode WHEN TWO OR MORE HUMANS are in the voice channel (a group conversation). ' +
+			'If only one human is present, use switch_mode instead. ' +
+			'Same commands as switch_mode: ("meeting") for take notes / go silent / stand by; ("active") for come back / resume / wake up. ' +
+			'STRICTER RULE IN GROUPS: only call this when the speaker addressed YOU BY NAME in the command itself — in a room with several people, a bare "meeting mode" or "wake up" without your name is NOT for you; stay as you are and do not call this tool.',
+		parameters: z.object({ mode: z.enum(['active', 'meeting']) }),
+		execution: 'inline',
+		async execute(args) {
+			const { mode } = args as { mode: 'active' | 'meeting' };
+			const _regime = humans() <= 1 ? 'solo' : 'group';
+			audit('switch_mode_group', _regime, mode);
+			if (_regime === 'solo') {
+				// Wrong tool for the room — solo path is the frozen 1:1 behavior.
+				return executeSoloSwitch(s, mode, opts);
+			}
+			return executeGroupSwitch(s, mode, opts);
+		},
+	};
+	return [soloTool, groupTool];
 }
 
 /**
