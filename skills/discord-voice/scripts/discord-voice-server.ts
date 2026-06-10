@@ -2527,11 +2527,19 @@ async function start(): Promise<void> {
 			const prev = (s2 as any)._humanCount ?? 1;
 			(s2 as any)._humanCount = humans;
 			const from = regimeFor(prev), to = regimeFor(humans);
+			const _toolHint = `[System note, do not reply to it: ${humans} human${humans === 1 ? '' : 's'} in the voice channel. For any mode switch use ${to === 'group' ? 'switch_mode_group' : 'switch_mode'} — not the other one.]`;
+			if (trigger === 'session-start') {
+				// Tell the model which switch tool applies from turn one — round-3
+				// audit showed it guessing switch_mode_group in a solo room.
+				try { injectSystemMessage(session, _toolHint); } catch {}
+			}
 			if (from !== to) {
 				console.log(`${ts()} [Regime] ${from} → ${to} (humans=${humans}, trigger=${trigger})`);
 				try { recordEvent('discord-voice', 'regime_switch', JSON.stringify({ from, to, humans, trigger }), s2.sessionId); } catch {}
 				if (!s2.meetingMode) {
-					try { injectSystemMessage(session, `[System] The voice channel now has ${humans} human${humans === 1 ? '' : 's'} (${to} regime). Say ONE short sentence acknowledging it (e.g. "${to === 'group' ? 'I see we have company — I\'ll only speak when addressed by name.' : 'Back to just us — I\'m all yours.'}").`); } catch {}
+					try { injectSystemMessage(session, `[System] The voice channel now has ${humans} human${humans === 1 ? '' : 's'} (${to} regime). Say ONE short sentence acknowledging it (e.g. "${to === 'group' ? 'I see we have company — I\'ll only speak when addressed by name.' : 'Back to just us — I\'m all yours.'}"). For mode switches from now on use ${to === 'group' ? 'switch_mode_group' : 'switch_mode'}.`); } catch {}
+				} else {
+					try { injectSystemMessage(session, _toolHint); } catch {}
 				}
 			}
 		} catch (e) { console.error(`${ts()} [Regime] recount failed:`, e); }

@@ -65,3 +65,22 @@ test('every decision carries an audit reason', () => {
 		}
 	}
 });
+
+// --- soloExitKeyword (#1427 round-3 fix: solo exit needs a mode word, not a name) ---
+import { soloExitKeyword } from '../skills/discord-voice/scripts/speak-gate.js';
+
+test('soloExitKeyword: explicit mode words pass without a name', () => {
+	assert.equal(soloExitKeyword(['active mode']), true);
+	assert.equal(soloExitKeyword(['okay, active mode.']), true);
+	assert.equal(soloExitKeyword(['can you wake up please']), true);
+	assert.equal(soloExitKeyword(['退出会议模式']), true);
+	assert.equal(soloExitKeyword(['chatter', 'more chatter', 'stop meeting mode']), true);
+});
+
+test('soloExitKeyword: passing name-mention without a mode word stays refused', () => {
+	assert.equal(soloExitKeyword(['Lucy 刚才说的这个问题']), false);
+	assert.equal(soloExitKeyword(['so as Lucy mentioned earlier']), false);
+	assert.equal(soloExitKeyword(['we were quite active yesterday']), false);
+	assert.equal(soloExitKeyword([]), false);
+	assert.equal(soloExitKeyword(['']), false);
+});

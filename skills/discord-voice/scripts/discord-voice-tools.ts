@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { recordConversation, recordEvent } from '../../../src/conversation-store.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
-import { hasFreshWake, namedRecently } from './speak-gate.js';
+import { hasFreshWake, namedRecently, soloExitKeyword } from './speak-gate.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -212,10 +212,15 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		// OPPOSITE of a wake.) Require a FRESH wake signal to leave meeting.
 		// AI-gate consumption: _aiWakeAt is stamped by the addressing classifier
 		// (speak-gate.ts addressingClassifierPrompt, run in the STT pipeline) OR
-		// the deterministic isWakePhrase fast path. hasFreshWake reads that stamp.
-		if (!hasFreshWake(s)) {
+		// the deterministic isWakePhrase fast path. SOLO relaxation (Susan
+		// 2026-06-10, round-3 failure): with one human in the room a bare
+		// "active mode" can only be meant for the bot — accept an explicit
+		// exit keyword in recent speech WITHOUT requiring the name. A passing
+		// name-mention with no mode word still gets refused.
+		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
+		if (!hasFreshWake(s) && !soloExitKeyword(_recent)) {
 			console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
-			return { status: 'stayed_meeting', instruction: 'Stay silent and keep taking notes. The user has not greeted you or asked you anything to bring you active — they only mentioned your name or told you to stay quiet. Do NOT speak, do NOT call tools; keep listening.' };
+			return { status: 'stayed_meeting', instruction: 'Stay silent THIS turn and keep taking notes — the user only mentioned your name in passing or told you to stay quiet; that is not a wake. Do not speak now. If the user LATER explicitly asks you to wake up or switch to active mode, call the switch tool again at that point.' };
 		}
 		s.meetingEntered = false; s.meetingMode = false; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 		try { recordConversation('discord-agent', '⇄ MODE → active (switch_mode tool)', s.sessionId, { speakerId: s.client.user?.id, speakerName: opts.standName || 'bot', speakerType: 'agent' }); } catch {}
@@ -243,7 +248,7 @@ export function executeGroupSwitch(s: any, mode: 'active' | 'meeting', opts: Swi
 	// (both in the STT pipeline). namedRecently reads that stamp.
 	if (!namedRecently(s)) {
 		console.log(`${ts()} [Meeting] group switch_mode("${mode}") REFUSED — bot not addressed by name`);
-		return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay exactly as you are; do not speak.' };
+		return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay as you are and do not speak now. If someone LATER addresses you by name with a mode command, call the switch tool again then.' };
 	}
 	// Named + (for active) fresh-wake checks below are shared mechanics; the
 	// shared state transitions are delegated so the two functions can't drift

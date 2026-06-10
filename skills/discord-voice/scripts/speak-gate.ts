@@ -8,6 +8,8 @@
 // SPEAK layer is THIS code function, run at the audio-output gate — explicit,
 // deterministic, zero added latency, one sqlite row per turn.
 
+import { normalizeSpoken } from './name-gate.js';
+
 export type Regime = 'solo' | 'group';
 
 /** solo = at most one human in the VC (the clean 1:1 path, behavior frozen). */
@@ -63,6 +65,31 @@ export function addressingClassifierPrompt(standName: string): string {
 /** Default freshness windows for the classifier's session stamps. */
 export const WAKE_FRESH_MS_DEFAULT = 12_000;
 export const NAMED_FRESH_MS_DEFAULT = 10_000;
+
+// Solo-regime exit-meeting keywords — deliberately NOT name-qualified (Susan
+// 2026-06-10: "单人模式下不需要 [AI gate]" — with one human in the room, an
+// explicit "active mode" can only be addressed to the bot). A bare mode
+// keyword is still required, so a passing mention of the bot's name with no
+// mode word ("Lucy 刚才说的那个问题…") keeps getting refused — the round-3
+// failure was exactly this pair: real "active mode" refused for lacking a
+// name, while the name-only mention was correctly blocked.
+const SOLO_EXIT_KEYWORDS = [
+	'active mode', 'wake up', 'stop meeting mode', 'come back', 'resume',
+	'you can talk', '退出会议', '退出會議', '活跃模式', '醒醒',
+];
+
+/**
+ * Does any recent utterance carry an explicit exit-meeting keyword?
+ * Punctuation-normalized, word-boundary, no name required — SOLO regime only.
+ */
+export function soloExitKeyword(recentTexts: string[]): boolean {
+	for (const raw of recentTexts) {
+		if (!raw) continue;
+		const t = ` ${normalizeSpoken(raw)} `;
+		if (SOLO_EXIT_KEYWORDS.some(k => t.includes(` ${normalizeSpoken(k)} `) || (/[一-鿿]/.test(k) && t.includes(normalizeSpoken(k))))) return true;
+	}
+	return false;
+}
 
 /**
  * Fresh WAKE signal? True when the AI gate judged wake=true (OR the
