@@ -64,7 +64,12 @@ export function addressingClassifierPrompt(standName: string): string {
 
 /** Default freshness windows for the classifier's session stamps. */
 export const WAKE_FRESH_MS_DEFAULT = 12_000;
-export const NAMED_FRESH_MS_DEFAULT = 10_000;
+// 10s killed a LEGITIMATE group switch in the 2026-06-10 Chi test: Susan said
+// "Right Lucy, meeting mode" and Gemini called the tool 14s later (normal model
+// latency) → refused. 25s matches the recent-speech buffer the rest of the
+// dispatch machinery uses; spurious switches stay blocked because the gate
+// still requires the bot to have actually been NAMED.
+export const NAMED_FRESH_MS_DEFAULT = 25_000;
 
 // Solo-regime exit-meeting keywords — deliberately NOT name-qualified (Susan
 // 2026-06-10: "单人模式下不需要 [AI gate]" — with one human in the room, an
