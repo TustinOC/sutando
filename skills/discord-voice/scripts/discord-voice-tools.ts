@@ -181,7 +181,7 @@ export const openGithubUrlTool: ToolDefinition = {
  * mode. Needs `s` + the session's mode-file path and stand name (passed in to avoid
  * a circular import back into discord-voice-server.ts). Body preserved verbatim.
  */
-export function makeSwitchModeTool(s: any, opts: { voiceModeFile: string; standName: string }): ToolDefinition {
+export function makeSwitchModeTool(s: any, opts: { voiceModeFile: string; standName: string; getHumanCount?: () => number }): ToolDefinition {
 	return {
 		name: 'switch_mode',
 		description:
@@ -195,6 +195,22 @@ export function makeSwitchModeTool(s: any, opts: { voiceModeFile: string; standN
 		execution: 'inline',
 		async execute(args) {
 			const { mode } = args as { mode: 'active' | 'meeting' };
+			// #1427 regime selection (Susan's 2026-06-09 spec: solo keeps the
+			// verified-clean switch path untouched; group gets its own handler
+			// rules). Group (≥2 humans) requires the bot to have been NAMED in
+			// the last 10s for ANY mode switch — with several people talking, a
+			// bare "meeting mode" / "wake up" heard in the room is not for us.
+			// Which regime handled the switch is recorded for sqlite auditing.
+			const _humans = opts.getHumanCount?.() ?? 1;
+			const _regime = _humans <= 1 ? 'solo' : 'group';
+			if (_regime === 'group') {
+				const _namedFresh = Date.now() - ((s as any)._namedThisBotAt || 0) < 10_000;
+				if (!_namedFresh) {
+					console.log(`${ts()} [Meeting] switch_mode("${mode}") REFUSED (group regime) — bot not addressed by name`);
+					return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay exactly as you are; do not speak.' };
+				}
+			}
+			try { recordConversation('mode_switch_regime', JSON.stringify({ regime: _regime, humans: _humans, requested: mode }), s.sessionId, { speakerType: 'agent' }); } catch {}
 			(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 			if (mode === 'meeting') {
 				if (!s.meetingMode && !(s as any)._pendingMeeting) {

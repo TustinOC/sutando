@@ -42,6 +42,7 @@ import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTool, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
+import { decideSpeak, regimeFor } from './speak-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -189,13 +190,27 @@ if (SUTANDO_MEETING_MODE && STAND_NAME && STAND_NAME_ALIASES.length === 0) {
 function shouldEmitAudio(s: any, nowMs: number): boolean {
 	if (s.allowAckAudible) return true;                       // mode-switch ack — always heard
 	if (nowMs < (s._forceAudibleUntil || 0)) return true;     // #1456 force-audible window after a mode switch
-	if (!s.meetingMode) {
-		// Active mode: emit iff a human just spoke (or the in-reply latch is held).
-		const withinWindow = s._turnAudioAllowed || !!s.lastSpeaker;
-		return VOICE_CONTROLLER ? withinWindow : true;
+	if (VOICE_CONTROLLER) {
+		// Controller mode: the precise per-stream gate (unchanged).
+		if (!s.meetingMode) return s._turnAudioAllowed || !!s.lastSpeaker;
+		return s.gate?.lastAddressedToMe === true;
 	}
-	// Meeting mode: silent unless summoned by name (the name-gate we keep).
-	return s.gate?.lastAddressedToMe === true;
+	// Legacy (no controller): population-aware speak gate (#1427, Susan's
+	// 2026-06-09 spec). solo (≤1 human) keeps today's behavior bit-for-bit:
+	// active → answer any human, meeting → addressed-only. group (≥2 humans):
+	// addressed-or-sticky required in BOTH modes — with several people talking,
+	// "utterance ended" no longer implies "answer me". The decision is stashed
+	// for the per-turn speak_decision audit row (written at turn start in
+	// handleAudioOutput, NOT here — this runs per audio chunk).
+	const d = decideSpeak({
+		humanCount: (s as any)._humanCount ?? 1,
+		meetingMode: !!s.meetingMode,
+		addressedToMe: s.gate?.lastAddressedToMe === true,
+		allowAck: false,        // handled above
+		forceAudible: false,    // handled above
+	});
+	(s as any)._lastSpeakDecision = d;
+	return d.speak;
 }
 
 // Meeting mode — suppresses bot audio output while keeping transcription + sqlite running.
@@ -969,7 +984,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// "meeting mode" → "switch to me" and silently failed to flip the flag). Mirrors
 		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
 		// is addressing the bot, in either mode (so it can also EXIT meeting mode).
-		tools.push(makeSwitchModeTool(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME }));  // moved to discord-voice-tools.ts
+		tools.push(makeSwitchModeTool(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME, getHumanCount: () => (s as any)._humanCount ?? 1 }));  // moved to discord-voice-tools.ts; #1427 regime-aware
 		tools.push(makeDismissTool(s, { voiceController: VOICE_CONTROLLER }));  // moved to discord-voice-tools.ts
 		// Upstream sutando does NOT ship a screen-share implementation — it lives
 		// in the operator's private repo. Without an explicit `share_screen` tool
@@ -1723,11 +1738,18 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	// state (the per-user STT still owns those precisely).
 	try {
 		const _nt = (session as any).transport;
-		if (_nt && VOICE_CONTROLLER) {
+		if (_nt) {
 			const _origNT = _nt.onInputTranscription?.bind(_nt);
 			_nt.onInputTranscription = (text: string) => {
 				try {
-					if (s.lastSpeaker === VOICE_CONTROLLER) {
+					// Controller mode: only the controller's stream counts. Legacy
+					// (no controller, #1427 population-aware regime): an owner-tier
+					// last speaker counts — group switch_mode needs _namedThisBotAt
+					// in legacy too, and it was never set there (controller-gated).
+					const _eligible = VOICE_CONTROLLER
+						? s.lastSpeaker === VOICE_CONTROLLER
+						: !!s.lastSpeaker && effectiveTier(new Set([s.lastSpeaker]), ACCESS, TREAT_AS_OWNER) === 'owner';
+					if (_eligible) {
 						if (_namesThisBot(text)) (s as any)._namedThisBotAt = Date.now();
 						// #1427 deterministic wake fast path: the switch_mode("active") gate
 						// requires a fresh _aiWakeAt, but that was set ONLY by the async per-user
@@ -1793,6 +1815,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// lives in the tool + meeting-enter gates). Post bodhi #20 this same function
 			// is passed as config.shouldEmitAudio and this monkey-patch path is deleted.
 			const _audioOpen = shouldEmitAudio(s, _nowMs);
+			// #1427 audit (Susan: "可以通过 audit sqlite log 里的 mode switch 来判断它做
+			// 的对不对"): ONE speak_decision row per bot turn — written at the turn's
+			// FIRST received chunk (this gate runs per chunk; logging each would flood).
+			// Legacy path only: _lastSpeakDecision is set by decideSpeak in shouldEmitAudio.
+			if ((s as any)._recvThisTurn === 1 && (s as any)._lastSpeakDecision) {
+				const _d = (s as any)._lastSpeakDecision;
+				try { recordConversation('speak_decision', JSON.stringify({ ..._d, humans: (s as any)._humanCount ?? 1, meeting: !!s.meetingMode, lastSpeaker: s.lastSpeaker || null }), s.sessionId, { speakerType: 'agent' }); } catch {}
+			}
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
 				(s as any)._lastAudioTs = _nowMs;
@@ -1980,6 +2010,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// the explicit standby cue (→meeting) and the precise per-user-STT wake
 				// (controller names the bot →active); the per-utterance speak decision is the
 				// audio-output gate. So this block runs only for the legacy owner-tier model.
+				// Group-active sticky maintenance (#1427 population-aware gate): in
+				// the group regime the audio gate keys off s.gate.lastAddressedToMe
+				// in ACTIVE mode too, so the gate must be fed every mixed-turn
+				// utterance — not only while meetingEntered. decideForTurn only
+				// (no meetingMode flipping on this path).
+				if (!VOICE_CONTROLLER && s.gate && !s.meetingEntered && ((s as any)._humanCount ?? 1) >= 2) {
+					decideForTurn(s.gate, item.content);
+				}
 				if (!VOICE_CONTROLLER && s.gate && s.meetingEntered) {
 					const addressed = decideForTurn(s.gate, item.content) !== 'drop';
 					const wantSilent = !breakSilenceAllowed(addressed, currentTier(s), SUTANDO_ALLOW_OPEN_FLOOR);
@@ -2473,6 +2511,36 @@ async function start(): Promise<void> {
 			}, 3000);
 		});
 	}
+
+	// #1427 population tracking (Susan's 2026-06-09 spec): count non-bot members
+	// in OUR channel; the speak gate selects the solo/group regime from this.
+	// A solo↔group flip is an EXPLICIT event: sqlite regime_switch audit row +
+	// a brief spoken ack in active mode (silent log-only in meeting mode, so a
+	// join during note-taking doesn't interrupt the humans).
+	const _recountHumans = (trigger: string) => {
+		try {
+			const ch = client.channels.cache.get(CHANNEL_ID ?? '');
+			const members = (ch as any)?.members as Map<string, { id: string; user?: { bot?: boolean; username?: string } }> | undefined;
+			const humans = members ? [...members.values()].filter((m) => !m.user?.bot).length : 1;
+			const s2 = active;
+			if (!s2) return;
+			const prev = (s2 as any)._humanCount ?? 1;
+			(s2 as any)._humanCount = humans;
+			const from = regimeFor(prev), to = regimeFor(humans);
+			if (from !== to) {
+				console.log(`${ts()} [Regime] ${from} → ${to} (humans=${humans}, trigger=${trigger})`);
+				try { recordConversation('regime_switch', JSON.stringify({ from, to, humans, trigger }), s2.sessionId, { speakerType: 'agent' }); } catch {}
+				if (!s2.meetingMode) {
+					try { injectSystemMessage(session, `[System] The voice channel now has ${humans} human${humans === 1 ? '' : 's'} (${to} regime). Say ONE short sentence acknowledging it (e.g. "${to === 'group' ? 'I see we have company — I\'ll only speak when addressed by name.' : 'Back to just us — I\'m all yours.'}").`); } catch {}
+				}
+			}
+		} catch (e) { console.error(`${ts()} [Regime] recount failed:`, e); }
+	};
+	_recountHumans('session-start');
+	client.on('voiceStateUpdate', (oldState, newState) => {
+		const touchedOurChannel = oldState.channelId === CHANNEL_ID || newState.channelId === CHANNEL_ID;
+		if (touchedOurChannel) _recountHumans(`${(newState.member ?? oldState.member)?.user?.username ?? 'unknown'} ${newState.channelId === CHANNEL_ID ? 'joined' : 'left'}`);
+	});
 
 	// Piece ④ owner-presence (multi-bot meeting mode): this bot stays only while
 	// ITS OWNER is in the channel. When the last owner leaves, the bot leaves too
