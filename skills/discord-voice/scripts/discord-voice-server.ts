@@ -42,7 +42,7 @@ import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTools, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
-import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor } from './speak-gate.js';
+import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor, shouldResilenceAtTurnEnd } from './speak-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -1952,6 +1952,19 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			s.allowAckAudible = false;
 			(s as any)._ackEmitted = false;
 			console.log(`${ts()} [Meeting] entry-ack delivered audibly, silence now engaged`);
+		}
+		// #1427 single-turn summon (Susan 2026-06-10, group-meeting test): in
+		// MEETING mode a name-summon ("Lucy, …") must answer EXACTLY THIS turn,
+		// then auto-return to silence — otherwise the sticky lastAddressedToMe
+		// bit kept the bot answering every subsequent turn and "meeting mode
+		// wouldn't stick" (she had to re-issue stand-by / it talked over a
+		// 2-person meeting). Reset the sticky bit at turn.end so the NEXT turn
+		// requires a fresh name. MEETING ONLY — active-mode stickiness (keep
+		// talking to whoever named me) is intentional and untouched. Skipped
+		// while a mode-switch ack is in flight so the ack turn isn't cut.
+		if (shouldResilenceAtTurnEnd(!!s.meetingMode, !!s.allowAckAudible, s.gate?.lastAddressedToMe === true)) {
+			s.gate.lastAddressedToMe = false;
+			console.log(`${ts()} [Meeting] single-turn summon answered — re-silenced (next turn needs a fresh name)`);
 		}
 		// Tier gate: the turn is over — its speaker attribution no longer
 		// applies. The next turn re-accumulates speakers from speaking.start.

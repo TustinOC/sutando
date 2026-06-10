@@ -142,6 +142,17 @@ export function namedRecently(s: any, windowMs: number = NAMED_FRESH_MS_DEFAULT)
 	return Date.now() - ((s as any)._namedThisBotAt || 0) < windowMs;
 }
 
+/**
+ * Single-turn summon (#1427, Susan 2026-06-10): should the bot RE-SILENCE at
+ * turn end? True only in MEETING mode, when no mode-switch ack is in flight,
+ * and the bot was addressed this turn — so a name-summon answers exactly one
+ * turn then auto-returns to silence. In ACTIVE mode the sticky "keep talking
+ * to whoever named me" behavior is intentional, so this is always false there.
+ */
+export function shouldResilenceAtTurnEnd(meetingMode: boolean, ackInFlight: boolean, addressedToMe: boolean): boolean {
+	return meetingMode && !ackInFlight && addressedToMe;
+}
+
 export function decideSpeak(inp: SpeakInput): SpeakDecision {
 	const regime = regimeFor(inp.humanCount);
 	if (inp.allowAck) return { speak: true, regime, reason: 'ack' };

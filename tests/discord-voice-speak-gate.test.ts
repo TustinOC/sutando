@@ -104,3 +104,19 @@ test('isStopWord: narrative speech containing stop does not fire', () => {
 	assert.equal(isStopWord(''), false);
 	assert.equal(isStopWord('keep going please'), false);
 });
+
+// --- shouldResilenceAtTurnEnd (#1427 single-turn summon: meeting answers 1 turn → re-silence) ---
+import { shouldResilenceAtTurnEnd } from '../skills/discord-voice/scripts/speak-gate.js';
+
+test('shouldResilenceAtTurnEnd: meeting + addressed + no ack → re-silence (one-shot summon)', () => {
+	assert.equal(shouldResilenceAtTurnEnd(true, false, true), true);
+});
+test('shouldResilenceAtTurnEnd: active mode never re-silences (sticky is intentional)', () => {
+	assert.equal(shouldResilenceAtTurnEnd(false, false, true), false);
+});
+test('shouldResilenceAtTurnEnd: meeting but not addressed → nothing to reset', () => {
+	assert.equal(shouldResilenceAtTurnEnd(true, false, false), false);
+});
+test('shouldResilenceAtTurnEnd: ack in flight → do not cut the ack turn', () => {
+	assert.equal(shouldResilenceAtTurnEnd(true, true, true), false);
+});
