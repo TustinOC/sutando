@@ -1581,6 +1581,14 @@ function subscribeUser(s: DiscordVoiceSession, userId: string): void {
 	console.log(`${ts()} [Voice] subscribed to user ${userId} (ffmpeg resample)`);
 }
 
+// #1600 (Maddy's count-drift finding, Susan-approved): _recountHumans lives in
+// start() but must also run from the reconnect paths in createVoiceSession —
+// a reconnect fires no voiceStateUpdate, so a join/leave missed during the
+// outage leaves _humanCount wrong until the next membership change. start()
+// assigns this ref; the reconnect paths call it to re-sync from the Discord
+// API's authoritative channel.members count.
+let _recountHumansRef: ((trigger: string) => void) | null = null;
+
 async function createVoiceSession(connection: VoiceConnection, client: Client): Promise<DiscordVoiceSession> {
 	const bodhiPort = nextBodhiPort++;
 	// Encode guild + channel into the session id so channel-level diagnostics
@@ -2183,6 +2191,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			(s as any).utterancesSinceTurn = 0;
 			(s as any).lastTurnActivityTs = Date.now();
 			console.log(`${ts()} [Voice] reconnect — per-turn latches reset (minimal M1)`);
+			// #1600 count-drift: re-sync _humanCount from the Discord API after the
+			// reconnect — join/leave events missed during the outage otherwise leave
+			// the count (and the solo/group regime) wrong until the next change.
+			try { _recountHumansRef?.('transport-close-reconnect'); } catch {}
 			// Re-inject durable session grounding on reconnect. bodhi's reconnect
 			// rebuilds context from only the last 10 turns truncated to 150 chars
 			// and never re-supplies the join-time grounding, so without this the
@@ -2247,6 +2259,9 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				} catch (e) {
 					console.error(`${ts()} [Watchdog] reconnect failed:`, e);
 				}
+				// #1600 count-drift: re-sync _humanCount after the watchdog reconnect
+				// (no voiceStateUpdate fires for a reconnect — see transport-close path).
+				try { _recountHumansRef?.('watchdog-reconnect'); } catch {}
 			}, 500);
 		}
 	}, 10000);
@@ -2642,6 +2657,7 @@ async function start(): Promise<void> {
 			}
 		} catch (e) { console.error(`${ts()} [Regime] recount failed:`, e); }
 	};
+	_recountHumansRef = _recountHumans;  // expose to createVoiceSession's reconnect paths (#1600 count-drift)
 	_recountHumans('session-start');
 	client.on('voiceStateUpdate', (oldState, newState) => {
 		const touchedOurChannel = oldState.channelId === CHANNEL_ID || newState.channelId === CHANNEL_ID;
