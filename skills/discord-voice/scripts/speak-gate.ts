@@ -153,6 +153,18 @@ export function shouldResilenceAtTurnEnd(meetingMode: boolean, ackInFlight: bool
 	return meetingMode && !ackInFlight && addressedToMe;
 }
 
+/**
+ * Watchdog-reconnect-mute fix (#1427, Susan 2026-06-09 round-1 + 8 reconnects
+ * observed 2026-06-10): after a Gemini hang→reconnect, should the bot RESTORE
+ * ACTIVE? True only when it's in meeting mode that was NOT deliberately entered
+ * — a DELIBERATE "stand by" sets meetingEntered=true and must survive the
+ * reconnect (stay a silent note-taker); an auto/stale meetingMode (no
+ * meetingEntered) must NOT strand the bot muted mid-conversation.
+ */
+export function shouldRestoreActiveOnReconnect(meetingMode: boolean, meetingEntered: boolean): boolean {
+	return meetingMode && !meetingEntered;
+}
+
 export function decideSpeak(inp: SpeakInput): SpeakDecision {
 	const regime = regimeFor(inp.humanCount);
 	if (inp.allowAck) return { speak: true, regime, reason: 'ack' };

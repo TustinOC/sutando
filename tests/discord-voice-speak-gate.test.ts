@@ -120,3 +120,16 @@ test('shouldResilenceAtTurnEnd: meeting but not addressed → nothing to reset',
 test('shouldResilenceAtTurnEnd: ack in flight → do not cut the ack turn', () => {
 	assert.equal(shouldResilenceAtTurnEnd(true, true, true), false);
 });
+
+// --- shouldRestoreActiveOnReconnect (#1427 watchdog-reconnect-mute) ---
+import { shouldRestoreActiveOnReconnect } from '../skills/discord-voice/scripts/speak-gate.js';
+
+test('shouldRestoreActiveOnReconnect: auto/stale meeting (no meetingEntered) → restore active', () => {
+	assert.equal(shouldRestoreActiveOnReconnect(true, false), true);
+});
+test('shouldRestoreActiveOnReconnect: deliberate meeting (meetingEntered) → stay silent', () => {
+	assert.equal(shouldRestoreActiveOnReconnect(true, true), false);
+});
+test('shouldRestoreActiveOnReconnect: already active → nothing to restore', () => {
+	assert.equal(shouldRestoreActiveOnReconnect(false, false), false);
+});

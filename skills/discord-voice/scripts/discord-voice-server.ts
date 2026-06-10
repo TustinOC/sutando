@@ -42,7 +42,7 @@ import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTools, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
-import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor, shouldResilenceAtTurnEnd } from './speak-gate.js';
+import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor, shouldResilenceAtTurnEnd, shouldRestoreActiveOnReconnect } from './speak-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -2144,6 +2144,22 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			reconnectPending = false;
 			if (s.closing || active !== s) return;
 			console.log(`${ts()} [Voice] reconnecting Gemini for ${sessionId}`);
+			// #1427 watchdog-reconnect-mute fix (Susan's round-1 bug, 2026-06-09 22:11:58
+			// + 8 more reconnects observed tonight): a Gemini hang → reconnect must NOT
+			// resurrect the bot silently mid-conversation. A DELIBERATE meeting ("stand
+			// by") sets BOTH meetingMode AND meetingEntered (deferred-meeting path), so it
+			// survives reconnect and stays silent — correct. But the 180s auto-meeting
+			// flip sets meetingMode ONLY (no meetingEntered), and that stale mute used to
+			// persist through the reconnect with the gate state lost → the user
+			// experienced "the bot stopped working." Restore active when the meeting was
+			// not deliberately entered, so a reconnect never strands the bot muted.
+			if (shouldRestoreActiveOnReconnect(!!s.meetingMode, !!s.meetingEntered)) {
+				s.meetingMode = false;
+				if (s.gate) s.gate.lastAddressedToMe = false;  // active solo speaks regardless; group re-gates on name (correct)
+				try { writeFileSync(VOICE_MODE_FILE, 'active'); } catch {}
+				try { recordEvent('discord-voice', 'reconnect_restore_active', JSON.stringify({ reason: 'meeting not deliberately entered (auto/stale)' }), s.sessionId); } catch {}
+				console.log(`${ts()} [Voice] reconnect — restored ACTIVE (meeting was auto/stale, not deliberately entered)`);
+			}
 			sessionAny.handleClientConnected();
 			// Re-inject durable session grounding on reconnect. bodhi's reconnect
 			// rebuilds context from only the last 10 turns truncated to 150 chars
