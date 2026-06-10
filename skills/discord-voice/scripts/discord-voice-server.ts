@@ -42,7 +42,7 @@ import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTools, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
-import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor, resetTurnLatchesOnReconnect, shouldResilenceAtTurnEnd, shouldRestoreActiveOnReconnect } from './speak-gate.js';
+import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor, shouldResilenceAtTurnEnd, shouldRestoreActiveOnReconnect } from './speak-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -2173,7 +2173,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// decision pipeline actually resumes (the transport restore alone, like
 			// 4321d506's mute fix, was not enough). Counters reset so the watchdog
 			// re-baselines instead of immediately re-tripping on the fresh session.
-			resetTurnLatchesOnReconnect(s as any, Date.now());
+			(s as any)._turnAudioAllowed = false;
+			(s as any)._audioPlayedThisTurn = false;
+			(s as any)._recvThisTurn = 0;
+			(s as any)._squelchThisTurn = false;
+			(s as any).utterancesSinceTurn = 0;
+			(s as any).lastTurnActivityTs = Date.now();
 			try { recordEvent('discord-voice', 'reconnect_turn_latch_reset', JSON.stringify({ reason: 'M1: clear turn latches so decision pipeline resumes' }), s.sessionId); } catch {}
 			// Re-inject durable session grounding on reconnect. bodhi's reconnect
 			// rebuilds context from only the last 10 turns truncated to 150 chars
