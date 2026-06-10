@@ -2198,6 +2198,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		const idleMs = Date.now() - stop;
 		if (stop > turn && pile >= 2 && idleMs > WATCHDOG_STALL_MS) {
 			console.error(`${ts()} [Watchdog] Gemini session hung — ${pile} utterances / ${Math.round(idleMs / 1000)}s since last speech, no turn. Reconnecting.`);
+			// #1427 observability (2026-06-10): the watchdog fired ~8×/session
+			// tonight, but reconnects only hit the console — invisible to the
+			// sqlite-audit workflow Susan debugs from. Record each hang so she can
+			// see frequency/severity in DB Browser alongside speak_decision etc.
+			try { recordEvent('discord-voice', 'watchdog_reconnect', JSON.stringify({ cause: 'session-hang', utterancesPiled: pile, idleSec: Math.round(idleMs / 1000) }), s.sessionId); } catch {}
 			reconnectPending = true;
 			setTimeout(() => {
 				reconnectPending = false;
