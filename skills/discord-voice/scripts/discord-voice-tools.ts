@@ -203,8 +203,11 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		const _recentMeeting = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
 		const _userSaidCue = enterMeetingKeyword(_recentMeeting);
 		// #1600 observability (Susan: switch architecture must be auditable as
-		// exactly two layers): switch_mode_gate = the user-said-it layer.
-		try { recordEvent('discord-voice', 'switch_mode_gate', JSON.stringify({ regime: 'solo', requested: 'meeting', userSaidCue: _userSaidCue, verdict: _userSaidCue ? 'engaged' : 'refused_no_user_cue' }), s.sessionId); } catch {}
+		// exactly two components, her names: "switch_mode 和一个switch name gate".
+		// Solo = switch_mode ALONE, no gate ("switch mode，没有gate") — the
+		// user-said-it check IS the switch_mode decision, so the row is named
+		// switch_mode, not *_gate.
+		try { recordEvent('discord-voice', 'switch_mode', JSON.stringify({ regime: 'solo', requested: 'meeting', userSaidCue: _userSaidCue, verdict: _userSaidCue ? 'engaged' : 'refused_no_user_cue' }), s.sessionId); } catch {}
 		if (!_userSaidCue) {
 			console.log(`${ts()} [Meeting] switch_mode("meeting") REFUSED — user said no meeting cue (model self-fire)`);
 			return { status: 'stayed_active', instruction: 'Stay in ACTIVE mode and reply normally OUT LOUD. The user did NOT ask you to take notes, go silent, stand by, or enter meeting mode — do not switch on your own. Only call the switch tool again if the user explicitly asks for that later.' };
@@ -238,7 +241,7 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
 		const _freshWake = hasFreshWake(s), _exitKeyword = soloExitKeyword(_recent);
 		// #1600 observability: the user-said-it layer, exit direction.
-		try { recordEvent('discord-voice', 'switch_mode_gate', JSON.stringify({ regime: 'solo', requested: 'active', freshWake: _freshWake, exitKeyword: _exitKeyword, verdict: (_freshWake || _exitKeyword) ? 'engaged' : 'refused_no_wake' }), s.sessionId); } catch {}
+		try { recordEvent('discord-voice', 'switch_mode', JSON.stringify({ regime: 'solo', requested: 'active', freshWake: _freshWake, exitKeyword: _exitKeyword, verdict: (_freshWake || _exitKeyword) ? 'engaged' : 'refused_no_wake' }), s.sessionId); } catch {}
 		if (!_freshWake && !_exitKeyword) {
 			console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
 			return { status: 'stayed_meeting', instruction: 'Stay silent THIS turn and keep taking notes — the user only mentioned your name in passing or told you to stay quiet; that is not a wake. Do not speak now. If the user LATER explicitly asks you to wake up or switch to active mode, call the switch tool again at that point.' };
@@ -269,7 +272,7 @@ export function executeGroupSwitch(s: any, mode: 'active' | 'meeting', opts: Swi
 	// (both in the STT pipeline). namedRecently reads that stamp.
 	const _named = namedRecently(s);
 	// #1600 observability (Susan: in group there are exactly TWO auditable
-	// layers — switch_name_gate first, then switch_mode_gate via the solo
+	// layers — switch_name_gate first, then switch_mode via the solo
 	// delegation below).
 	try { recordEvent('discord-voice', 'switch_name_gate', JSON.stringify({ requested: mode, named: _named, verdict: _named ? 'passed' : 'refused_not_named' }), s.sessionId); } catch {}
 	if (!_named) {
