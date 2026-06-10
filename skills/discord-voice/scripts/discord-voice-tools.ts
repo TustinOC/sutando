@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { recordConversation, recordEvent } from '../../../src/conversation-store.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
-import { hasFreshWake, namedRecently, soloExitKeyword } from './speak-gate.js';
+import { hasFreshWake, namedRecently, soloExitKeyword, enterMeetingKeyword } from './speak-gate.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -191,8 +191,25 @@ type SwitchResult = { status: string; instruction: string };
  * switch function"). Do not grow group-specific behavior here.
  */
 export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: SwitchModeOpts): SwitchResult {
-	(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 	if (mode === 'meeting') {
+		// #1600 one-layer rule (Susan 2026-06-10: "switch mode应该只有一层，就是
+		// user说了没有"): in SOLO the user's actual speech is the ONLY authority
+		// for entering meeting mode. The model fires this tool from semantics
+		// (it self-fired at 16:31/16:39 just because the conversation DISCUSSED
+		// modes); the code validates against what the human really said and
+		// refuses otherwise. Gate runs BEFORE the forceAudible arming so a
+		// refused switch changes NOTHING (the 15:37:48 leak: a refused call
+		// still opened a 6s talk window in meeting mode).
+		const _recentMeeting = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
+		const _userSaidCue = enterMeetingKeyword(_recentMeeting);
+		// #1600 observability (Susan: switch architecture must be auditable as
+		// exactly two layers): switch_mode_gate = the user-said-it layer.
+		try { recordEvent('discord-voice', 'switch_mode_gate', JSON.stringify({ regime: 'solo', requested: 'meeting', userSaidCue: _userSaidCue, verdict: _userSaidCue ? 'engaged' : 'refused_no_user_cue' }), s.sessionId); } catch {}
+		if (!_userSaidCue) {
+			console.log(`${ts()} [Meeting] switch_mode("meeting") REFUSED — user said no meeting cue (model self-fire)`);
+			return { status: 'stayed_active', instruction: 'Stay in ACTIVE mode and reply normally OUT LOUD. The user did NOT ask you to take notes, go silent, stand by, or enter meeting mode — do not switch on your own. Only call the switch tool again if the user explicitly asks for that later.' };
+		}
+		(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 		if (!s.meetingMode && !(s as any)._pendingMeeting) {
 			(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 			console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
@@ -203,6 +220,7 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		// engages silence at turn.end (deferred _pendingMeeting), AFTER the ack is voiced.
 		return { status: 'meeting_mode', instruction: 'Reply OUT LOUD with ONE short, normal sentence acknowledging you will take notes (e.g. "Got it, I\'ll take notes."). Speak it naturally — exactly as you would voice any other reply. Do NOT say you are going silent, stopping, or being quiet; just the brief spoken acknowledgement.' };
 	}
+	(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races) — active path
 	if (s.meetingMode || s.meetingEntered) {
 		// #1427 over-fire guard: do NOT exit meeting mode just because the
 		// bot's name was said. The audio classifier sets _aiWakeAt ONLY on a
@@ -218,7 +236,10 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		// exit keyword in recent speech WITHOUT requiring the name. A passing
 		// name-mention with no mode word still gets refused.
 		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
-		if (!hasFreshWake(s) && !soloExitKeyword(_recent)) {
+		const _freshWake = hasFreshWake(s), _exitKeyword = soloExitKeyword(_recent);
+		// #1600 observability: the user-said-it layer, exit direction.
+		try { recordEvent('discord-voice', 'switch_mode_gate', JSON.stringify({ regime: 'solo', requested: 'active', freshWake: _freshWake, exitKeyword: _exitKeyword, verdict: (_freshWake || _exitKeyword) ? 'engaged' : 'refused_no_wake' }), s.sessionId); } catch {}
+		if (!_freshWake && !_exitKeyword) {
 			console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
 			return { status: 'stayed_meeting', instruction: 'Stay silent THIS turn and keep taking notes — the user only mentioned your name in passing or told you to stay quiet; that is not a wake. Do not speak now. If the user LATER explicitly asks you to wake up or switch to active mode, call the switch tool again at that point.' };
 		}
@@ -246,7 +267,12 @@ export function executeGroupSwitch(s: any, mode: 'active' | 'meeting', opts: Swi
 	// AI-gate consumption: _namedThisBotAt is stamped when the addressing
 	// classifier judges addressed=true OR the deterministic name matcher hits
 	// (both in the STT pipeline). namedRecently reads that stamp.
-	if (!namedRecently(s)) {
+	const _named = namedRecently(s);
+	// #1600 observability (Susan: in group there are exactly TWO auditable
+	// layers — switch_name_gate first, then switch_mode_gate via the solo
+	// delegation below).
+	try { recordEvent('discord-voice', 'switch_name_gate', JSON.stringify({ requested: mode, named: _named, verdict: _named ? 'passed' : 'refused_not_named' }), s.sessionId); } catch {}
+	if (!_named) {
 		console.log(`${ts()} [Meeting] group switch_mode("${mode}") REFUSED — bot not addressed by name`);
 		return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay as you are and do not speak now. If someone LATER addresses you by name with a mode command, call the switch tool again then.' };
 	}

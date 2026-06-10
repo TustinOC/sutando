@@ -84,16 +84,51 @@ const SOLO_EXIT_KEYWORDS = [
 ];
 
 /**
+ * Match a keyword inside normalized spoken text, bounded by a non-ASCII-alnum
+ * char (string edge, space, or a CJK character). Susan's sessions mix English
+ * cues into Chinese sentences — "你能進到meeting mode嗎" — which the old
+ * space-padded check MISSED (it required spaces around the ASCII keyword), so
+ * a legit request got refused (#1600, 15:02:29). A substring of a larger
+ * English word ("submeeting") still does NOT match; CJK keywords match the
+ * same way (CJK chars are non-[a-z0-9], so any edge qualifies).
+ */
+function keywordInText(normText: string, keyword: string): boolean {
+	const k = normalizeSpoken(keyword);
+	if (!k) return false;
+	const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	return new RegExp(`(^|[^a-z0-9])${esc}([^a-z0-9]|$)`, 'i').test(normText);
+}
+
+/**
  * Does any recent utterance carry an explicit exit-meeting keyword?
- * Punctuation-normalized, word-boundary, no name required — SOLO regime only.
+ * Punctuation-normalized, CJK-adjacency-aware, no name required — SOLO regime only.
  */
 export function soloExitKeyword(recentTexts: string[]): boolean {
-	for (const raw of recentTexts) {
-		if (!raw) continue;
-		const t = ` ${normalizeSpoken(raw)} `;
-		if (SOLO_EXIT_KEYWORDS.some(k => t.includes(` ${normalizeSpoken(k)} `) || (/[一-鿿]/.test(k) && t.includes(normalizeSpoken(k))))) return true;
-	}
-	return false;
+	return recentTexts.some(raw => !!raw && SOLO_EXIT_KEYWORDS.some(k => keywordInText(normalizeSpoken(raw), k)));
+}
+
+// Enter-meeting cues (#1600, Susan's one-layer rule 2026-06-10: "switch mode
+// 应该只有一层，就是user说了没有…只有在多人的时候才会有根据语义的switch").
+// In SOLO the user's actual speech is the ONLY authority for entering
+// meeting mode — the model firing the switch tool is just a trigger that the
+// code validates against what was really said. Without this the model
+// self-fired meeting whenever the conversation merely DISCUSSED modes
+// (16:31, 16:39 spurious drops).
+const ENTER_MEETING_KEYWORDS = [
+	'meeting mode', 'be silent', 'go silent', 'silent mode', 'be quiet',
+	'stay quiet', 'stand by', 'standby', 'passive mode', 'take notes',
+	'take note', 'note taking', 'start the meeting', 'start meeting',
+	'会议模式', '安静', '静音', '记笔记', '做笔记', '待命', '保持安静',
+];
+
+/**
+ * Did the user recently ask to enter meeting / silent / note-taking mode?
+ * Punctuation-normalized, CJK-adjacency-aware (an English cue inside a CJK
+ * sentence counts). Gates solo switch_mode("meeting") so the model cannot
+ * enter meeting mode unless the human actually said a cue.
+ */
+export function enterMeetingKeyword(recentTexts: string[]): boolean {
+	return recentTexts.some(raw => !!raw && ENTER_MEETING_KEYWORDS.some(k => keywordInText(normalizeSpoken(raw), k)));
 }
 
 // Interrupt / barge-in words (#1427, Susan 2026-06-10: "我需要能打断他,有个
