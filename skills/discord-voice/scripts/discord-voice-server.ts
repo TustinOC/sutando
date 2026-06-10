@@ -34,7 +34,7 @@ import { mkdirSync, writeFileSync, copyFileSync, appendFileSync, createWriteStre
 import type { WriteStream } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { resolveWorkspace } from '../../../src/workspace_default.js';
-import { recordConversation, recordSession, recordToolCall } from '../../../src/conversation-store.js';
+import { recordConversation, recordEvent, recordSession, recordToolCall } from '../../../src/conversation-store.js';
 import { resultBelongsTo, discordVoiceKey } from '../../../src/result-channel-key.js';
 import { personalPath } from '../../../src/util_paths.js';
 import { type Tier, loadAccessTiers, effectiveTier, toolAllowed, toolNeed, shouldLeaveOnOwnerExit, breakSilenceAllowed } from './access-tier.js';
@@ -1821,7 +1821,7 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// Legacy path only: _lastSpeakDecision is set by decideSpeak in shouldEmitAudio.
 			if ((s as any)._recvThisTurn === 1 && (s as any)._lastSpeakDecision) {
 				const _d = (s as any)._lastSpeakDecision;
-				try { recordConversation('speak_decision', JSON.stringify({ ..._d, humans: (s as any)._humanCount ?? 1, meeting: !!s.meetingMode, lastSpeaker: s.lastSpeaker || null }), s.sessionId, { speakerType: 'agent' }); } catch {}
+				try { recordEvent('discord-voice', 'speak_decision', JSON.stringify({ ..._d, humans: (s as any)._humanCount ?? 1, meeting: !!s.meetingMode, lastSpeaker: s.lastSpeaker || null }), s.sessionId); } catch {}
 			}
 			if (_audioOpen) {
 				(s as any)._turnAudioAllowed = true;  // latch — held across continuous audio
@@ -2529,7 +2529,7 @@ async function start(): Promise<void> {
 			const from = regimeFor(prev), to = regimeFor(humans);
 			if (from !== to) {
 				console.log(`${ts()} [Regime] ${from} → ${to} (humans=${humans}, trigger=${trigger})`);
-				try { recordConversation('regime_switch', JSON.stringify({ from, to, humans, trigger }), s2.sessionId, { speakerType: 'agent' }); } catch {}
+				try { recordEvent('discord-voice', 'regime_switch', JSON.stringify({ from, to, humans, trigger }), s2.sessionId); } catch {}
 				if (!s2.meetingMode) {
 					try { injectSystemMessage(session, `[System] The voice channel now has ${humans} human${humans === 1 ? '' : 's'} (${to} regime). Say ONE short sentence acknowledging it (e.g. "${to === 'group' ? 'I see we have company — I\'ll only speak when addressed by name.' : 'Back to just us — I\'m all yours.'}").`); } catch {}
 				}

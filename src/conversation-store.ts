@@ -516,6 +516,35 @@ export function recordSessionBoundary(reason: string = 'user_goodbye', sessionId
  * fan-out — that older path lost everything if the session never cleanly
  * ended (crash, kill -9, ngrok drop). durationMs may be null when unknown.
  */
+/**
+ * Record an arbitrary audit/event kind into an EXPLICIT surface table.
+ * Needed because recordConversation routes by role prefix (sourceFromRole),
+ * so a custom kind like 'speak_decision' would silently fall through to the
+ * `voice` table — invisible to the discord_voice audits it exists for
+ * (#1427 regime_switch / speak_decision / mode_switch_regime rows). The
+ * kind string is stored verbatim; mirrors recordToolCall's explicit-source
+ * pattern.
+ */
+export function recordEvent(
+	source: 'voice' | 'phone' | 'discord-voice',
+	kind: string,
+	text: string,
+	sessionId?: string | null,
+): void {
+	init();
+	const stmt = turnStmt[source];
+	if (!stmt) return;
+	try {
+		if (source === 'discord-voice') {
+			stmt.run(Date.now() / 1000, kind, text, null, sessionId ?? null, null, null, 'agent', null);
+		} else {
+			stmt.run(Date.now() / 1000, kind, text, null, sessionId ?? null);
+		}
+	} catch (e) {
+		console.error('[conversation-store] event insert failed:', e);
+	}
+}
+
 export function recordToolCall(
 	source: 'voice' | 'phone' | 'discord-voice',
 	name: string,

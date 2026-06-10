@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
-import { recordConversation } from '../../../src/conversation-store.js';
+import { recordConversation, recordEvent } from '../../../src/conversation-store.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -210,7 +210,7 @@ export function makeSwitchModeTool(s: any, opts: { voiceModeFile: string; standN
 					return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay exactly as you are; do not speak.' };
 				}
 			}
-			try { recordConversation('mode_switch_regime', JSON.stringify({ regime: _regime, humans: _humans, requested: mode }), s.sessionId, { speakerType: 'agent' }); } catch {}
+			try { recordEvent('discord-voice', 'mode_switch_regime', JSON.stringify({ regime: _regime, humans: _humans, requested: mode }), s.sessionId); } catch {}
 			(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 			if (mode === 'meeting') {
 				if (!s.meetingMode && !(s as any)._pendingMeeting) {
