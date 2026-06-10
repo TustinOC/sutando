@@ -207,7 +207,9 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		// Solo = switch_mode ALONE, no gate ("switch mode，没有gate") — the
 		// user-said-it check IS the switch_mode decision, so the row is named
 		// switch_mode, not *_gate.
-		try { recordEvent('discord-voice', 'switch_mode', JSON.stringify({ regime: ((opts.getHumanCount?.() ?? 1) <= 1) ? 'solo' : 'group', requested: 'meeting', userSaidCue: _userSaidCue, verdict: _userSaidCue ? 'engaged' : 'refused_no_user_cue' }), s.sessionId); } catch {}
+		// Susan 2026-06-10: distinct event names per regime ("你还是用switch mode
+		// group 吧，更有助于debug") — switch_mode (solo) vs switch_mode_group.
+		try { const _solo = (opts.getHumanCount?.() ?? 1) <= 1; recordEvent('discord-voice', _solo ? 'switch_mode' : 'switch_mode_group', JSON.stringify({ regime: _solo ? 'solo' : 'group', requested: 'meeting', userSaidCue: _userSaidCue, verdict: _userSaidCue ? 'engaged' : 'refused_no_user_cue' }), s.sessionId); } catch {}
 		if (!_userSaidCue) {
 			console.log(`${ts()} [Meeting] switch_mode("meeting") REFUSED — user said no meeting cue (model self-fire)`);
 			return { status: 'stayed_active', instruction: 'Stay in ACTIVE mode and reply normally OUT LOUD. The user did NOT ask you to take notes, go silent, stand by, or enter meeting mode — do not switch on your own. Only call the switch tool again if the user explicitly asks for that later.' };
@@ -241,7 +243,7 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
 		const _freshWake = hasFreshWake(s), _exitKeyword = soloExitKeyword(_recent);
 		// #1600 observability: the user-said-it layer, exit direction.
-		try { recordEvent('discord-voice', 'switch_mode', JSON.stringify({ regime: ((opts.getHumanCount?.() ?? 1) <= 1) ? 'solo' : 'group', requested: 'active', freshWake: _freshWake, exitKeyword: _exitKeyword, verdict: (_freshWake || _exitKeyword) ? 'engaged' : 'refused_no_wake' }), s.sessionId); } catch {}
+		try { const _solo = (opts.getHumanCount?.() ?? 1) <= 1; recordEvent('discord-voice', _solo ? 'switch_mode' : 'switch_mode_group', JSON.stringify({ regime: _solo ? 'solo' : 'group', requested: 'active', freshWake: _freshWake, exitKeyword: _exitKeyword, verdict: (_freshWake || _exitKeyword) ? 'engaged' : 'refused_no_wake' }), s.sessionId); } catch {}
 		if (!_freshWake && !_exitKeyword) {
 			console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
 			return { status: 'stayed_meeting', instruction: 'Stay silent THIS turn and keep taking notes — the user only mentioned your name in passing or told you to stay quiet; that is not a wake. Do not speak now. If the user LATER explicitly asks you to wake up or switch to active mode, call the switch tool again at that point.' };
