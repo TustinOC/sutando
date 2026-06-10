@@ -84,3 +84,23 @@ test('soloExitKeyword: passing name-mention without a mode word stays refused', 
 	assert.equal(soloExitKeyword([]), false);
 	assert.equal(soloExitKeyword(['']), false);
 });
+
+// --- isStopWord (#1427: interrupt word, only checked while bot is speaking) ---
+import { isStopWord } from '../skills/discord-voice/scripts/speak-gate.js';
+
+test('isStopWord: short stop commands fire', () => {
+	assert.equal(isStopWord('stop'), true);
+	assert.equal(isStopWord('Stop!'), true);
+	assert.equal(isStopWord('okay stop'), true);
+	assert.equal(isStopWord('stop talking'), true);
+	assert.equal(isStopWord('闭嘴'), true);
+	assert.equal(isStopWord('别说了'), true);
+	assert.equal(isStopWord('停'), true);
+});
+
+test('isStopWord: narrative speech containing stop does not fire', () => {
+	assert.equal(isStopWord('we should stop by the store later tonight on the way'), false);
+	assert.equal(isStopWord('I could not stop thinking about that PR review yesterday'), false);
+	assert.equal(isStopWord(''), false);
+	assert.equal(isStopWord('keep going please'), false);
+});

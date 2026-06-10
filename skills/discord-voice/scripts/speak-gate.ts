@@ -91,6 +91,34 @@ export function soloExitKeyword(recentTexts: string[]): boolean {
 	return false;
 }
 
+// Interrupt / barge-in words (#1427, Susan 2026-06-10: "我需要能打断他,有个
+// 打断词"). Checked ONLY while the bot is actively speaking, so bare words
+// need no name — "stop" mid-bot-reply can't be meant for anyone else. The
+// utterance must also LOOK like a command (short), so narrative speech that
+// happens to contain "stop" ("we should stop by the store…") doesn't cut
+// the bot off mid-sentence.
+const STOP_WORDS = [
+	'stop', 'stop stop', 'stop talking', 'shut up', 'be quiet', 'okay stop',
+	'停', '停停', '别说了', '別說了', '闭嘴', '閉嘴', '打住', '安静',
+];
+
+/**
+ * Is this utterance a stop/interrupt command? Short-utterance guard + word-
+ * boundary normalized match. Caller must additionally check that the bot is
+ * currently emitting audio — that context is what makes a bare "stop"
+ * unambiguous.
+ */
+export function isStopWord(text: string): boolean {
+	if (!text) return false;
+	const norm = normalizeSpoken(text);
+	if (!norm) return false;
+	// Command-shaped only: ≤4 words (ASCII) or ≤8 chars (CJK has no spaces).
+	const words = norm.split(' ').filter(Boolean);
+	if (words.length > 4 && norm.length > 8) return false;
+	const t = ` ${norm} `;
+	return STOP_WORDS.some(k => /[一-鿿]/.test(k) ? t.includes(normalizeSpoken(k)) : t.includes(` ${k} `));
+}
+
 /**
  * Fresh WAKE signal? True when the AI gate judged wake=true (OR the
  * deterministic isWakePhrase matched) within the window — the requirement

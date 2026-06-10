@@ -42,7 +42,7 @@ import { type ActionLease, mintLease, leaseValid } from './action-lease.js';
 import { makeSendDiscordMessageTool, openGithubUrlTool, makeSwitchModeTools, makeDismissTool, shareScreenTool } from './discord-voice-tools.js';
 import { sttGateDecision } from './stt-gate.js';
 import { createGate, decideForTurn, isStandby, isWakePhrase, normalizeSpoken, type GateState } from './name-gate.js';
-import { addressingClassifierPrompt, decideSpeak, regimeFor } from './speak-gate.js';
+import { addressingClassifierPrompt, decideSpeak, isStopWord, regimeFor } from './speak-gate.js';
 
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
 _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.env'), override: false });
@@ -639,6 +639,8 @@ function upsample24MonoTo48Stereo(pcm: Buffer): Buffer {
 // --- Active session ---------------------------------------------------------
 
 interface DiscordVoiceSession {
+	/** #1427 interrupt: drop queued + playing audio, squelch the rest of the turn. */
+	interruptPlayback?: (why: string) => void;
 	sessionId: string;
 	connection: VoiceConnection;
 	player: AudioPlayer;
@@ -1611,6 +1613,18 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	});
 	player.on('error', (e) => console.error(`${ts()} [Player] error:`, e));
 
+	// #1427 stop-word interrupt (Susan 2026-06-10): cut the bot off NOW, in
+	// code — drop everything queued, halt the playing resource, and squelch
+	// the remainder of this Gemini turn (chunks keep streaming after a stop;
+	// without the squelch the reply resumes mid-sentence). The squelch flag is
+	// cleared by the existing >1.5s turn-gap detector in handleAudioOutput.
+	const _interruptPlayback = (why: string): void => {
+		const dropped = audioOutQueue.length;
+		audioOutQueue.length = 0;
+		try { player.stop(true); } catch {}
+		console.log(`${ts()} [Interrupt] playback cut (${why}) — dropped ${dropped} queued buffer(s), squelching rest of turn`);
+	};
+
 	const s: DiscordVoiceSession = {
 		sessionId,
 		connection,
@@ -1659,6 +1673,11 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			? createGate({ instanceName: STAND_NAME, nameAliases: STAND_NAME_ALIASES, otherInstances: PEER_NAMES, primary: TREAT_AS_OWNER, meetingMode: SUTANDO_MEETING_MODE, standbyAliases: STANDBY_PHRASES })
 			: null,
 		lastUserAudioAt: Date.now(),
+	};
+	s.interruptPlayback = (why: string) => {
+		(s as any)._squelchThisTurn = true;
+		_interruptPlayback(why);
+		try { recordEvent('discord-voice', 'interrupt', JSON.stringify({ why, at: new Date().toISOString() }), s.sessionId); } catch {}
 	};
 
 	const agent = buildAgent(s);
@@ -1750,6 +1769,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 						? s.lastSpeaker === VOICE_CONTROLLER
 						: !!s.lastSpeaker && effectiveTier(new Set([s.lastSpeaker]), ACCESS, TREAT_AS_OWNER) === 'owner';
 					if (_eligible) {
+						// #1427 stop-word: only meaningful while the bot is audibly
+						// talking (that context is what makes a bare "stop" unambiguous).
+						const _botTalking = Date.now() - ((s as any)._lastAudioTs || 0) < 2500;
+						if (_botTalking && isStopWord(text)) s.interruptPlayback?.('stop-word: ' + text.slice(0, 40));
 						if (_namesThisBot(text)) (s as any)._namedThisBotAt = Date.now();
 						// #1427 deterministic wake fast path: the switch_mode("active") gate
 						// requires a fresh _aiWakeAt, but that was set ONLY by the async per-user
@@ -1804,7 +1827,12 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 			// cut. Now the latch resets only on a real GAP in the bot's own output (>1.5s) — i.e. its reply
 			// actually finished — so an interruption can't sever an in-progress reply.
 			const _nowMs = Date.now();
-			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) { (s as any)._turnAudioAllowed = false; (s as any)._audioPlayedThisTurn = false; (s as any)._recvThisTurn = 0; }
+			if (_nowMs - ((s as any)._lastAudioTs || 0) > 1500) { (s as any)._turnAudioAllowed = false; (s as any)._audioPlayedThisTurn = false; (s as any)._recvThisTurn = 0; (s as any)._squelchThisTurn = false; }
+			// #1427 stop-word interrupt: the user cut this reply off — drop the
+			// turn's remaining chunks (Gemini keeps streaming after player.stop).
+			// Do NOT update _lastAudioTs while squelched, so the >1.5s gap above
+			// clears the flag once the burst ends.
+			if ((s as any)._squelchThisTurn) return;
 			// #1456 observability (record what isn't yet recorded): count chunks RECEIVED from
 			// Gemini this turn, NOT just chunks pushed. Without this, an ack suppressed from its
 			// FIRST chunk logged nothing — indistinguishable from "Gemini emitted no audio at all".
