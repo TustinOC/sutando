@@ -44,14 +44,16 @@ import sys
 import time
 from pathlib import Path
 
-# Resolve workspace path with the same precedence as the rest of Sutando.
-# Inlined (not imported) so this script can run before any other Sutando
-# module is loaded — keeps the heartbeat dep-free.
-_workspace_env = os.environ.get("SUTANDO_WORKSPACE", "").strip()
-if _workspace_env:
-    WORKSPACE = Path(_workspace_env).expanduser()
-else:
-    WORKSPACE = Path.home() / ".sutando" / "workspace"
+# Resolve workspace via the shared helper — same precedence as the rest of
+# Sutando (sutando.config.local.json override, else <repo>/workspace/).
+# This used to inline the pre-v0.8 fallback ($SUTANDO_WORKSPACE else
+# ~/.sutando/workspace), which kept the heartbeat writing .alive into the
+# legacy root after M0 while every reader looked at the new canonical —
+# the exact "reinvented fallback" anti-pattern CLAUDE.md warns about.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_default import resolve_workspace  # noqa: E402
+
+WORKSPACE = resolve_workspace()
 
 CORES_DIR = WORKSPACE / "state" / "cores"
 
