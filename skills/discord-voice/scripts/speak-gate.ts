@@ -12,6 +12,32 @@ import { normalizeSpoken } from './name-gate.js';
 
 export type Regime = 'solo' | 'group';
 
+/**
+ * Turn-level latch fields cleared on watchdog-reconnect (#1600 M1). Kept here
+ * (pure, no I/O) so the reset is unit-testable independent of the server's
+ * Discord/Gemini wiring (Maddy's GREEN-threshold request, 2026-06-10).
+ */
+export const RECONNECT_TURN_LATCH_FIELDS = [
+	'_turnAudioAllowed', '_audioPlayedThisTurn', '_recvThisTurn',
+	'_squelchThisTurn', 'utterancesSinceTurn',
+] as const;
+
+/**
+ * Reset the per-turn latches + counters that, if left set from the pre-hang
+ * turn, prevent handleAudioOutput's turn-start path (where the speak_decision
+ * row is written) from re-firing after a reconnect — leaving the bot deaf
+ * despite a restored transport (#1600 M1 root). `lastTurnActivityTs` is set to
+ * `nowMs` so the watchdog re-baselines instead of immediately re-tripping.
+ */
+export function resetTurnLatchesOnReconnect(s: Record<string, any>, nowMs: number): void {
+	s._turnAudioAllowed = false;
+	s._audioPlayedThisTurn = false;
+	s._recvThisTurn = 0;
+	s._squelchThisTurn = false;
+	s.utterancesSinceTurn = 0;
+	s.lastTurnActivityTs = nowMs;
+}
+
 /** solo = at most one human in the VC (the clean 1:1 path, behavior frozen). */
 export function regimeFor(humanCount: number): Regime {
 	return humanCount <= 1 ? 'solo' : 'group';
