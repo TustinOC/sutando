@@ -996,6 +996,19 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
 		// is addressing the bot, in either mode (so it can also EXIT meeting mode).
 		tools.push(...makeSwitchModeTools(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME, getHumanCount: () => (s as any)._humanCount ?? 1 }));  // #1427: TWO tools — switch_mode (solo) + switch_mode_group
+		// #1600 (Susan 2026-06-10 "model knowledge这块你肯定可以grounding解决的，比如
+		// inline tool之类的"): pull-based room info. The model can't see the server's
+		// _humanCount, and pushing it as injected prose risks priming — so let it
+		// ASK. Read-only, instant, no mode/tool vocabulary in the description.
+		tools.push({
+			name: 'channel_info',
+			description:
+				'Returns how many humans (non-bot members) are currently in this voice channel. ' +
+				'Call this whenever you need to know the room size — e.g. before choosing between ' +
+				'solo and group variants of any action, or when unsure whether you are alone with one person.',
+			parameters: z.object({}),
+			execute: async () => ({ humans: (s as any)._humanCount ?? 1 }),
+		});
 		tools.push(makeDismissTool(s, { voiceController: VOICE_CONTROLLER }));  // moved to discord-voice-tools.ts
 		// Upstream sutando does NOT ship a screen-share implementation — it lives
 		// in the operator's private repo. Without an explicit `share_screen` tool
