@@ -2608,11 +2608,15 @@ async function start(): Promise<void> {
 			(s2 as any)._humanCount = humans;
 			const from = regimeFor(prev), to = regimeFor(humans);
 			const _toolHint = `[System note, do not reply to it: ${humans} human${humans === 1 ? '' : 's'} in the voice channel. For any mode switch use ${to === 'group' ? 'switch_mode_group' : 'switch_mode'} — not the other one.]`;
-			if (trigger === 'session-start') {
-				// Tell the model which switch tool applies from turn one — round-3
-				// audit showed it guessing switch_mode_group in a solo room.
-				try { injectSystemMessage(session, _toolHint); } catch {}
-			}
+			// #1600 regression: NO tool hint at session-start. The 6b301d14 hint
+			// ("For any mode switch use switch_mode") landed in every fresh session's
+			// context and primed Gemini to self-fire switch_mode("meeting") ~20s in
+			// with zero user cue — spurious fires 06-10 14:35 + 15:29 (the 15:29 one
+			// BEFORE any grounding was injected), never seen before the hint existed
+			// (06-09 21:19). The wrong-tool-pick noise the hint addressed is already
+			// handled by the regime check redirect in executeSoloSwitch/group. The
+			// hint remains ONLY on a real mid-session regime flip (below), where the
+			// population genuinely changed and the model must be retargeted.
 			if (from !== to) {
 				console.log(`${ts()} [Regime] ${from} → ${to} (humans=${humans}, trigger=${trigger})`);
 				try { recordEvent('discord-voice', 'regime_switch', JSON.stringify({ from, to, humans, trigger }), s2.sessionId); } catch {}
