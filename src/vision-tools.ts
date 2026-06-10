@@ -249,7 +249,14 @@ let frameCount = 0;
 // log only the 1st + a periodic heartbeat, and auto-stop the stream after the
 // threshold so a dead source self-cleans instead of spamming forever.
 let consecutiveFrameErrors = 0;
-const VISION_FAIL_STOP_THRESHOLD = Number(process.env.SUTANDO_VISION_FAIL_STOP || 30);
+// Note: parse THEN validate — `Number(env || 30)` would coerce the string
+// first, so SUTANDO_VISION_FAIL_STOP=0 → threshold 0 (stop on first transient
+// failure) and ="abc" → NaN (never stop). Guard with isFinite + >0. (Maddy
+// review of 4b7f967c, 2026-06-10.)
+const VISION_FAIL_STOP_THRESHOLD = (() => {
+	const t = Number(process.env.SUTANDO_VISION_FAIL_STOP);
+	return Number.isFinite(t) && t > 0 ? t : 30;
+})();
 let startedAt = 0;
 // Push mode: the web-client owns capture (via getDisplayMedia, so the user
 // gets the native "Chrome Tab / Window / Entire Screen" picker) and POSTs
