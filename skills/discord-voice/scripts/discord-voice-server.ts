@@ -986,7 +986,7 @@ function buildAgent(s: DiscordVoiceSession): MainAgent {
 		// "meeting mode" → "switch to me" and silently failed to flip the flag). Mirrors
 		// voice-agent's switchModeTool. The tool-gate below allows it whenever the controller
 		// is addressing the bot, in either mode (so it can also EXIT meeting mode).
-		tools.push(...makeSwitchModeTools(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME, nameAliases: STAND_NAME_ALIASES, getHumanCount: () => (s as any)._humanCount ?? 1 }));  // #1427: TWO tools — switch_mode (solo) + switch_mode_group
+		tools.push(...makeSwitchModeTools(s, { voiceModeFile: VOICE_MODE_FILE, standName: STAND_NAME, getHumanCount: () => (s as any)._humanCount ?? 1 }));  // #1427: TWO tools — switch_mode (solo) + switch_mode_group
 		tools.push(makeDismissTool(s, { voiceController: VOICE_CONTROLLER }));  // moved to discord-voice-tools.ts
 		// Upstream sutando does NOT ship a screen-share implementation — it lives
 		// in the operator's private repo. Without an explicit `share_screen` tool

@@ -122,37 +122,6 @@ export function soloExitKeyword(recentTexts: string[]): boolean {
 	return false;
 }
 
-// Enter-meeting cues (#1600 M4). The switch_mode("meeting") tool had NO gate —
-// the model could self-fire it with no user basis (2026-06-10 live test: at 24s
-// into an ACTIVE session, with the user only saying "Lucy, 能听到吗? Okay.", the
-// model spontaneously called switch_mode→meeting and muted the user). This is
-// the symmetric guard to the active-exit fresh-wake check: honor a meeting
-// switch ONLY when the user actually asked for it. Broader than the server's
-// ENTER_MEETING_PHRASES (which auto-flips from raw speech and is trimmed to
-// avoid false auto-flips) — here the model already chose to switch; we only
-// confirm a user cue exists, so a spurious no-cue fire is refused.
-const ENTER_MEETING_KEYWORDS = [
-	'meeting mode', 'be silent', 'go silent', 'silent mode', 'be quiet',
-	'stay quiet', 'stand by', 'standby', 'passive mode', 'take notes',
-	'take note', 'note taking', 'start the meeting', 'start meeting',
-	'会议模式', '安静', '静音', '记笔记', '做笔记', '待命', '保持安静',
-];
-
-/**
- * Did the user recently ask to enter meeting / silent / note-taking mode?
- * Same matching shape as soloExitKeyword (punctuation-normalized; word-boundary
- * for ASCII, substring for CJK). Gates switch_mode("meeting") so the model
- * cannot enter meeting mode on its own without a user cue.
- */
-export function enterMeetingKeyword(recentTexts: string[]): boolean {
-	for (const raw of recentTexts) {
-		if (!raw) continue;
-		const t = ` ${normalizeSpoken(raw)} `;
-		if (ENTER_MEETING_KEYWORDS.some(k => t.includes(` ${normalizeSpoken(k)} `) || (/[一-鿿]/.test(k) && t.includes(normalizeSpoken(k))))) return true;
-	}
-	return false;
-}
-
 // Interrupt / barge-in words (#1427, Susan 2026-06-10: "我需要能打断他,有个
 // 打断词"). Checked ONLY while the bot is actively speaking, so bare words
 // need no name — "stop" mid-bot-reply can't be meant for anyone else. The
