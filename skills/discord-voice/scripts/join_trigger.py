@@ -320,7 +320,14 @@ def _enqueue_context_prep_task(phrase: str, channel_id, channel_name: str) -> No
             f"iterating on, the last few result subjects, and that voice just "
             f"joined via the '{phrase}' magic word. Keep it 1-2 short "
             f"paragraphs — voice consumes it as session input, not as a "
-            f"spoken turn. No DM reply needed."
+            f"spoken turn. CRITICAL: do NOT mention voice modes, meeting "
+            f"mode, mode switching, silence, note-taking, or any tool name "
+            f"in the body — the grounding is injected into the live model "
+            f"as conversational input, and mode talk has primed it to "
+            f"spuriously call switch_mode('meeting') and mute the user "
+            f"(#1600 regression, 2026-06-10). If the current work is about "
+            f"voice internals, describe it generically (e.g. 'voice "
+            f"reliability fixes on a test branch'). No DM reply needed."
         )
         task_path = tasks_dir / f"task-{ts_ms}.txt"
         task_path.write_text(
