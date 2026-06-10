@@ -2161,6 +2161,19 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				console.log(`${ts()} [Voice] reconnect — restored ACTIVE (meeting was auto/stale, not deliberately entered)`);
 			}
 			sessionAny.handleClientConnected();
+			// #1600 minimal M1 (Susan 2026-06-10 "改成一个最小修复"): reset the
+			// per-turn latches on reconnect. The 06-10 morning hang left the
+			// pre-hang turn's latches set, so handleAudioOutput's turn-start path
+			// (where the speak decision commits) never re-fired on the fresh
+			// transport — the bot stayed deaf. Latch resets ONLY; not claimed
+			// verified until a live reconnect test passes.
+			(s as any)._turnAudioAllowed = false;
+			(s as any)._audioPlayedThisTurn = false;
+			(s as any)._recvThisTurn = 0;
+			(s as any)._squelchThisTurn = false;
+			(s as any).utterancesSinceTurn = 0;
+			(s as any).lastTurnActivityTs = Date.now();
+			console.log(`${ts()} [Voice] reconnect — per-turn latches reset (minimal M1)`);
 			// Re-inject durable session grounding on reconnect. bodhi's reconnect
 			// rebuilds context from only the last 10 turns truncated to 150 chars
 			// and never re-supplies the join-time grounding, so without this the
