@@ -2161,25 +2161,6 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				console.log(`${ts()} [Voice] reconnect — restored ACTIVE (meeting was auto/stale, not deliberately entered)`);
 			}
 			sessionAny.handleClientConnected();
-			// #1427/#1600 M1 — reset TURN-LEVEL latches on reconnect (Maddy's #1
-			// diagnostic). The 2026-06-10 group test hung the Live session ("44
-			// utterances / 49s, no turn"); the watchdog reconnected the transport
-			// but speak_decision stayed dead from 10:58 to session end. Root: the
-			// per-turn audio latch (_turnAudioAllowed) + turn counters were left
-			// set from the pre-hang turn and never cleared, so handleAudioOutput's
-			// turn-start path — where the speak_decision row is written and
-			// decideSpeak's verdict is committed — never re-fired on the fresh
-			// transport. Clearing them here lets the next turn start clean, so the
-			// decision pipeline actually resumes (the transport restore alone, like
-			// 4321d506's mute fix, was not enough). Counters reset so the watchdog
-			// re-baselines instead of immediately re-tripping on the fresh session.
-			(s as any)._turnAudioAllowed = false;
-			(s as any)._audioPlayedThisTurn = false;
-			(s as any)._recvThisTurn = 0;
-			(s as any)._squelchThisTurn = false;
-			(s as any).utterancesSinceTurn = 0;
-			(s as any).lastTurnActivityTs = Date.now();
-			try { recordEvent('discord-voice', 'reconnect_turn_latch_reset', JSON.stringify({ reason: 'M1: clear turn latches so decision pipeline resumes' }), s.sessionId); } catch {}
 			// Re-inject durable session grounding on reconnect. bodhi's reconnect
 			// rebuilds context from only the last 10 turns truncated to 150 chars
 			// and never re-supplies the join-time grounding, so without this the
