@@ -16,7 +16,8 @@ import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { recordConversation, recordEvent } from '../../../src/conversation-store.js';
 import { type GithubKind, CANONICAL_REPO, resolveGithubTarget } from './github-url.js';
-import { hasFreshWake, namedRecently, soloExitKeyword } from './speak-gate.js';
+import { hasFreshWake, namedRecently, soloExitKeyword, enterMeetingKeyword } from './speak-gate.js';
+import { isBareSummons } from './name-gate.js';
 
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
@@ -182,7 +183,7 @@ export const openGithubUrlTool: ToolDefinition = {
  * mode. Needs `s` + the session's mode-file path and stand name (passed in to avoid
  * a circular import back into discord-voice-server.ts). Body preserved verbatim.
  */
-type SwitchModeOpts = { voiceModeFile: string; standName: string; getHumanCount?: () => number };
+type SwitchModeOpts = { voiceModeFile: string; standName: string; getHumanCount?: () => number; nameAliases?: string[] };
 type SwitchResult = { status: string; instruction: string };
 
 /**
@@ -193,6 +194,16 @@ type SwitchResult = { status: string; instruction: string };
 export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: SwitchModeOpts): SwitchResult {
 	(s as any)._forceAudibleUntil = Date.now() + 6000;  // #1456: guarantee the mode-switch ack is heard (allowAck races)
 	if (mode === 'meeting') {
+		// #1600 M4 — symmetric guard to the active-exit fresh-wake check below:
+		// honor switch_mode("meeting") ONLY when the user actually asked for it.
+		// Without this the model self-fired meeting mode with no user basis
+		// (2026-06-10: muted the user 24s into an active session). A spurious,
+		// no-cue fire is refused; the user must say a meeting/silent/notes cue.
+		const _recentMeeting = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
+		if (!enterMeetingKeyword(_recentMeeting)) {
+			console.log(`${ts()} [Meeting] switch_mode("meeting") REFUSED — no user meeting cue (model self-fire)`);
+			return { status: 'stayed_active', instruction: 'Stay in ACTIVE mode and reply normally OUT LOUD. The user did NOT ask you to take notes, go silent, stand by, or enter meeting mode — do not switch on your own. Only call switch_mode("meeting") immediately after the user explicitly asks for that.' };
+		}
 		if (!s.meetingMode && !(s as any)._pendingMeeting) {
 			(s as any)._pendingMeeting = true; s.allowAckAudible = true; (s as any)._ackEmitted = false;
 			console.log(`${ts()} [Meeting] switch_mode → speak ack first, meeting pending`);
@@ -218,7 +229,13 @@ export function executeSoloSwitch(s: any, mode: 'active' | 'meeting', opts: Swit
 		// exit keyword in recent speech WITHOUT requiring the name. A passing
 		// name-mention with no mode word still gets refused.
 		const _recent = (((s as any)._recentUserSpeech || []) as { text: string }[]).map(e => e.text);
-		if (!hasFreshWake(s) && !soloExitKeyword(_recent)) {
+		// #1600 M4 (solo bare-name wake): with ONE human in the room a bare name
+		// ("Lucy" / "露西") can only be a summons, so it counts as a wake out of
+		// meeting mode — the gap that left a solo user unable to wake the bot by
+		// just calling its name. Group keeps the stricter wake requirement.
+		const _names = [opts.standName, ...(opts.nameAliases ?? [])].filter(Boolean);
+		const _bareNameWake = _recent.some(t => isBareSummons(t, _names));
+		if (!hasFreshWake(s) && !soloExitKeyword(_recent) && !_bareNameWake) {
 			console.log(`${ts()} [Meeting] switch_mode("active") REFUSED — no fresh wake signal (bare name / quiet command is not a wake)`);
 			return { status: 'stayed_meeting', instruction: 'Stay silent THIS turn and keep taking notes — the user only mentioned your name in passing or told you to stay quiet; that is not a wake. Do not speak now. If the user LATER explicitly asks you to wake up or switch to active mode, call the switch tool again at that point.' };
 		}
