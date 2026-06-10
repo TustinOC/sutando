@@ -358,6 +358,15 @@ const SUTANDO_ALLOW_OPEN_FLOOR = process.env.SUTANDO_ALLOW_OPEN_FLOOR === '1';
 // since the last turn AND the user last stopped speaking longer ago than
 // this, treat the session as hung and force a reconnect. Env-overridable.
 const WATCHDOG_STALL_MS = Number(process.env.SUTANDO_WATCHDOG_STALL_MS) || 20000;
+// #1600: the silence-based trigger above is suppressed while users keep
+// talking (every utterance resets idleMs — the 06-10 10:58 hang stayed
+// undetected for 4+ min because Susan+Chi never paused >20s). This second
+// trigger decouples detection from user silence: utterances piling up with
+// NO turn activity for this long is a hang regardless of continued speech.
+// Healthy sessions complete turns every 10-25s even in continuous group
+// chat, and turns fire even when the output gate mutes audio, so a 60s
+// turn-drought with a backlog is unambiguous. Env-overridable.
+const WATCHDOG_HUNG_TURN_MS = Number(process.env.SUTANDO_WATCHDOG_HUNG_TURN_MS) || 60000;
 
 // --- Per-speaker access tier (owner / team / other) -------------------------
 // Tier logic lives in ./access-tier.ts (pure + unit-tested). A Gemini Live
@@ -2209,13 +2218,14 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 		const turn = (s as any).lastTurnActivityTs || 0;
 		const pile = (s as any).utterancesSinceTurn || 0;
 		const idleMs = Date.now() - stop;
-		if (stop > turn && pile >= 2 && idleMs > WATCHDOG_STALL_MS) {
-			console.error(`${ts()} [Watchdog] Gemini session hung — ${pile} utterances / ${Math.round(idleMs / 1000)}s since last speech, no turn. Reconnecting.`);
+		const sinceTurnMs = Date.now() - turn;
+		if (stop > turn && pile >= 2 && (idleMs > WATCHDOG_STALL_MS || sinceTurnMs > WATCHDOG_HUNG_TURN_MS)) {
+			console.error(`${ts()} [Watchdog] Gemini session hung — ${pile} utterances / ${Math.round(idleMs / 1000)}s since last speech / ${Math.round(sinceTurnMs / 1000)}s since last turn. Reconnecting.`);
 			// #1427 observability (2026-06-10): the watchdog fired ~8×/session
 			// tonight, but reconnects only hit the console — invisible to the
 			// sqlite-audit workflow Susan debugs from. Record each hang so she can
 			// see frequency/severity in DB Browser alongside speak_decision etc.
-			try { recordEvent('discord-voice', 'watchdog_reconnect', JSON.stringify({ cause: 'session-hang', utterancesPiled: pile, idleSec: Math.round(idleMs / 1000) }), s.sessionId); } catch {}
+			try { recordEvent('discord-voice', 'watchdog_reconnect', JSON.stringify({ cause: 'session-hang', utterancesPiled: pile, idleSec: Math.round(idleMs / 1000), sinceTurnSec: Math.round(sinceTurnMs / 1000) }), s.sessionId); } catch {}
 			reconnectPending = true;
 			setTimeout(() => {
 				reconnectPending = false;
@@ -2223,6 +2233,15 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// Clear the hang condition so the watchdog doesn't immediately re-fire.
 				(s as any).lastTurnActivityTs = Date.now();
 				(s as any).utterancesSinceTurn = 0;
+				// #1600 minimal M1, watchdog-path copy: this reconnect does NOT go
+				// through the transport-close handler, so the latch reset there
+				// never runs here — without these four the watchdog could
+				// reconnect and come back deaf (stale per-turn latches block the
+				// turn-start path on the fresh transport).
+				(s as any)._turnAudioAllowed = false;
+				(s as any)._audioPlayedThisTurn = false;
+				(s as any)._recvThisTurn = 0;
+				(s as any)._squelchThisTurn = false;
 				try {
 					sessionAny.handleClientConnected();
 				} catch (e) {
