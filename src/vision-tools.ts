@@ -504,6 +504,20 @@ function noteFrameFailure(msg: string): void {
 		console.error(`${ts()} [Vision] ${consecutiveFrameErrors} consecutive frame errors — stopping stream (source unavailable: ${msg})`);
 		stopStream();
 		consecutiveFrameErrors = 0;
+		// Tell the live session vision died, IN-BAND (Maddy review note #2,
+		// 2026-06-10): without this the agent keeps believing it can see the
+		// screen and may answer "what's on screen" from a stale/empty frame.
+		// transport.sendContent is the same drain path the work-tool results
+		// use, so the notice lands as a normal user turn.
+		try {
+			const t = sessionRef?.transport;
+			if (t?.sendContent) {
+				t.sendContent([{ role: 'user', text: '[System: the screen share / camera feed stopped — you can no longer see it. If the user asks what you see, tell them the view dropped and ask them to re-share; do not answer from a previous frame.]' }], true);
+				console.log(`${ts()} [Vision] notified session that the feed dropped`);
+			}
+		} catch (e) {
+			console.error(`${ts()} [Vision] failed to notify session of feed drop: ${(e as Error)?.message ?? e}`);
+		}
 	}
 }
 
