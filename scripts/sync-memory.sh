@@ -254,8 +254,17 @@ fi
 # bootstrap below would write a symlink at `<repo>/notes` not the
 # workspace `notes/`. Detect via `.git` presence at WS_DIR + skip.
 if [ -d "$WS_DIR/.git" ]; then
-    log "skipping workspace-symlink bootstrap: '$WS_DIR' looks like a public-repo checkout (.git/ present), not a workspace. Run 'bash $SCRIPT_PARENT/scripts/sutando-config.sh workspace' to see the canonical workspace path; unset SUTANDO_WORKSPACE to use the in-repo default."
-    WS_DIR=""
+    # A vault-synced workspace (sync-workspace.sh --init) is ALSO a git repo —
+    # discriminate via the wsId marker before declaring it a repo checkout,
+    # otherwise the notes bootstrap is skipped on exactly the hosts that
+    # adopted the new sync (review #2 finding, 2026-06-11). The marker is
+    # written by _init_impl (#1459) and exists only in real workspaces.
+    if [ -f "$WS_DIR/.sutando-vault/ws-id" ]; then
+        log "workspace at '$WS_DIR' is vault-synced (ws-id marker present); proceeding with bootstrap"
+    else
+        log "skipping workspace-symlink bootstrap: '$WS_DIR' looks like a public-repo checkout (.git/ present, no ws-id marker), not a workspace. Run 'bash $SCRIPT_PARENT/scripts/sutando-config.sh workspace' to see the canonical workspace path; unset SUTANDO_WORKSPACE to use the in-repo default."
+        WS_DIR=""
+    fi
 fi
 if [ -n "$WS_DIR" ]; then
 mkdir -p "$WS_DIR"

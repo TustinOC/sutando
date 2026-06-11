@@ -61,7 +61,7 @@ jobs:
 
           # Added or modified paths in the PR diff. Same filter as the local
           # pre-commit hook: anything under workspace/, except .gitkeep.
-          changed="$(git diff --name-only --diff-filter=AM $diff_args)"
+          changed="$(git diff --name-only --diff-filter=AMRC $diff_args)"  # AMRC: keep in lockstep with .githooks/pre-commit (rename bypass fix)
           offenders="$(printf '%s\n' "$changed" \
             | grep -E '^workspace/' \
             | grep -vxF 'workspace/.gitkeep' \

@@ -32,7 +32,7 @@ set -euo pipefail
 # Staged paths added or modified in this commit. We check both A (added) and
 # M (modified) because a file could be added in an earlier commit and modified
 # in this one — still want to refuse if it's under workspace/.
-staged="$(git diff --cached --name-only --diff-filter=AM)"
+staged="$(git diff --cached --name-only --diff-filter=AMRC)"  # AMRC: a `git mv` into workspace/ registers as R and bypassed the AM gate
 
 # Filter to paths under workspace/, then drop the allowed whitelist entries.
 # `|| true` so grep's exit-1-on-no-match doesn't kill the script under set -e.
