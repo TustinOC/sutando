@@ -45,7 +45,7 @@ import time
 from pathlib import Path
 
 # Resolve workspace via the M0 helper (PR #1395 / v0.8 #1440) — the previous
-# inlined env-or-~/.sutando/workspace resolution wrote .alive files where no
+# inlined env-or-legacy-default resolution wrote .alive files where no
 # post-M0 reader looks (health-check + dashboard read resolve_workspace()/
 # state/cores/), so every core reported dead. workspace_default is a sibling
 # module (stdlib-only deps), so the old "dep-free" rationale no longer buys
