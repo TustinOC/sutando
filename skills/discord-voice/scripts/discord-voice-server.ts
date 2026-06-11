@@ -1482,6 +1482,12 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		// on inbound Discord audio/VAD). This is the ONLY place a lease is minted, so a
 		// model-fabricated "user:" turn can never produce one. Gated tool dispatch requires it.
 		s.actionLease = mintLease(transcript, Date.now());
+		// #1600 observability (Susan 2026-06-10: "我希望每一句human utterance之后都有
+		// 一个name gate的结果被记录下来"): ONE name_gate row per human utterance,
+		// capturing every addressing signal the gates consume — the AI classifier's
+		// verdict, the deterministic name match, the resulting sticky state, and the
+		// mode/population context. Pure logging; no behavior change.
+		try { recordEvent('discord-voice', 'name_gate', JSON.stringify({ speaker: spk?.name ?? userId, aiAddressed: _aiAddressed, namedDet: _namesThisBot(transcript), sticky: s.gate ? s.gate.lastAddressedToMe : null, meeting: !!s.meetingMode, humans: (s as any)._humanCount ?? 1, text: transcript.slice(0, 60) }), s.sessionId); } catch {}
 		recordConversation('discord-user', transcript, s.sessionId, {
 			speakerId: userId,
 			speakerName: spk?.name,
