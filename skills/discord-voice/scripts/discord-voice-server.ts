@@ -1795,9 +1795,23 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 	try {
 		const _nt = (session as any).transport;
 		if (_nt) {
-			const _origNT = _nt.onInputTranscription?.bind(_nt);
-			_nt.onInputTranscription = (text: string) => {
+			// #1600 (Susan "好，修" 2026-06-10): this block was DEAD since birth —
+			// zero stop-word fires in the entire log history. The property patch
+			// below can be clobbered (bodhi may reassign transport handler props on
+			// (re)connect) and arrived after session.start(). Hook the transport's
+			// `callbacks` object instead — the stable reference bodhi dispatches to
+			// FIRST (dist:2665 `this.callbacks.onInputTranscription?.(…)`), which
+			// survives reconnects. Property patch kept as a second net; the handler
+			// de-dupes via a per-text-instant guard so double dispatch is harmless.
+			let _liveInputProven = false;
+			let _lastHandled = '';
+			let _lastHandledAt = 0;
+			const _handleLiveInput = (text: string) => {
 				try {
+					if (!_liveInputProven) { _liveInputProven = true; console.log(`${ts()} [LiveInput] input transcription flowing (first event: "${String(text).slice(0, 40)}")`); }
+					const _nowMs = Date.now();
+					if (text === _lastHandled && _nowMs - _lastHandledAt < 1500) return;  // double-dispatch guard (callbacks + property)
+					_lastHandled = text; _lastHandledAt = _nowMs;
 					// Controller mode: only the controller's stream counts. Legacy
 					// (no controller, #1427 population-aware regime): an owner-tier
 					// last speaker counts — group switch_mode needs _namedThisBotAt
@@ -1809,7 +1823,10 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 						// #1427 stop-word: only meaningful while the bot is audibly
 						// talking (that context is what makes a bare "stop" unambiguous).
 						const _botTalking = Date.now() - ((s as any)._lastAudioTs || 0) < 2500;
-						if (_botTalking && isStopWord(text)) s.interruptPlayback?.('stop-word: ' + text.slice(0, 40));
+						if (_botTalking && isStopWord(text)) {
+							console.log(`${ts()} [LiveInput] stop-word matched — cutting playback: "${text.slice(0, 40)}"`);
+							s.interruptPlayback?.('stop-word: ' + text.slice(0, 40));
+						}
 						if (_namesThisBot(text)) (s as any)._namedThisBotAt = Date.now();
 						// #1427 deterministic wake fast path: the switch_mode("active") gate
 						// requires a fresh _aiWakeAt, but that was set ONLY by the async per-user
@@ -1821,8 +1838,18 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 						if (_isWakePhrase(text) && !_isEnterMeetingPhrase(text)) (s as any)._aiWakeAt = Date.now();
 					}
 				} catch {}
-				_origNT?.(text);
 			};
+			// Primary registration: wrap the callbacks object bodhi actually
+			// dispatches to (stable across reconnects).
+			const _cbObj = _nt.callbacks;
+			if (_cbObj) {
+				const _origCb = typeof _cbObj.onInputTranscription === 'function' ? _cbObj.onInputTranscription.bind(_cbObj) : null;
+				_cbObj.onInputTranscription = (text: string) => { _handleLiveInput(text); _origCb?.(text); };
+			}
+			// Second net: the transport property (also dispatched, dist:2666) —
+			// covers bodhi builds where callbacks is absent.
+			const _origNT = typeof _nt.onInputTranscription === 'function' ? _nt.onInputTranscription.bind(_nt) : null;
+			_nt.onInputTranscription = (text: string) => { _handleLiveInput(text); _origNT?.(text); };
 		}
 	} catch {}
 
