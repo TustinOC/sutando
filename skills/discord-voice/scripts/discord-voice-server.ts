@@ -1483,11 +1483,12 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 		// model-fabricated "user:" turn can never produce one. Gated tool dispatch requires it.
 		s.actionLease = mintLease(transcript, Date.now());
 		// #1600 observability (Susan 2026-06-10: "我希望每一句human utterance之后都有
-		// 一个name gate的结果被记录下来"): ONE name_gate row per human utterance,
-		// capturing every addressing signal the gates consume — the AI classifier's
-		// verdict, the deterministic name match, the resulting sticky state, and the
-		// mode/population context. Pure logging; no behavior change.
-		try { recordEvent('discord-voice', 'name_gate', JSON.stringify({ speaker: spk?.name ?? userId, aiAddressed: _aiAddressed, namedDet: _namesThisBot(transcript), sticky: s.gate ? s.gate.lastAddressedToMe : null, meeting: !!s.meetingMode, humans: (s as any)._humanCount ?? 1, text: transcript.slice(0, 60) }), s.sessionId); } catch {}
+		// 一个name gate的结果被记录下来…但是得group才需要啊，solo不需要"): ONE
+		// name_gate row per human utterance IN GROUP ONLY — solo-active answers
+		// everyone, so addressing gates nothing there and per-utterance rows would
+		// be noise. Captures every addressing signal the gates consume. Pure
+		// logging; no behavior change.
+		try { if (((s as any)._humanCount ?? 1) >= 2) recordEvent('discord-voice', 'name_gate', JSON.stringify({ speaker: spk?.name ?? userId, aiAddressed: _aiAddressed, namedDet: _namesThisBot(transcript), sticky: s.gate ? s.gate.lastAddressedToMe : null, meeting: !!s.meetingMode, humans: (s as any)._humanCount ?? 1, text: transcript.slice(0, 60) }), s.sessionId); } catch {}
 		recordConversation('discord-user', transcript, s.sessionId, {
 			speakerId: userId,
 			speakerName: spk?.name,
