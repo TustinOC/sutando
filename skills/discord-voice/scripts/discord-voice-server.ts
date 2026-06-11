@@ -1450,7 +1450,17 @@ async function transcribeAndRecordUtterance(s: DiscordVoiceSession, userId: stri
 				(s as any)._aiWakeAt = Date.now();
 			}
 		}
-		if (VOICE_CONTROLLER && userId === VOICE_CONTROLLER && s.gate) {
+		// #1663: the decideForTurn/lastAddressedToMe writer was CONTROLLER-ONLY, so in
+		// legacy mode (the live deployment) nothing ever set s.gate.lastAddressedToMe and
+		// the group-regime speak gate (decideSpeak: addressed-or-silent) could never open
+		// on a name-summon — live 2026-06-11 14:38-14:43: 20+ owner "Lucy" summons, all
+		// audit rows aiAddressed:1, every turn muted group-active-unaddressed. Same
+		// controller-gated-block class (and same legacy-arm shape) as the _aiWakeAt fix
+		// above: in legacy mode an owner-tier speaker's stream feeds the gate.
+		const _gateWriterEligible = VOICE_CONTROLLER
+			? userId === VOICE_CONTROLLER
+			: effectiveTier(new Set([userId]), ACCESS, TREAT_AS_OWNER) === 'owner';
+		if (_gateWriterEligible && s.gate) {
 			const _wasAddressed = s.gate.lastAddressedToMe;
 			// Track when the controller EXPLICITLY named THIS bot (not the sticky state) —
 			// switch_mode is gated on this so only "Hi <bot name>, switch …" switches this bot, and a
