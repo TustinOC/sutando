@@ -829,4 +829,16 @@ open "http://localhost:8080"
 # Delegate to scripts/start-cli.sh — canonical sutando-core launch command.
 # Single source of truth so Sutando.app's Restart Core menu can invoke the
 # same launch path without duplicating the tmux + claude flags.
+#
+# Restore stdout/stderr to the terminal first when the operator is
+# interactive: the tee-redirect at the top of this script makes fd 1 a PIPE,
+# so start-cli.sh's `[ -t 1 ]` interactivity test always chose the detached
+# branch under startup/restart — the user was never auto-attached to the
+# core tmux session (owner report 2026-06-11, biting since at least 06-07).
+# stdin is untouched by the tee exec, so `-t 0` still tells the truth;
+# launchd / Sutando.app runs have non-TTY stdin and keep the detached path.
+# The startup log keeps everything except the interactive session itself.
+if [ -t 0 ]; then
+    exec >/dev/tty 2>&1
+fi
 exec bash "$REPO/scripts/start-cli.sh"

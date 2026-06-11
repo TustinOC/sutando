@@ -480,6 +480,69 @@ generate_exclude() {
     fi
     mv "$tmp_path" "$exclude_path"
     log "generate_exclude: wrote $exclude_path"
+}
+
+# Carrier-set enforcement, pre-stage half — heal the exclude rules and
+# untrack anything that is tracked but now excluded. Runs on EVERY push
+# tick, not just --init: the 2026-06-11 incident showed a workspace whose
+# info/exclude was never written (a stale engine copy ran the hooks for
+# weeks) — and because gitignore-class rules never untrack already-tracked
+# files, channel-token .env files + 5,130 task/result files ratcheted into
+# vault history with no path back. generate_exclude is a cheap no-op when
+# current, and the untrack walk only pays when rules and index disagree.
+_enforce_carrier_set_pre() {
+    # Respect an operator-customized exclude file: generate_exclude returns 1
+    # and prints the diff in that case; the tick continues against the
+    # operator's rules rather than dying.
+    generate_exclude || log "_enforce_carrier_set_pre: keeping operator-authored exclude file (see warning above)"
+    local _untracked_n=0 _ex
+    # `git check-ignore --stdin` exits 1 when nothing matches — that exit
+    # dies inside the process substitution, which set -e does not observe;
+    # the loop simply sees no input. NUL-delimited for metachar/space paths.
+    # --no-index is LOAD-BEARING: without it check-ignore consults the index
+    # and never reports tracked files as ignored — which is precisely the
+    # population this walk exists to untrack (verified live 2026-06-11: the
+    # 5,130-file walk found zero candidates until this flag).
+    while IFS= read -r -d '' _ex; do
+        git rm -q --cached -- "$_ex" 2>/dev/null || true
+        _untracked_n=$((_untracked_n + 1))
+    done < <(git ls-files -z | git check-ignore -z --stdin --no-index 2>/dev/null)
+    if [ "$_untracked_n" -gt 0 ]; then
+        log "_enforce_carrier_set_pre: untracked $_untracked_n newly-excluded file(s) from the vault index"
+        echo "sync-workspace: carrier-set enforcement untracked $_untracked_n file(s) that exclude rules no longer cover (content stays on disk; untrack propagates via vault)" >&2
+    fi
+}
+
+# Carrier-set enforcement, post-stage half — refuse credential-shaped files
+# at the staging boundary even when exclude rules missed them (defense in
+# depth; the exclude file is config, this is policy). File-level refusal,
+# not run-level: dying here would wedge every future tick behind one bad
+# path — silent staleness, the exact failure mode sync exists to prevent.
+_refuse_staged_secrets() {
+    local _secret_hits=0 _sf
+    while IFS= read -r -d '' _sf; do
+        case "$_sf" in
+            # NB: deliberately NOT a bare `*token*.json` — that matched
+            # design-tokens-starter.json (a UI template) on first live run.
+            # Credential-shaped means: .env family, credentials*.json, and
+            # files whose basename is exactly token.json / *_token.json /
+            # *-token.json (cloud-auth.json style lives under state/auth/,
+            # which is never tracked to begin with).
+            .env|*/.env|.env.*|*/.env.*|*credentials*.json|token.json|*/token.json|*_token.json|*-token.json)
+                # rm --cached works for both newly-added and tracked files;
+                # reset is the fallback for an added-but-never-committed path.
+                git rm -q --cached -- "$_sf" 2>/dev/null || git reset -q HEAD -- "$_sf" 2>/dev/null || true
+                color_warn "sync-workspace: SECRET-GUARD refused '$_sf' (credential-shaped path) — kept on disk, never synced"
+                _secret_hits=$((_secret_hits + 1))
+                ;;
+        esac
+    done < <(git diff --cached --name-only --diff-filter=AM -z)
+    # --diff-filter=AM is LOAD-BEARING: a staged DELETION of a secret is the
+    # carrier-set untrack doing its job — on first live run the unfiltered
+    # loop matched those D entries and its reset fallback RESTORED the .env
+    # files to the index, silently undoing the heal (caught 2026-06-11).
+    [ "$_secret_hits" -gt 0 ] && log "_refuse_staged_secrets: refused $_secret_hits credential-shaped file(s)"
+    return 0
     return 0
 }
 
@@ -593,6 +656,7 @@ _init_impl() {
     # inner/outer boundary that the in-tree .gitignore previously breached
     # (2026-06-04 leak fix).
     git add -A 2>/dev/null || true
+    _refuse_staged_secrets
     # First-init must push a host branch to the vault even on an empty
     # workspace (no carrier-set files yet). The pre-(6) layout had an
     # in-tree .gitignore that always staged a non-empty index; with rules
@@ -749,7 +813,12 @@ _pull_only_impl() {
     fi
 
     log "_pull_only_impl: fetching all peer branches"
-    git fetch --all --quiet 2>&1 | tee -a "$LOG" >/dev/null
+    # --prune: without it, a peer's branch rename (e.g. the #1459 flat →
+    # nested wsId migration) leaves a stale local remote-tracking ref that
+    # D/F-conflicts every subsequent fetch ("cannot lock ref") — wedging
+    # this host permanently while the error is swallowed by the tee below.
+    # Bit for 6 days on Qingyuns-MBP 2026-06-05..11.
+    git fetch --all --prune --quiet 2>&1 | tee -a "$LOG" >/dev/null
 
     # Retire any pre-#1459 flat `host/<host>` branch before the checkout below,
     # which would otherwise D/F-conflict with the nested wsId ref.
@@ -812,17 +881,31 @@ _pull_only_impl() {
             merged=$((merged + 1))
         else
             log "_pull_only_impl: conflict merging $peer; resolving via --ours (use-local fallback)"
-            for f in $(git diff --name-only --diff-filter=U); do
+            # NUL-delimited walk: the previous `for f in $(git diff ...)` form
+            # word-split paths with spaces (routine in notes/), so those
+            # conflicts were never resolved — the merge stayed open while the
+            # run still reported success, wedging every later sync behind
+            # "You have not concluded your merge". Review #2 finding (2026-06-11).
+            while IFS= read -r -d '' f; do
                 # `--ours` fails on DD-conflicts (both sides deleted) — the file
                 # isn't on our side either. Fall back to `git rm` so the merge
                 # can complete cleanly. Surfaced by Mini #1445 v3 Test 12.
                 if git checkout --ours -- "$f" 2>/dev/null; then
-                    git add "$f"
+                    git add -- "$f"
                 else
                     git rm -f -- "$f" 2>/dev/null || true
                 fi
-            done
+            done < <(git diff --name-only --diff-filter=U -z)
             git -c core.editor=true commit --no-edit 2>/dev/null || true
+            # Verify the merge actually concluded — unmerged entries here mean
+            # the resolution above missed something; abort rather than leave a
+            # half-merge that poisons every subsequent pull while logs say OK.
+            if ! git diff --quiet --diff-filter=U || [ -f ".git/MERGE_HEAD" ]; then
+                log "_pull_only_impl: merge of $peer did NOT conclude; aborting it"
+                color_warn "sync-workspace: conflict resolution for $peer failed to conclude — aborted that merge; will retry next tick"
+                git merge --abort 2>/dev/null || true
+                continue
+            fi
             merged=$((merged + 1))
         fi
     done
@@ -892,7 +975,11 @@ _push_only_impl() {
 
     # Whitelist enforcement lives in .git/info/exclude (see _init_impl
     # rationale + the 2026-06-04 leak fix that motivated moving it there).
+    # Heal rules + untrack newly-excluded BEFORE staging; sweep staged
+    # credential-shaped paths AFTER (see the two functions' rationale).
+    _enforce_carrier_set_pre
     git add -A
+    _refuse_staged_secrets
     if git diff --cached --quiet; then
         log "_push_only_impl: nothing to commit"
         # A clean tree does NOT mean "done": a prior push may have failed (auth
@@ -908,7 +995,13 @@ _push_only_impl() {
         local host_ws_seg local_sha remote_out ls_rc remote_sha
         host_ws_seg="$(_host_ws_segment)"
         local_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
-        remote_out="$(git ls-remote --heads origin "host/${host_ws_seg}" 2>/dev/null)"; ls_rc=$?
+        # set -e-safe rc capture: a plain `var=$(cmd)` assignment is NOT
+        # exempt from errexit — offline, the failing ls-remote killed the
+        # whole script HERE, before ls_rc was ever read, making the graceful
+        # "let the next tick retry" branch below dead code. Same class as
+        # the repo's documented feedback_var_assign_setminus_e catches.
+        ls_rc=0
+        remote_out="$(git ls-remote --heads origin "host/${host_ws_seg}" 2>/dev/null)" || ls_rc=$?
         remote_sha="$(printf '%s\n' "$remote_out" | awk 'NR==1{print $1}')"
         if [ -z "$local_sha" ]; then
             echo "sync-workspace: nothing to push (no local commit yet)"
