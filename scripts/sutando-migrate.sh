@@ -1986,7 +1986,20 @@ rollback_main() {
     local tar_listing
     tar_listing="$(mktemp -t sutando-rollback.XXXXXX)"
     if [ -s "$backup_path" ]; then
-        tar -tzf "$backup_path" 2>/dev/null > "$tar_listing" || true
+        # -tf (not -tzf): media-heavy backups above the gzip threshold are plain
+        # .tar; GNU tar errors on -z for those (bsdtar auto-detects, GNU doesn't
+        # in list mode) and the old `|| true` turned that error into an empty
+        # listing — which the walk below read as "nothing to preserve" and
+        # deleted every file just restored. -tf magic-byte-detects on both.
+        tar -tf "$backup_path" 2>/dev/null > "$tar_listing" || true
+        # Guard: a non-empty backup must yield a non-empty listing. An empty
+        # listing here means tar failed (corrupt archive, unsupported format) —
+        # abort rather than let the cleanup walk mass-delete the restored tree.
+        if [ ! -s "$tar_listing" ]; then
+            echo "rollback: backup is non-empty but listing came back empty (tar list failed?) — refusing post-restore cleanup" >&2
+            rm -f "$tar_listing" || true
+            exit 1
+        fi
     else
         : > "$tar_listing"  # empty backup: nothing to preserve, everything is "added since"
     fi
@@ -1998,8 +2011,11 @@ rollback_main() {
         [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] rollback walking $DEST_REAL/$sd" >&2
         while IFS= read -r f; do
             local rel="${f#"$DEST_REAL"/}"
-            # If this rel is NOT in the tar listing, it was added after backup → remove
-            if ! grep -q "^${rel}$" "$tar_listing" 2>/dev/null; then
+            # If this rel is NOT in the tar listing, it was added after backup → remove.
+            # -xF: match the whole line as a fixed string — rel interpolated as a
+            # regex made bracket/metachar filenames fail to self-match and get
+            # deleted on every rollback. `--` guards a leading-dash rel.
+            if ! grep -qxF -- "$rel" "$tar_listing" 2>/dev/null; then
                 [ "${SUTANDO_MIGRATE_DEBUG:-0}" = "1" ] && echo "[debug] rollback rm $rel" >&2
                 rm -f "$f"
             fi

@@ -220,6 +220,40 @@ def claude_home_path(*subpath: str) -> Path:
     return base.joinpath(*subpath)
 
 
+def channel_access_path(source: str) -> Path:
+    """Resolve `channels/<source>/access.json` with the ~30-day legacy fallback.
+
+    Prefer the canonical claude_home_path() location. If that file does NOT
+    exist but the pre-migration `~/.claude/channels/<source>/access.json`
+    does, return the legacy path and emit a one-line stderr deprecation
+    warning — per the CLAUDE.md migration policy (readers prefer canonical,
+    fall back to legacy for ~30 days).
+
+    Why this exists: bridges restarted under a fresh $CLAUDE_CONFIG_DIR
+    before the channel-bridge migrate step copies channels/ would otherwise
+    see no access.json at all — Telegram/Slack then re-arm TOFU onboarding
+    and the next DM sender auto-enrolls as owner. Falling back to the
+    populated legacy allowlist keeps access control continuous across the
+    migration window. Writers (TOFU onboarding, /discord:access) use the
+    same resolved path, so the legacy file stays the single source of truth
+    until it is actually migrated.
+    """
+    canonical = claude_home_path("channels", source, "access.json")
+    if canonical.exists():
+        return canonical
+    legacy = Path.home() / ".claude" / "channels" / source / "access.json"
+    if legacy != canonical and legacy.exists():
+        print(
+            f"[util_paths] DEPRECATION: using legacy {legacy} — canonical "
+            f"{canonical} missing. Run the channel-bridge migrate step "
+            f"(scripts/sutando-migrate.sh) to relocate; this fallback is "
+            f"removed ~30 days post-migration.",
+            file=sys.stderr,
+        )
+        return legacy
+    return canonical
+
+
 # ---------------------------------------------------------------------------
 # Fallback-banner gate — fires ONCE per process when claude_home_path() lands
 # on the ~/.claude/ default because neither $CLAUDE_CONFIG_DIR nor $CLAUDE_HOME

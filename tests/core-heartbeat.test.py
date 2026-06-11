@@ -100,7 +100,11 @@ class TestHeartbeatCli(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="core-heartbeat-cli-"))
-        self.env = {**os.environ, "SUTANDO_WORKSPACE": str(self.tmp)}
+        # SUTANDO_TEST_MODE: post-v0.8 the resolver ignores $SUTANDO_WORKSPACE
+        # unless this test-only escape hatch is set (mirrors line 30 in the
+        # in-process fixture above — the subprocess env doesn't inherit it).
+        self.env = {**os.environ, "SUTANDO_WORKSPACE": str(self.tmp),
+                    "SUTANDO_TEST_MODE": "1"}
 
     def tearDown(self):
         import shutil
