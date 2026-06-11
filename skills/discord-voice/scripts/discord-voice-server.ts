@@ -2730,19 +2730,37 @@ async function start(): Promise<void> {
 			const remainingIds = members ? [...members.values()].map((m) => m.id) : [];
 			// Pure decision (unit-tested): leave only if an OWNER left and no owner remains.
 			if (!shouldLeaveOnOwnerExit(leaverId, remainingIds, ACCESS.owner)) return;
-			console.error(`${ts()} [Setup] owner-presence: last owner left — leaving channel`);
-			try {
-				injectSystemMessage(
-					session,
-					`[System] My owner left the voice channel. Say briefly: "My owner left — leaving too." Then stop.`,
-				);
-			} catch (e) {
-				console.error(`${ts()} [Setup] owner-presence announcement injection failed:`, e);
-			}
-			setTimeout(() => {
-				try { connection.destroy(); } catch {}
-				process.exit(0);
-			}, 2500);
+			// Join-time voice-state churn (voice-server reallocation) or a not-yet-populated
+			// members cache can fake an owner-exit seconds after we join (live repro
+			// 2026-06-11 14:11: owner audio kept flowing past the "left" decision). Re-verify
+			// against a FRESH fetch before tearing down; a real departure still exits ~3s later.
+			setTimeout(async () => {
+				try {
+					const guild = oldState.guild ?? newState.guild;
+					const fresh = await guild?.channels?.fetch(CHANNEL_ID ?? '');
+					const freshMembers = (fresh as any)?.members as Map<string, { id: string }> | undefined;
+					const freshIds = freshMembers ? [...freshMembers.values()].map((m) => m.id) : [];
+					if (freshIds.some((id) => ACCESS.owner.has(id))) {
+						console.error(`${ts()} [Setup] owner-presence: leave aborted — owner present on re-verify`);
+						return;
+					}
+				} catch (e) {
+					console.error(`${ts()} [Setup] owner-presence re-verify fetch failed (proceeding to leave):`, e);
+				}
+				console.error(`${ts()} [Setup] owner-presence: last owner left — leaving channel`);
+				try {
+					injectSystemMessage(
+						session,
+						`[System] My owner left the voice channel. Say briefly: "My owner left — leaving too." Then stop.`,
+					);
+				} catch (e) {
+					console.error(`${ts()} [Setup] owner-presence announcement injection failed:`, e);
+				}
+				setTimeout(() => {
+					try { connection.destroy(); } catch {}
+					process.exit(0);
+				}, 2500);
+			}, 3000);
 		});
 	}
 
