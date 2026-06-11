@@ -2258,19 +2258,19 @@ async function createVoiceSession(connection: VoiceConnection, client: Client): 
 				// Clear the hang condition so the watchdog doesn't immediately re-fire.
 				(s as any).lastTurnActivityTs = Date.now();
 				(s as any).utterancesSinceTurn = 0;
-				// #1600 minimal M1, watchdog-path copy: this reconnect does NOT go
-				// through the transport-close handler, so the latch reset there
-				// never runs here — without these four the watchdog could
-				// reconnect and come back deaf (stale per-turn latches block the
-				// turn-start path on the fresh transport).
-				(s as any)._turnAudioAllowed = false;
-				(s as any)._audioPlayedThisTurn = false;
-				(s as any)._recvThisTurn = 0;
-				(s as any)._squelchThisTurn = false;
+				// #1600 (Susan "改啊", 2026-06-10): FULL Gemini reset instead of the
+				// in-place client re-attach. The re-attach kept geminiActive=true and
+				// never re-handshook Gemini — tonight's 21:45/21:46 fires reconnected
+				// "successfully" while the model stayed turn-dead. The 21:47:19
+				// quota-1011 close proved the fix: routing through the transport-close
+				// handler marks Gemini inactive → handleClientConnected does a true
+				// re-handshake → model produced tool calls 20s later. Simulate that
+				// close; everything downstream (restore-active, M1 latch resets,
+				// recount, grounding re-inject) is the existing, already-proven path.
 				try {
-					sessionAny.handleClientConnected();
+					sessionAny.handleTransportClose(4002, 'watchdog-forced-reset (session hung)');
 				} catch (e) {
-					console.error(`${ts()} [Watchdog] reconnect failed:`, e);
+					console.error(`${ts()} [Watchdog] forced reset failed:`, e);
 				}
 				// #1600 count-drift: re-sync _humanCount after the watchdog reconnect
 				// (no voiceStateUpdate fires for a reconnect — see transport-close path).
