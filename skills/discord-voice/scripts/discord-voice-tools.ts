@@ -272,11 +272,12 @@ export function executeGroupSwitch(s: any, mode: 'active' | 'meeting', opts: Swi
 	// AI-gate consumption: _namedThisBotAt is stamped when the addressing
 	// classifier judges addressed=true OR the deterministic name matcher hits
 	// (both in the STT pipeline). namedRecently reads that stamp.
+	// Susan 2026-06-10 ("去掉switch_name_gate…这样可以彻底审计"): NO separate
+	// switch-time audit row — the per-utterance name_gate rows (one per human
+	// utterance, discord-voice-server.ts transcribeAndRecordUtterance) are the
+	// complete addressing audit trail; the switch-time named state is derivable
+	// from them. The behavioral check below is unchanged — only the log moved.
 	const _named = namedRecently(s);
-	// #1600 observability (Susan: in group there are exactly TWO auditable
-	// layers — switch_name_gate first, then switch_mode via the solo
-	// delegation below).
-	try { recordEvent('discord-voice', 'switch_name_gate', JSON.stringify({ requested: mode, named: _named, verdict: _named ? 'passed' : 'refused_not_named' }), s.sessionId); } catch {}
 	if (!_named) {
 		console.log(`${ts()} [Meeting] group switch_mode("${mode}") REFUSED — bot not addressed by name`);
 		return { status: 'ignored', instruction: 'Multiple people are in the channel and you were not addressed by name — that mode command was not meant for you. Stay as you are and do not speak now. If someone LATER addresses you by name with a mode command, call the switch tool again then.' };
