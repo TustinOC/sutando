@@ -52,12 +52,14 @@ Each pass, in order:
 Skip step 6 (end the pass early after step 3) if and only if one of these applies:
 
 - **(a) Quota**: per-pass budget is below the LIGHT threshold (<1%).
-- **(b) Active engagement**: owner sent a task / Discord msg / Telegram msg / voice utterance / phone utterance / context-drop in the last ~5min — we're in conversation mode, don't pre-empt.
+- **(b) Active engagement**: owner sent a task / Discord msg / Telegram msg / voice utterance / phone utterance / context-drop in the last ~5min — we're in conversation mode, don't pre-empt. **This means: don't start a NOISY/heavy action that talks over their thread. It does NOT mean "wait for the owner's permission before doing goal-aligned work."** Goal-aligned work proceeds without greenlight (you have standing authorization). Offering a goal-aligned action "for the owner's go" and then holding is NOT a valid skip — that is stopping. Do the work; if it's heavy, run it in the background and keep going.
 - **(c) Presenter/meeting mode**: `state/presenter-mode.sentinel` is active (set via `bash scripts/presenter-mode.sh start N`).
 - **(d) Explicit pause**: `state/loop-paused-until.sentinel` is active (future-dated).
 - **(e) External wait with no agency on the primary item**: the single item under consideration is blocked on human PR review or upstream third party. Only gates THAT item — other menu items remain fair game.
 
 **Blocker ≠ stop.** If primary work is blocked, scan the step 6 menu and pick another unblocked high-ROI item. Idling because "nothing to do" is laziness, not a skip.
+
+**NEVER conclude a pass in a "holding / awaiting the owner / waiting for your go" state** (Chi 2026-06-13, asked "why do you stop?" 5+ times). The ONLY legitimate stops are the skip conditions above (quota / presenter / pause / external-wait-on-a-specific-item). "Waiting for the owner to approve goal-aligned work," "holding for their reply," and "the primary item needs their decision" are NOT stops — proceed with the goal-aligned work (don't ask greenlight), OR pivot to another menu item. A heavy action (a render, a long job) is launched in the BACKGROUND and you keep working — never block the loop waiting on it. The pass conclusion states what you DID and what you're DOING NEXT, never what you're waiting for.
 
 ## The numbered loop
 
