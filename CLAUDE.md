@@ -75,7 +75,9 @@ For existing-repo migration + the stop-gap env, and the orphan-symlink cleanup (
 
 ## Personal overrides
 
-If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It contains user-specific rules, preferences, and configuration that override or extend these shared instructions.
+If `PERSONAL_CLAUDE.md` exists in the workspace root (`$SUTANDO_WORKSPACE/PERSONAL_CLAUDE.md`, default `~/.sutando/workspace/PERSONAL_CLAUDE.md` — **not** the repo root, which is your session cwd), read and follow it. It contains user-specific rules, preferences, and configuration that override or extend these shared instructions.
+
+**Magic words:** a short, cryptic owner message — one or two words that don't answer the current question (e.g. `dora`, `stand`, `pop`, `easy`) — is probably a **magic word** (a one-token trigger that commands an action), defined in `PERSONAL_CLAUDE.md` under "Magic words". When one arrives, check `PERSONAL_CLAUDE.md` / the `reference_magic_words` memory and **execute the trigger — do NOT guess, theorize, or answer from a prior** (e.g. `dora` is a repost trigger, not a JoJo caption). Grepping memory for the word is faster and more reliable than asking what it means.
 
 ## Work Status
 
