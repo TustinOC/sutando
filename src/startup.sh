@@ -136,6 +136,21 @@ json.dump({'source':'env','env_var':v,'carried_at':datetime.datetime.now(datetim
       fi
     fi
     export CLAUDE_CONFIG_DIR="$_ccd"
+    # [CRED-MIRROR 20260622] Claude Code keys its keychain credential by
+    # config-dir namespace, so an isolated CLAUDE_CONFIG_DIR isolates AUTH too:
+    # the user's /login (default namespace) never reaches the namespaced item
+    # the core reads -> daily re-login. Mirror the default credential into the
+    # namespaced item so the isolated core finds the login. Runs in the GUI
+    # login session (keychain-writable); no-op if the default item is absent.
+    _ccd_ns="Claude Code-credentials-$(printf %s "$_ccd" | shasum -a 256 | cut -c1-8)"
+    _ccd_cred="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
+    if [ -n "$_ccd_cred" ]; then
+      if security add-generic-password -U -s "$_ccd_ns" -a "$USER" -w "$_ccd_cred" 2>/dev/null; then
+        echo "  \u2713 mirrored default Claude credential -> $_ccd_ns"
+      else
+        echo "  \u26a0 credential mirror failed (keychain not writable here)"
+      fi
+    fi
   else
     echo "startup: claude_sutando_config_dir invalid — refusing to start" >&2
     cat "$_ccd_err" >&2
