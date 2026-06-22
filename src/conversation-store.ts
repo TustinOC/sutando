@@ -501,6 +501,61 @@ export function recordSessionBoundary(reason: string = 'user_goodbye', sessionId
 }
 
 /**
+ * Read the last `limit` real conversation turns for a surface, trimmed at the
+ * most recent SESSION_END boundary — so a cleanly-ended prior session returns
+ * empty (no stale replay), while an in-progress session returns its turns. This
+ * is the per-surface read counterpart to the host voice-agent's
+ * getRecentConversation(), letting a surface that recreates its model session on
+ * reconnect (e.g. discord-voice) replay recent context as background so the new
+ * session CONTINUES instead of cold-starting with a greeting.
+ *
+ * Returns formatted "Speaker: text" lines (chronological, most-recent last), or
+ * '' if there is nothing to replay / on any error. Best-effort — never throws.
+ */
+export function getRecentTurns(source: Source, limit = 8): string {
+	init();
+	if (!db) return '';
+	const s = surfaces.get(source);
+	if (!s) return '';
+	try {
+		const hasName = s.insertCols.includes('speaker_name');
+		const hasType = s.insertCols.includes('speaker_type');
+		// Pull a window wider than `limit` so trimming at the latest SESSION_END
+		// still leaves up to `limit` turns after it. Newest-first.
+		const rows = db.prepare(
+			`SELECT ts_unix, kind, text,
+			        ${hasName ? 'speaker_name' : 'NULL AS speaker_name'},
+			        ${hasType ? 'speaker_type' : 'NULL AS speaker_type'}
+			   FROM ${s.table}
+			  WHERE kind IN ('user', 'agent', 'peer', 'SESSION_END')
+			  ORDER BY ts_unix DESC
+			  LIMIT ?`,
+		).all(Math.max(limit * 3, limit + 5)) as Array<{
+			kind: string; text: string; speaker_name: string | null; speaker_type: string | null;
+		}>;
+		const turns: typeof rows = [];
+		for (const r of rows) {
+			if (r.kind === 'SESSION_END') break; // boundary → older turns are an ended session
+			turns.push(r);
+			if (turns.length >= limit) break;
+		}
+		if (!turns.length) return '';
+		turns.reverse();
+		return turns
+			.map(r => {
+				const who = r.speaker_name
+					|| (r.kind === 'user' ? 'User' : r.kind === 'agent' ? 'Sutando' : (r.speaker_type || r.kind));
+				return `${who}: ${(r.text || '').trim()}`;
+			})
+			.filter(l => l.length > 2)
+			.join('\n');
+	} catch (e) {
+		console.error('[conversation-store] getRecentTurns failed:', e);
+		return '';
+	}
+}
+
+/**
  * Record a single tool invocation into the matching surface table as
  * `kind='tool_call'`. Call this from each surface's `onToolResult` hook so
  * tool calls land in db immediately (and are visible mid-session in DB
