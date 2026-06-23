@@ -2273,6 +2273,29 @@ def _recover_orphan_sending_files() -> int:
     return recovered
 
 
+HEARTBEAT_FILE = STATE_DIR / "discord-bridge.heartbeat"
+HEARTBEAT_INTERVAL_S = 30
+
+
+async def _heartbeat_loop():
+    """Liveness heartbeat: rewrite state/discord-bridge.heartbeat every 30s
+    while the asyncio event loop is alive. startup.sh's bridge guard reads
+    this file's mtime to distinguish a HUNG bridge (process present but event
+    loop stalled → heartbeat goes stale) from a healthy-but-idle one (no
+    Discord traffic, loop still ticking → heartbeat stays fresh). A bare
+    `pgrep` can't make that distinction, so a hung bridge was treated as
+    "already running" and blocked its own restart — the 2026-06-23 bridge-down
+    incident. Writes once immediately so a freshly-(re)started bridge is
+    visible within seconds, not after the first interval."""
+    while True:
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_FILE.write_text(str(int(time.time())))
+        except Exception as exc:
+            print(f"  [heartbeat] write failed (non-fatal): {exc}", flush=True)
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+
+
 @client.event
 async def on_ready():
     print(f"Discord bridge ready: {client.user}")
@@ -2305,6 +2328,10 @@ async def on_ready():
     client.loop.create_task(poll_dm_fallback())
     # Auto-mod LLM-judge flush timer (per-guild gate enforced inside flush)
     client.loop.create_task(_mod_flush_timer_loop())
+    # Liveness heartbeat — lets startup.sh's guard tell a hung bridge from a
+    # healthy-idle one (see _heartbeat_loop). Started last so it reflects a
+    # fully-initialized bridge.
+    client.loop.create_task(_heartbeat_loop())
 
 
 def _message_mentions_bot(message):

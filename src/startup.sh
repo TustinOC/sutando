@@ -808,12 +808,33 @@ if _DC_ENV="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path channels/d
   fi
   if [ -z "$PYTHON_WITH_DISCORD" ]; then
     echo "  ~ discord bridge (no python with discord.py — run: /opt/homebrew/bin/pip3 install discord.py)"
-  elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
-    echo "  Starting Discord bridge with $PYTHON_WITH_DISCORD..."
-    "$PYTHON_WITH_DISCORD" src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
-    echo "  ✓ discord bridge"
   else
-    echo "  ✓ discord bridge (already running)"
+    # Health-aware guard (2026-06-23 bridge-down incident): a bare `pgrep`
+    # treats a HUNG bridge (process alive, event loop stalled) as "already
+    # running" and never replaces it — exactly what stranded owner DMs that
+    # day. Gate on the bridge liveness heartbeat instead
+    # (state/discord-bridge.heartbeat, rewritten every 30s by _heartbeat_loop):
+    # present + heartbeat <90s old = healthy; present + stale-or-missing =
+    # hung (or a pre-heartbeat build) → reap + restart; absent = start.
+    _dc_hb="$WORKSPACE/state/discord-bridge.heartbeat"
+    if pgrep -f "discord-bridge\.py$" > /dev/null 2>&1; then _dc_running=1; else _dc_running=0; fi
+    _dc_fresh=0
+    if [ "$_dc_running" = 1 ] && [ -f "$_dc_hb" ]; then
+      _dc_mtime="$(stat -f %m "$_dc_hb" 2>/dev/null || stat -c %Y "$_dc_hb" 2>/dev/null || echo 0)"
+      if [ "$(( $(date +%s) - _dc_mtime ))" -lt 90 ]; then _dc_fresh=1; fi
+    fi
+    if [ "$_dc_running" = 1 ] && [ "$_dc_fresh" = 1 ]; then
+      echo "  ✓ discord bridge (already running, heartbeat fresh)"
+    else
+      if [ "$_dc_running" = 1 ]; then
+        echo "  ⚠ discord bridge present but heartbeat stale/missing (hung or pre-heartbeat build) — reaping + restarting"
+        pkill -f "discord-bridge\.py$" 2>/dev/null || true
+        sleep 1
+      fi
+      echo "  Starting Discord bridge with $PYTHON_WITH_DISCORD..."
+      "$PYTHON_WITH_DISCORD" src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
+      echo "  ✓ discord bridge"
+    fi
   fi
 else
   echo "  ~ discord bridge (no token — optional)"
