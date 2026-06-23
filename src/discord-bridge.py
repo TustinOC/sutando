@@ -2358,6 +2358,24 @@ async def on_message_edit(before, after):
     await _handle_discord_message(after, force=True)
 
 
+# Live-status / progress-placeholder filter (2026-06-23, Lucy/Susan quota-drain
+# debug). The live status message (progress_stream, behind SUTANDO_PROGRESS_STREAM)
+# posts a self-updating "⏳ <step> (Ns)" placeholder. In a requireMention=false
+# channel (e.g. role:"bot2bot") those sibling/own placeholders were ingested as
+# TASKS — each a full ~50K-context turn, a pure token-burn loop (Lucy on Studio
+# measured ~11 such turns in one session). A progress placeholder is never a real
+# task, so drop it regardless of mention/requireMention. on_message_edit already
+# skips unmentioned bot edits, so the 4s self-edits don't re-ingest; this guards
+# only the initial post.
+_PROGRESS_PLACEHOLDER_RE = re.compile(r"^⏳\s.*\(\d+s\)$")
+
+
+def _is_progress_placeholder(content) -> bool:
+    """True if `content` is a live-status placeholder (⏳ <step> (Ns)) from
+    progress_stream.format_progress — display-only, never a task."""
+    return bool(content) and bool(_PROGRESS_PLACEHOLDER_RE.match(str(content).strip()))
+
+
 async def _handle_discord_message(message, force=False):
     if message.author == client.user:
         return
@@ -2463,6 +2481,13 @@ async def _handle_discord_message(message, force=False):
         # messages through without a mention — that's the point.
         if message.author.bot and client.user not in message.mentions and require_mention:
             print(f"  [skip] bot message without mention in requireMention=true channel", flush=True)
+            return
+
+        # Progress-placeholder filter: a live-status "⏳ <step> (Ns)" message
+        # (own or sibling) is display-only, never a task. Drop it regardless of
+        # requireMention to kill the token-burn loop (see _is_progress_placeholder).
+        if message.author.bot and _is_progress_placeholder(message.content):
+            print("  [skip] progress-stream placeholder (display-only, not a task)", flush=True)
             return
 
         bot_mentioned = client.user in message.mentions
