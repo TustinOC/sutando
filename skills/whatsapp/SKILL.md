@@ -50,6 +50,35 @@ Phone numbers are in E.164 (`+countrycode...`). For groups, pass the JID returne
 - For multi-line / long messages, write to a `/tmp/wa-*.txt` and pass via `--message "$(cat /tmp/wa-X.txt)"` — avoids shell-escape issues with quotes and emoji.
 - WhatsApp delivers messages best-effort; `wacli send text` returning success means the message hit WhatsApp's servers, not that the recipient has read it.
 
+## Inbound: self-chat listener (talk to Sutando over WhatsApp)
+
+The commands above are the **outbound/query** half. The **inbound** half lets the
+owner *message Sutando* over WhatsApp: because this Mac is a linked device on the
+owner's own account, the owner writes to their own **self-chat** ("Message
+Yourself") and Sutando picks it up.
+
+Daemon: `scripts/selfchat-bridge.py` (in this skill). Flow:
+- Owner sends plain text in the WhatsApp self-chat → bridge writes an owner-tier
+  `tasks/task-*.txt` (`source: whatsapp`) → core processes it → bridge sends the
+  result back into the self-chat **prefixed `🤖 Sutando:`**.
+- **Echo-suppression:** inbound polling skips any message starting with `🤖`, so
+  the bot never reacts to its own replies (no loop).
+- **Single-instance:** `flock` on `~/.wa-selfchat-bridge.lock` — a startup.sh
+  launch and a launchd/manual launch can't double-process.
+- **First run:** acts only on messages from start-time onward (no history replay).
+
+Config (all optional): `WA_SELF_JID` (default: auto-detected from
+`wacli auth status`, so no phone number is hardcoded), `WA_POLL_S` (default 8).
+
+Launch: `src/startup.sh` starts it automatically when wacli is authenticated
+(skip with `SKIP_WHATSAPP=1`), mirroring the telegram/discord bridge blocks.
+Manual: `python3 skills/whatsapp/scripts/selfchat-bridge.py`.
+
+**Store-lock gotcha:** only one process can hold the wacli store lock
+(`~/.wacli`). Don't leave a stray `wacli auth --follow` running — it blocks the
+bridge's `sync`. Pass `--lock-wait` on any manual wacli command issued while the
+bridge is running.
+
 ## Failure modes
 
 - `wacli: not authenticated` → user must run `wacli auth` (QR-code flow). One-time per Mac.

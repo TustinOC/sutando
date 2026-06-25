@@ -865,6 +865,25 @@ else
   echo "  ~ slack bridge (no token — optional)"
 fi
 
+# 7c. WhatsApp self-chat listener (optional — needs `wacli auth`, skip with SKIP_WHATSAPP=1)
+# Inbound half of the `whatsapp` skill: owner messages their own WhatsApp
+# self-chat → owner-tier task. Gated on wacli being authenticated (no token file;
+# auth lives in ~/.wacli). flock in the bridge makes this safe alongside a
+# launchd copy. Self JID auto-detected from `wacli auth status` (no number baked in).
+if [ "${SKIP_WHATSAPP:-}" = "1" ]; then
+  echo "  ~ whatsapp self-chat (skipped via SKIP_WHATSAPP)"
+elif command -v wacli >/dev/null 2>&1 && wacli auth status 2>&1 | grep -q "Authenticated as"; then
+  if ! pgrep -f "selfchat-bridge" > /dev/null 2>&1; then
+    echo "  Starting WhatsApp self-chat listener..."
+    python3 "$REPO/skills/whatsapp/scripts/selfchat-bridge.py" > "$LOGS_DIR/wa-selfchat-bridge.log" 2>&1 &
+    echo "  ✓ whatsapp self-chat listener"
+  else
+    echo "  ✓ whatsapp self-chat listener (already running)"
+  fi
+else
+  echo "  ~ whatsapp self-chat (wacli not authenticated — optional; run: wacli auth)"
+fi
+
 # 8. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
 if [ "${SKIP_PHONE:-}" = "1" ]; then
   echo "  ~ conversation server (skipped via SKIP_PHONE)"
