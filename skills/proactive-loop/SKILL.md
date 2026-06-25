@@ -55,6 +55,16 @@ Each pass, in order:
 
    Budget informs the **depth** of step 6 — not whether to do it. "Ran out of ideas" is never a valid skip; the work menu is infinite by design. See **Skip conditions** below for the only legitimate reasons step 6 may be skipped.
 
+0.7. **RE-ANCHOR — reconstruct the current track before acting (every pass).**
+
+   **GOAL (Chi 2026-06-25):** Never act on lost or eroded memory of the ongoing work. My in-session memory is NOT the record — it erodes *continuously* (interleaving with cron passes, attention drift over a long context, and compaction), and I can't reliably tell when it has. Success = I can be interrupted, compacted, or run dozens of interleaved cron passes and still pick up exactly where the thread left off **without the owner having to re-remind me**. ("you're supposed to keep working when I go to sleep and remind me of things when I wake up" — the loop is what makes that true.) See [[feedback_retrieve_thread_dont_guess]].
+
+   **How (flexible, not a hardcoded recipe — Chi 2026-06-25):** before acting, actually READ the durable record to re-establish the current track — don't assert it from memory. *Which* sources and *how far* are judgment, fit to the situation, not a fixed script: the channel(s) the owner is actually active on (`python3 src/discord-read.py <channel_id>`, `--until <id|iso>` to go as deep as the thread needs), the per-host `pending-questions.md`, the latest `relay/relay-*.md`, the `build_log.md` tail, and the session transcript for deep history. Read what's relevant to *this* moment; skip what isn't.
+
+   Then **compare what you read against your in-context belief; where they differ, trust the record.** If the current track is a still-open owner thread, continue THAT — don't start something tangential.
+
+   **Invoke** the **`context-reconstruct` skill** (Skill tool — `context-reconstruct`) at the start of the pass; don't merely reference it — invoking is what loads the living how-to into context (kept flexible + improved with practice, per Chi 2026-06-25; no hardcoded bundler script). The hard part is *doing it*, not knowing it: an unread re-anchor asserted "from memory" is the failure — read, don't recall.
+
 ## Skip conditions for step 6 (the ONLY legitimate reasons)
 
 Skip step 6 (end the pass early after step 3) if and only if one of these applies:
@@ -70,6 +80,7 @@ Skip step 6 (end the pass early after step 3) if and only if one of these applie
 ## The numbered loop
 
 1. **Check for tasks.** Look in `tasks/` for voice / Discord / Telegram / phone tasks. Look at `context-drop.txt` for context drops. Process anything found — execute the task, write results to `results/`.
+   - **RECONSTRUCT before interpreting (don't recall — read).** My session context compacts and is interleaved with cron passes, so my memory of "what we said / what I committed to" is unreliable — it is NOT the record; the channel/transcript is. So when a task isn't self-contained (terse — "no", "continue", "y", a pronoun — a reply, or refers to something not stated), reconstruct the relevant context FIRST, before forming any interpretation: `python3 src/discord-read.py <channel_id>`, reading the thread (everyone's messages **including my own prior replies**, since I forget those too) back until it stands on its own, then answer from the reconstructed thread, not from memory. Keyed on the message not being self-contained (not "always", not my felt-confidence). This also re-anchors after a compaction. See [[feedback_retrieve_thread_dont_guess]].
    - **Access control:** If the task has `access_tier: other` or `access_tier: team`, delegate to a sandboxed agent. Do NOT process non-owner tasks with your full capabilities. Write the sandboxed output to results.
    - Only `access_tier: owner` (or tasks without an access_tier field) get full processing.
    - **Thread consolidation:** when several tasks in a short window are the same continuation thought (e.g. voice over-delegating "yes, right, this is useful…" as 3 separate tasks), put the FULL reply in the latest task's result and put `[deduped: task-<latest-id>]` in each earlier task's result. The bridge silently archives the deduped ones — no voice cascade, no DM duplicates. See CLAUDE.md "Result-body protocol markers" for the full marker list.
