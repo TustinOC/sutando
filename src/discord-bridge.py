@@ -224,6 +224,28 @@ _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
 # string). Per msze_'s 2026-05-07 directive + Chi's "ship 1" call.
 _DISCORD_CHANNEL_REF_RE = re.compile(r"<#(\d+)>")
 
+# Outlet 3 of the no-Chinese-public context guard (with the send_discord_message
+# in-tool check and the no-chinese-public-guard.py PreToolUse hook). The public
+# "Sutando" server is English-only; result-delivery to a channel in a public
+# guild that contains Han text is HARD-BLOCKED (no auto-translate — could change
+# meaning). Private guilds (voice / meeting-buddy server) are unrestricted.
+_PUBLIC_GUILD_IDS = {
+    g.strip()
+    for g in (os.environ.get("SUTANDO_PUBLIC_GUILD_IDS") or "1485653766404444352").split(",")
+    if g.strip()
+}
+_HAN_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+
+
+def _is_public_guild_channel(channel) -> bool:
+    """True if `channel` belongs to a PUBLIC (English-only) guild. DMs and
+    private-guild channels return False. Fail-open: any attribute error → False."""
+    try:
+        guild = getattr(channel, "guild", None)
+        return bool(guild) and str(guild.id) in _PUBLIC_GUILD_IDS
+    except Exception:
+        return False
+
 # User-mention regex used by escalation cc_ids extraction. Critical: this
 # explicitly rejects role mentions `<@&id>` (the leading `&` after `<@`).
 # Earlier code did `s.strip("<@>")` after a startswith("<@") check, which
@@ -3776,6 +3798,23 @@ async def poll_results():
                     clean_text = reply_text
                     files = [a.value for a in _parsed.actions if a.kind == "attach"]
 
+                    # Outlet 3 — no-Chinese-public guard. Hard-block delivery of
+                    # Han text to a public English-only guild (no auto-translate).
+                    # Replace the body with an English notice so the owner sees
+                    # *something* landed and can re-send in English; files still
+                    # go through (no language content). See _is_public_guild_channel.
+                    if clean_text and _HAN_RE.search(clean_text) and _is_public_guild_channel(channel):
+                        print(
+                            f"  [no-chinese-public] BLOCKED Chinese delivery to public guild "
+                            f"channel {getattr(channel, 'id', '?')} (task {task_id}); "
+                            f"replaced with English notice",
+                            flush=True,
+                        )
+                        clean_text = (
+                            "(A reply was withheld: it contained Chinese, and this is an "
+                            "English-only public channel. Please re-send in English.)"
+                        )
+
                     # Send text — fence-aware chunker preserves triple-backtick code blocks
                     # First chunk uses message_reference (if set); subsequent chunks
                     # are fresh — Discord allows only one reply-anchor per message,
@@ -4151,6 +4190,17 @@ async def poll_proactive():
                                 )
                             if _target_ch is not None and hasattr(_target_ch, 'send'):
                                 try:
+                                    # Outlet 3 — no-Chinese-public guard (proactive redirect path).
+                                    if _redirect_text and _HAN_RE.search(_redirect_text) and _is_public_guild_channel(_target_ch):
+                                        print(
+                                            f"  [no-chinese-public] BLOCKED Chinese proactive redirect to "
+                                            f"public guild channel {_target_id} ({f.name}); replaced with notice",
+                                            flush=True,
+                                        )
+                                        _redirect_text = (
+                                            "(A reply was withheld: it contained Chinese, and this is an "
+                                            "English-only public channel. Please re-send in English.)"
+                                        )
                                     if _redirect_text:
                                         for chunk in _chunk_for_discord(_redirect_text):
                                             await _target_ch.send(chunk)
@@ -4352,6 +4402,17 @@ async def poll_dm_fallback():
                             # File markers (parity with poll_results 2761-2784).
                             text_only = clean_body  # _parsed_fb.body already stripped
                             file_list = [a.value for a in _parsed_fb.actions if a.kind == "attach"]
+                            # Outlet 3 — no-Chinese-public guard (dm-fallback redirect path).
+                            if text_only and _HAN_RE.search(text_only) and _is_public_guild_channel(target_channel):
+                                print(
+                                    f"  [no-chinese-public] BLOCKED Chinese dm-fallback redirect to "
+                                    f"public guild channel {target_channel_id} ({f.name}); replaced with notice",
+                                    flush=True,
+                                )
+                                text_only = (
+                                    "(A reply was withheld: it contained Chinese, and this is an "
+                                    "English-only public channel. Please re-send in English.)"
+                                )
                             if text_only:
                                 for chunk in _chunk_for_discord(text_only):
                                     await target_channel.send(chunk)
