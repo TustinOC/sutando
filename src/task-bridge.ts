@@ -167,6 +167,43 @@ export function _isVoiceTask(taskId: string): boolean {
 	return false;
 }
 
+/** The `source:` field from a task's originating file, or null if unknown.
+ * Reads only the header (stops at the `task:` delimiter, same as _isVoiceTask)
+ * so a multi-line task body can't forge it. Exported for unit testing. */
+export function _taskSource(taskId: string): string | null {
+	const candidates: string[] = [
+		join(TASK_DIR, `${taskId}.txt`),
+		join(TASK_DIR, 'processed', `${taskId}.txt`),
+		// Legacy flat-archive location — kept for any task archived before
+		// the YYYY-MM partitioning (PR #591) was introduced.
+		join(TASK_DIR, 'archive', `${taskId}.txt`),
+	];
+	// Active archive layout: tasks/archive/YYYY-MM/<taskId>.txt. Glob the
+	// month subdirs rather than rebuild the YYYY-MM from the task's mtime.
+	const archiveRoot = join(TASK_DIR, 'archive');
+	if (existsSync(archiveRoot)) {
+		try {
+			for (const entry of readdirSync(archiveRoot)) {
+				if (!/^\d{4}-\d{2}$/.test(entry)) continue;
+				candidates.push(join(archiveRoot, entry, `${taskId}.txt`));
+			}
+		} catch {}
+	}
+	for (const p of candidates) {
+		if (!existsSync(p)) continue;
+		try {
+			const body = readFileSync(p, 'utf-8');
+			// Stop scanning at the first `task:` delimiter so a multi-line task
+			// body can't forge a `source:` line (same stop as _isVoiceTask).
+			for (const l of body.split('\n')) {
+				if (l.startsWith('task:')) break;
+				if (l.startsWith('source:')) return l.slice('source:'.length).trim();
+			}
+		} catch {}
+	}
+	return null;
+}
+
 /** Belt-suspenders guard for the result-watcher's unconditional fallthrough
  * (issue #1035, follow-up to PR #1033). Returns true iff the filename is one
  * that task-bridge legitimately delivers via `onResult()`. Rejects everything
@@ -805,6 +842,21 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 				// legitimately consumes. See _shouldFallthrough for the
 				// allowlisted prefixes.
 				if (!_shouldFallthrough(file)) continue;
+				// Ownership guard: the fallthrough below SPEAKS + ARCHIVES the result. Only do
+				// that for task-* results task-bridge actually owns — voice-origin tasks,
+				// work-tool submissions (_pendingTasks), chat tasks, and context-drop tasks.
+				// A task-* with any other source is delivered + archived by its own bridge;
+				// speaking+archiving it here races that bridge and can strand the reply if the
+				// bridge is briefly stalled (results swept to results/archive/ undelivered,
+				// 2026-06-27). voice-*/proactive-* have no other consumer and still fall through.
+				if (file.startsWith('task-')) {
+					const owned =
+						_isVoiceTask(taskId) ||
+						_pendingTasks.has(taskId) ||
+						taskId.startsWith('task-chat-') ||
+						_taskSource(taskId) === 'context-drop';
+					if (!owned) continue;
+				}
 				if (result) {
 					console.log(`${ts()} [TaskBridge] Result ${file}: ${result.slice(0, 100)}`);
 					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
