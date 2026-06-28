@@ -528,7 +528,7 @@ export function getRecentTurns(source: Source, limit = 8): string {
 			        ${hasType ? 'speaker_type' : 'NULL AS speaker_type'}
 			   FROM ${s.table}
 			  WHERE kind IN ('user', 'agent', 'peer', 'SESSION_END')
-			  ORDER BY ts_unix DESC
+			  ORDER BY ts_unix DESC, id DESC
 			  LIMIT ?`,
 		).all(Math.max(limit * 3, limit + 5)) as Array<{
 			kind: string; text: string; speaker_name: string | null; speaker_type: string | null;
@@ -542,12 +542,12 @@ export function getRecentTurns(source: Source, limit = 8): string {
 		if (!turns.length) return '';
 		turns.reverse();
 		return turns
+			.filter(r => (r.text || '').trim())  // drop content-empty turns (the old `l.length > 2` was dead — `who` is always non-empty)
 			.map(r => {
 				const who = r.speaker_name
 					|| (r.kind === 'user' ? 'User' : r.kind === 'agent' ? 'Sutando' : (r.speaker_type || r.kind));
 				return `${who}: ${(r.text || '').trim()}`;
 			})
-			.filter(l => l.length > 2)
 			.join('\n');
 	} catch (e) {
 		console.error('[conversation-store] getRecentTurns failed:', e);
