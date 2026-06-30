@@ -1,0 +1,5 @@
+{
+  "_comment": "Optional defense-in-depth gate for room-react (same shape as room-read/room-media). DEFAULT-DENY when present; ABSENT file -> defer entirely to relay-side membership enforcement. The relay is the authoritative enforcer regardless.",
+  "@example.agent:your-homeserver": { "rooms": ["!exampleRoomId:your-homeserver"] },
+  "@trusted.agent:your-homeserver": { "all_member_rooms": true }
+}
