@@ -1,0 +1,9 @@
+{
+  "_comment": "Optional defense-in-depth gate for room-media (same shape as room-read). DEFAULT-DENY when present; ABSENT file -> client defers entirely to relay-side membership enforcement. Copy to the path in ROOM_MEDIA_GATE and add only the agents/rooms you intend to opt in. The relay is the authoritative membership enforcer regardless.",
+  "@example.agent:your-homeserver": {
+    "rooms": ["!exampleRoomId:your-homeserver"]
+  },
+  "@trusted.agent:your-homeserver": {
+    "all_member_rooms": true
+  }
+}
