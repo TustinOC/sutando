@@ -357,7 +357,9 @@ def download_file(file_id, name_hint="file"):
     local_name = f"{int(time.time()*1000)}{ext}"
     local_path = INBOX_DIR / local_name
     try:
-        urllib.request.urlretrieve(url, str(local_path))
+        req = urllib.request.Request(url, headers={"User-Agent": "Sutando"})
+        with urllib.request.urlopen(req, timeout=30) as resp, open(local_path, "wb") as f:
+            f.write(resp.read())
         return str(local_path)
     except Exception as e:
         print(f"  Download failed: {e}")
