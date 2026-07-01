@@ -68,7 +68,18 @@ case "$cmd" in
             echo "ERROR: template not found: $TEMPLATE" >&2
             exit 1
         fi
-        _PROXY_SCRIPT="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
+        # Run the proxy from THIS checkout ($REPO), not the claude-home skills
+        # copy. The proxy resolves its workspace file-relatively (via
+        # ../../../src/workspace_default), so it must live in the same checkout as
+        # the core/dashboard that read quota-state.json — else a multi-checkout
+        # host (e.g. ~/.claude/skills symlinked to a different clone) has the proxy
+        # write one workspace while the dashboard reads another → stale quota date.
+        # Single-checkout hosts are unaffected (both paths resolve the same file).
+        # Fall back to the claude-home copy only if this checkout lacks the skill.
+        _PROXY_SCRIPT="$REPO/skills/quota-tracker/scripts/credential-proxy.ts"
+        if [ ! -f "$_PROXY_SCRIPT" ]; then
+            _PROXY_SCRIPT="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
+        fi
         if [ ! -f "$_PROXY_SCRIPT" ]; then
             echo "ERROR: quota-tracker skill not found at $_PROXY_SCRIPT" >&2
             echo "  Install it first — credential-proxy.ts is the proxy target." >&2

@@ -537,7 +537,13 @@ if [ -f "$_PROXY_INSTALLER" ] && [ -f "$REPO/src/launchd/$_PROXY_LABEL.plist" ];
 fi
 if ! lsof -i :7846 > /dev/null 2>&1; then
   echo "  Starting credential proxy (port 7846)..."
-  npx tsx "$(bash "$REPO/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)" > /tmp/credential-proxy.log 2>&1 &
+  # Run the proxy from THIS checkout so it resolves the same workspace as the
+  # core/dashboard (it reads workspace file-relatively); fall back to the
+  # claude-home copy if this checkout lacks the skill. See the launchd installer
+  # for the multi-checkout stale-quota rationale.
+  _PROXY_SCRIPT="$REPO/skills/quota-tracker/scripts/credential-proxy.ts"
+  [ -f "$_PROXY_SCRIPT" ] || _PROXY_SCRIPT="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
+  npx tsx "$_PROXY_SCRIPT" > /tmp/credential-proxy.log 2>&1 &
   sleep 1
   if lsof -i :7846 > /dev/null 2>&1; then
     echo "  ✓ credential proxy"
