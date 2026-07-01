@@ -10,11 +10,18 @@
 
 set -euo pipefail
 
-# Resolve the credential-proxy script path. Honors $CLAUDE_CONFIG_DIR if the
-# launchd plist exports it (claude-sutando installs); otherwise falls back to
-# ~/.claude. launchd itself doesn't inherit shell env, so this fallback is the
-# vanilla-claude default unless the plist's EnvironmentVariables sets it.
-PROXY_SCRIPT="$(bash "$(cd "$(dirname "$0")/../.." && pwd)/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
+# Resolve the credential-proxy script path. Prefer THIS checkout's copy (the
+# repo the plist points at, i.e. the same clone as the core/dashboard) so the
+# proxy resolves the same workspace and quota-state.json isn't written to a
+# different clone's workspace (stale-quota split-brain on multi-checkout hosts).
+# Fall back to the claude-home copy for setups where this checkout lacks the
+# skill. launchd doesn't inherit shell env, so claude-home defaults to ~/.claude
+# unless the plist's EnvironmentVariables sets $CLAUDE_CONFIG_DIR.
+_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PROXY_SCRIPT="$_REPO_ROOT/skills/quota-tracker/scripts/credential-proxy.ts"
+if [ ! -f "$PROXY_SCRIPT" ]; then
+    PROXY_SCRIPT="$(bash "$_REPO_ROOT/scripts/sutando-config.sh" claude-home-path skills/quota-tracker/scripts/credential-proxy.ts)"
+fi
 
 # Resolve npx — launchd doesn't inherit the user's shell PATH.
 resolve_npx() {
