@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "_comment": "Declarative service manifest — the single source of truth for the backend service set, consumed by BOTH boot paths: the core's scripts/startup.sh (dev/CLI) and the desktop app's electron/backend-supervisor.cjs (packaged). Data only: code-side bits that can't live in JSON (e.g. credential-proxy's onReady, screen-capture's permission gate) stay in a map keyed by `name` inside each boot path. Optional/private services are NOT listed here — they drop into services.d/*.json and are merged on top, so this base list stays public-clean.",
+  "services": [
+    { "name": "credential-proxy", "kind": "node", "entry": "skills/quota-tracker/scripts/credential-proxy.ts", "port": 7846, "optional": true },
+    { "name": "web-client", "kind": "node", "entry": "src/web-client.ts", "port": 8080 },
+    { "name": "voice-agent", "kind": "node", "entry": "src/voice-agent.ts", "port": 9900, "requires": ["GEMINI_API_KEY"] },
+    { "name": "agent-api", "kind": "python", "entry": "src/agent-api.py", "port": 7843 },
+    { "name": "dashboard", "kind": "python", "entry": "src/dashboard.py", "port": 7844, "optional": true },
+    { "name": "screen-capture", "kind": "python", "entry": "src/screen-capture-server.py", "port": 7845, "optional": true, "noDetach": true },
+    { "name": "telegram-bridge", "kind": "python", "entry": "src/telegram-bridge.py", "daemon": true, "optional": true, "channel": "telegram", "tokenKey": "TELEGRAM_BOT_TOKEN", "pyDeps": [] },
+    { "name": "discord-bridge", "kind": "python", "entry": "src/discord-bridge.py", "daemon": true, "optional": true, "channel": "discord", "tokenKey": "DISCORD_BOT_TOKEN", "pyDeps": ["discord"] },
+    { "name": "slack-bridge", "kind": "python", "entry": "src/slack-bridge.py", "daemon": true, "optional": true, "channel": "slack", "tokenKey": "SLACK_BOT_TOKEN", "pyDeps": ["slack_bolt"] }
+  ]
+}

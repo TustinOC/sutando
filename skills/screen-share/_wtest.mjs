@@ -1,0 +1,17 @@
+import { chromium } from 'playwright';
+const rid = process.argv[2];
+const url = `https://ag2.space/bet/${rid}?widgetId=test123&roomId=${encodeURIComponent('!x:ag2.space')}&userId=${encodeURIComponent('@qingyun:ag2.space')}&displayName=Qingyun`;
+const b = await chromium.launch({ channel:'chrome', headless:true });
+const pg = await (await b.newContext()).newPage();
+const logs=[];
+pg.on('console',m=>logs.push(`[${m.type()}] ${m.text()}`));
+pg.on('pageerror',e=>logs.push(`[PAGEERR] ${e.message}`));
+pg.on('requestfailed',r=>logs.push(`[REQFAIL] ${r.url().slice(0,60)} ${r.failure()?.errorText}`));
+await pg.goto(url,{waitUntil:'domcontentloaded',timeout:30000});
+await pg.waitForTimeout(6000);
+const board=(await pg.$eval('#board',e=>e.textContent).catch(()=>'?')).slice(0,40);
+const err=await pg.$eval('#err',e=>e.textContent).catch(()=>'?');
+const cards=await pg.$$eval('.card',e=>e.length).catch(()=>0);
+console.log('WIDGET-MODE board:',JSON.stringify(board),'| cards:',cards,'| #err:',JSON.stringify(err));
+console.log('--- console ---'); console.log(logs.slice(0,25).join('\n'));
+await b.close();

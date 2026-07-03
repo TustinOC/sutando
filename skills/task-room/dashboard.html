@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AG2 Space — Tasks</title>
+<style>
+  :root{--accent:#3b6ef5;--accent2:#7e57c2;--bg:#f6f7f9;--card:#fff;--line:#e3e5e8;--fg:#1a1a1a;--mut:#777}
+  @media (prefers-color-scheme:dark){:root{--bg:#16181c;--card:#1e2127;--line:#2c2f36;--fg:#e7e9ee;--mut:#9aa0aa}}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,system-ui,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+  header{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:12px;z-index:5}
+  header h1{font-size:16px;margin:0;font-weight:700}
+  header .gen{font-size:11px;color:var(--mut);margin-left:auto}
+  .wrap{max-width:920px;margin:0 auto;padding:18px}
+  .needs{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#fff;border-radius:12px;padding:14px 18px;margin-bottom:18px;font-weight:600}
+  .needs.zero{background:#2e7d52}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+  .card .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .pill{color:#fff;border-radius:10px;padding:2px 10px;font-size:11px;font-weight:600;text-transform:uppercase}
+  .goal{font-weight:600;font-size:14px;flex:1;min-width:200px}
+  .gate{font-size:11px;border:1px solid var(--line);border-radius:8px;padding:1px 8px;color:var(--mut)}
+  .pri{font-size:11px;font-weight:700;border-radius:8px;padding:1px 8px}
+  .bar{height:5px;border-radius:3px;background:rgba(128,128,128,.2);overflow:hidden;margin-top:10px}
+  .bar > span{display:block;height:100%;background:var(--accent)}
+  .needtxt{margin-top:8px;font-size:12.5px;color:var(--accent);background:rgba(59,110,245,.08);border-radius:8px;padding:6px 10px}
+  ul.steps{list-style:none;margin:10px 0 0;padding:0;font-size:12.5px;line-height:1.8}
+  ul.steps li{display:flex;gap:7px;align-items:baseline}
+  .dot{font-size:9px}
+  .done{opacity:.55;text-decoration:line-through}
+  .room{font-size:10px;color:var(--mut);margin-top:8px;font-family:ui-monospace,monospace}
+  .arts{margin-top:8px;font-size:11px;color:var(--mut)}
+  .assets{margin-top:8px;font-size:12px}
+  .assets summary{cursor:pointer;color:var(--mut);font-size:11.5px;user-select:none}
+  .assets ul{margin:4px 0 8px;padding-left:18px;line-height:1.7}
+  .assets code{font-size:11px;background:rgba(128,128,128,.12);border-radius:4px;padding:0 4px}
+  .asec{font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);margin-top:6px}
+  .aby{font-size:10.5px;color:var(--accent2)}
+  .awhy{color:var(--mut)}
+  .assets a{color:var(--accent);text-decoration:none}
+  .empty{color:var(--mut);text-align:center;padding:40px}
+</style>
+</head>
+<body>
+<header><h1>⬡ AG2 Space — Tasks</h1><span class="gen" id="gen"></span></header>
+<div class="wrap">
+  <div id="needs" class="needs"></div>
+  <div id="list"></div>
+</div>
+<script>
+const STATUS_COLOR={submitted:"#8a8f98",working:"#3b6ef5",now:"#3b6ef5",blocked:"#e0556a",completed:"#2e9e6b","?":"#999"};
+const STEP_COLOR={done:"#2e9e6b","in-progress":"#3b6ef5",todo:"#9aa0aa",blocked:"#e0556a"};
+const PRI_COLOR={urgent:"#e0556a",high:"#e8913b",normal:"#8a8f98",low:"#9aa0aa"};
+const esc=s=>{const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML};
+function gate(r){let g=r.when||"(no schedule)";if(r.at)g+=" @ "+r.at;if(r.after_room)g+=" after "+r.after_room;return g}
+function render(d){
+  document.getElementById("gen").textContent="updated "+new Date(d.generated_at*1000).toLocaleString();
+  const n=d.needs_you_count;
+  const nb=document.getElementById("needs");
+  nb.className="needs"+(n?"":" zero");
+  nb.textContent=n?("⛔ Needs you ("+n+")"):"✅ Nothing waiting on you";
+  const live=d.rooms.filter(r=>r.status!=="completed");
+  const done=d.rooms.filter(r=>r.status==="completed");
+  const list=document.getElementById("list");
+  list.innerHTML = live.map(card).join("") +
+    (done.length?('<div class="arts" style="margin:18px 0 8px">Completed ('+done.length+')</div>'+done.map(card).join("")):"");
+  if(!d.rooms.length) list.innerHTML='<div class="empty">No task rooms yet.</div>';
+}
+function card(r){
+  const sc=STATUS_COLOR[r.status]||"#999";
+  const pct=r.progress[1]?Math.round(100*r.progress[0]/r.progress[1]):0;
+  let h='<div class="card">';
+  h+='<div class="top">';
+  h+='<span class="pill" style="background:'+sc+'">'+esc(r.status)+'</span>';
+  h+='<span class="goal">'+esc(r.goal)+'</span>';
+  if(r.priority)h+='<span class="pri" style="color:'+(PRI_COLOR[r.priority]||"#777")+'">!'+esc(r.priority)+'</span>';
+  h+='<span class="gate">'+esc(gate(r))+'</span>';
+  h+='</div>';
+  if(r.progress[1])h+='<div class="bar"><span style="width:'+pct+'%"></span></div>';
+  if((r.when==="needs_human"||r.when==="awaiting-you")&&r.needs)h+='<div class="needtxt">⛔ '+esc(r.needs)+'</div>';
+  if(r.steps&&r.steps.length){h+='<ul class="steps">';for(const s of r.steps){h+='<li><span class="dot" style="color:'+(STEP_COLOR[s.status]||"#999")+'">●</span><span class="'+(s.status==="done"?"done":"")+'">'+esc(s.title)+'</span>'+(s.needs&&s.needs!=="none"?'<span style="font-size:10px;color:var(--accent2)">['+esc(s.needs)+']</span>':"")+'</li>'}h+='</ul>'}
+  if(r.artifacts&&r.artifacts.length)h+='<div class="arts">📎 '+r.artifacts.map(a=>esc(a.title)).join(", ")+'</div>';
+  h+=assetsBlock(r.assets);
+  h+='<div class="room">'+esc(r.room)+'</div>';
+  h+='</div>';
+  return h;
+}
+function assetsBlock(a){
+  if(!a)return"";
+  const n=(a.decisions||[]).length+(a.context||[]).length+(a.resources||[]).length;
+  if(!n)return"";
+  let b='<details class="assets"><summary>🧩 Assets ('+n+')</summary>';
+  if(a.decisions&&a.decisions.length){
+    b+='<div class="asec">Decisions</div><ul>';
+    for(const d of a.decisions)b+='<li><b>'+esc(d.id)+'</b> <span class="aby">'+esc(d.by)+'</span> — '+esc(d.what)+(d.why?' <span class="awhy">('+esc(d.why)+')</span>':'')+'</li>';
+    b+='</ul>';
+  }
+  if(a.context&&a.context.length){
+    b+='<div class="asec">Context</div><ul>';
+    for(const c of a.context)b+='<li><code>'+esc(c.key)+'</code> = '+esc(c.value)+(c.kind==='conclusion'?' <span class="aby">[conclusion]</span>':'')+'</li>';
+    b+='</ul>';
+  }
+  if(a.resources&&a.resources.length){
+    b+='<div class="asec">Resources</div><ul>';
+    for(const x of a.resources){
+      const ref=/^https?:\/\//.test(x.ref)?'<a href="'+esc(x.ref)+'" target="_blank" rel="noopener">'+esc(x.title||x.ref)+' ↗</a>':esc(x.title||x.id)+': <code>'+esc(x.ref)+'</code>';
+      b+='<li>'+ref+'</li>';
+    }
+    b+='</ul>';
+  }
+  return b+'</details>';
+}
+function load(){fetch("data.json?_="+Date.now()).then(r=>r.json()).then(render).catch(e=>{document.getElementById("list").innerHTML='<div class="empty">Failed to load data.json</div>'})}
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>

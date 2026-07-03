@@ -1,0 +1,10 @@
+{
+  "name": "sutando-screen-share",
+  "private": true,
+  "type": "module",
+  "description": "Mac-side LiveKit screen publisher for AG2 Space calls (full-screen share while the agent operates the Mac)",
+  "dependencies": {
+    "@livekit/rtc-node": "^0.13.29",
+    "ffmpeg-static": "^5.3.0"
+  }
+}
