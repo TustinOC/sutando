@@ -15,6 +15,8 @@
 
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const url = process.argv[2];
 if (!url) {
@@ -25,8 +27,6 @@ if (!url) {
 const actions = process.argv.slice(3);
 // Per-user temp dir: a shared /tmp/sutando-screenshots is owned by whichever
 // macOS account created it first and EACCES-blocks every other account.
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 const SCREENSHOT_DIR = process.env.SUTANDO_SCREENSHOT_DIR || join(tmpdir(), 'sutando-screenshots');
 mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
