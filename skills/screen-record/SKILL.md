@@ -27,6 +27,6 @@ python3 skills/screen-record/scripts/record.py stop
 ```
 
 ## Output & failure modes
-- **Done =** an mp4 written by `record.py` (it prints the path on stop).
+- **Done =** a `.mov` written by `record.py` to `/tmp/sutando-recording-<ts>.mov` (it prints the path on stop).
 - `start` while already recording → the script no-ops/returns the existing pid; `stop` with nothing running → no-op.
-- ffmpeg missing → `brew install ffmpeg`. No frames / black video → the invoking terminal lacks macOS **Screen Recording** permission (same grant the screen-capture server uses).
+- ffmpeg missing at `/opt/homebrew/bin/ffmpeg` (hardcoded — Apple Silicon brew prefix; on an Intel Mac `brew install ffmpeg` lands in `/usr/local` and the skill stays broken until the path is fixed). No frames / black video → the invoking terminal lacks macOS **Screen Recording** permission (same grant the screen-capture server uses).
