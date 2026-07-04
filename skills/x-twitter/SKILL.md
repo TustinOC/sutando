@@ -7,6 +7,18 @@ description: "Post tweets, search, read mentions, and check engagement on X (Twi
 
 Post, search, read, and monitor X from the command line.
 
+## When to use
+The user wants to **post to / read from X (Twitter)** — publish a tweet or thread,
+reply, search recent tweets, check mentions/timeline, or pull engagement on a
+known tweet id. Not for other social platforms.
+
+## Failure modes
+- **403 / "not permitted"** on post → the X API tier doesn't allow writes, or the
+  app lacks Read+Write permission (regenerate the access token AFTER setting RW).
+- **429 rate-limited** → API v2 free tier has low write/read caps; back off and retry later, don't loop.
+- **401** → a key in `.env` (`X_API_KEY/SECRET`, access token/secret) is missing or stale.
+- **Done =** the command prints the new tweet id / the result rows; a post with no id back did not publish.
+
 ## Usage
 
 ```bash
