@@ -629,6 +629,20 @@ def load_allowed():
     except Exception:
         return set()  # empty = allow all DMs during pairing
 
+
+def load_owner():
+    """The SINGLE full-capability identity: access.json's top-level "owner" field.
+    allowFrom membership grants ACCEPTANCE (DMs/mentions get processed), not owner
+    tier — before this split, every allowFrom id (teammates, sibling bots) was
+    processed with full machine access. Returns None when the field is absent
+    (legacy configs keep the old allowFrom==owner behavior)."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        v = data.get("owner")
+        return str(v) if v else None
+    except Exception:
+        return None
+
 def load_policy():
     try:
         data = json.loads(ACCESS_FILE.read_text())
@@ -2938,13 +2952,23 @@ async def _handle_discord_message(message, force=False):
     # (2026-06-23 incident: an owner's telegram bot token leaked here.)
     print(f"  @{username}: {redact_vault_commands(text)}{attachment_note}")
 
-    # Determine access tier
+    # Determine access tier. OWNER is the single identity in access.json's "owner"
+    # field — never the whole allowFrom set (that set includes teammates and sibling
+    # bots, who must get the sandboxed team tier, not full machine access).
+    _owner = load_owner()
     access_tier = "other"
-    if sender_id in allowed:
+    if _owner is not None:
+        if str(sender_id) == _owner:
+            access_tier = "owner"
+            # Record owner activity for status-aware-pivot in proactive loop
+            write_owner_activity("discord", text)
+        elif sender_id in allowed:
+            access_tier = "team"
+    elif sender_id in allowed:
+        # legacy config without an "owner" field: preserve pre-split behavior
         access_tier = "owner"
-        # Record owner activity for status-aware-pivot in proactive loop
         write_owner_activity("discord", text)
-    else:
+    if access_tier == "other":
         # Check if team member (from channel allowlists)
         try:
             data = json.loads(ACCESS_FILE.read_text())
