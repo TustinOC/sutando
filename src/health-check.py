@@ -1034,6 +1034,26 @@ def check_notes_split_brain() -> "dict | None":
     }
 
 
+def sutando_app_hotkey_detail(workspace_dir) -> str:
+    """Detail string for a running sutando-app check.
+
+    Hotkey labels come from <workspace>/state/hotkeys.json, published by the
+    app when it registers them (single source of truth since #1920). A running
+    process alone doesn't prove hotkeys exist — app lineages without global
+    hotkey registration (e.g. the Electron shell) match the pgrep pattern but
+    register nothing, and the pre-#1920 hardcoded "(⌃C/⌃V/⌃M)" claim here had
+    already drifted from the real defaults and read as a false positive during
+    live debugging. Missing/malformed/empty file → honest "no hotkeys
+    published" rather than a guess.
+    """
+    try:
+        entries = json.loads((Path(workspace_dir) / "state" / "hotkeys.json").read_text())
+        labels = "/".join(e["label"] for e in entries if e.get("label"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        labels = ""
+    return f"running (hotkeys: {labels})" if labels else "running (no hotkeys published)"
+
+
 def run_all_checks() -> list[dict]:
     checks = []
 
@@ -1355,7 +1375,8 @@ def run_all_checks() -> list[dict]:
             pgrep_err = f"{type(e).__name__}: {e}"[:120]
 
         if pgrep_status == "ok-running" and pids:
-            check = {"name": "sutando-app", "status": "ok", "detail": f"running (⌃C/⌃V/⌃M)"}
+            check = {"name": "sutando-app", "status": "ok",
+                     "detail": sutando_app_hotkey_detail(WORKSPACE_DIR)}
             # Staleness check is meaningful only in the dev workflow — the
             # .app binary and bundled main.swift share a build mtime, so a
             # comparison there is always equal. Skip when dev_bin missing.
