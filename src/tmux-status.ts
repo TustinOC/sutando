@@ -4,7 +4,11 @@
 // and categorizes the rendered state.
 //
 // Disabled by setting `SUTANDO_TMUX_SCRAPE=0`. Tmux session name override via
-// `SUTANDO_TMUX_SESSION` (default `sutando-core`).
+// `SUTANDO_TMUX_SESSION` (default `sutando-core`). Tmux socket override via
+// `SUTANDO_TMUX_SOCK` (default `/tmp/sutando-tmux.sock` — matches the socket
+// the core session is actually launched on, per src/Sutando/main.swift and
+// src/watch-tasks-stream.sh; the plain `tmux` command targets the per-uid
+// default socket instead, which is never the one Sutando uses).
 //
 // All failure modes (tmux missing, timeout, parse error) return `idle` — this
 // is a best-effort hint, never ground-truth, never throws.
@@ -20,6 +24,7 @@ export type TmuxParseResult = {
 };
 
 const DEFAULT_SESSION = 'sutando-core';
+const DEFAULT_SOCK = '/tmp/sutando-tmux.sock';
 const CACHE_TTL_MS = 3_000;
 const CAPTURE_TIMEOUT_MS = 500;
 const LINES_BACK = 30;
@@ -39,10 +44,11 @@ async function _refreshCache(): Promise<void> {
 	if (_refreshInFlight) return;
 	_refreshInFlight = true;
 	const session = process.env.SUTANDO_TMUX_SESSION || DEFAULT_SESSION;
+	const sock = process.env.SUTANDO_TMUX_SOCK || DEFAULT_SOCK;
 	try {
 		const { stdout } = await execFileAsync(
 			'tmux',
-			['capture-pane', '-t', session, '-pS', `-${LINES_BACK}`],
+			['-S', sock, 'capture-pane', '-t', session, '-pS', `-${LINES_BACK}`],
 			{ encoding: 'utf-8', timeout: CAPTURE_TIMEOUT_MS },
 		);
 		_cache = { ts: Date.now(), result: parseTmuxPane(stdout) };
