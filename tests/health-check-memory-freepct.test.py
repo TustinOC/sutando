@@ -34,6 +34,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -47,7 +48,7 @@ class FakeCompleted:
         self.stdout = stdout
 
 
-def fake_run_factory(level: int | None, swap_out: str, mp_out):
+def fake_run_factory(level: Optional[int], swap_out: str, mp_out):
     """Build a stand-in for subprocess.run that dispatches on argv[0].
 
     `mp_out` may be a string (memory_pressure stdout) or an exception
