@@ -49,6 +49,15 @@ class TestDetection(unittest.TestCase):
         key = "sk-" + "x" * 20 + "T3BlbkFJ" + "z" * 20  # detector accepts sk- prefix only
         self._assert_type(f"key: {key}", "OpenAI Token")
 
+    def test_bare_uuid_token(self):
+        # detect-secrets has no plugin for bare UUIDs (no vendor prefix to key
+        # on) — found 2026-07-09 when a Bright Data API token (bare UUIDv4)
+        # slipped through vault_intercept.py's FP guard and landed in
+        # plaintext on disk. scan_secrets() is only ever called on the
+        # already-isolated VALUE token of a `vault set KEY <token>` command,
+        # so a whole-string UUID match is the right scope.
+        self._assert_type("38f5f5d6-fdd1-4dbd-a488-303f7b5510a0", "Bare UUID Token")
+
 
 class TestNoFalsePositive(unittest.TestCase):
     def _assert_no_secret_hits(self, text):
@@ -57,7 +66,7 @@ class TestNoFalsePositive(unittest.TestCase):
         # high-entropy random strings, which is intended.
         secret_types = {
             "AWS Access Key", "GitHub Token", "JSON Web Token",
-            "Slack Token", "Private Key", "OpenAI Token",
+            "Slack Token", "Private Key", "OpenAI Token", "Bare UUID Token",
         }
         actual = [h.secret_type for h in hits if h.secret_type in secret_types]
         self.assertEqual(actual, [], f"Unexpected secret detection in prose: {actual}")
@@ -71,6 +80,14 @@ class TestNoFalsePositive(unittest.TestCase):
     def test_short_random_alphanumeric(self):
         # Not long enough to match any known secret format
         self._assert_no_secret_hits("user said abc123def456")
+
+    def test_uuid_mentioned_in_prose_not_flagged(self):
+        # The whole-line-only match means a UUID cited for an unrelated
+        # reason (e.g. a support ticket ID) inside a longer message is NOT a
+        # false positive — only a bare, standalone UUID value is.
+        self._assert_no_secret_hits(
+            "ticket 38f5f5d6-fdd1-4dbd-a488-303f7b5510a0 was resolved yesterday"
+        )
 
 
 class TestRedaction(unittest.TestCase):
@@ -109,6 +126,12 @@ class TestRedaction(unittest.TestCase):
         text = "the vault set command works fine"
         hits, redacted = scan_and_redact(text)
         self.assertEqual(redacted, text)
+
+    def test_bare_uuid_redaction(self):
+        token = "38f5f5d6-fdd1-4dbd-a488-303f7b5510a0"
+        hits, redacted = scan_and_redact(token)
+        self.assertNotIn(token, redacted)
+        self.assertIn("[STORED-IN-KEYCHAIN-Bare UUID Token]", redacted)
 
 
 class TestMultilineSecret(unittest.TestCase):
