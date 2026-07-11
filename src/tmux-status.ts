@@ -40,6 +40,19 @@ function logOnce(msg: string): void {
 	console.error(`[tmux-status] ${msg}`);
 }
 
+/**
+ * Build the `tmux` argv for capturing the core pane. Exported for testing.
+ *
+ * The `-S <socket>` server flag MUST precede the `capture-pane` command — tmux
+ * parses server options before the command word. Sutando.app / start-cli.sh run
+ * the tmux server on this custom socket, so omitting `-S` targets the default
+ * server (where `sutando-core` does not exist), the capture throws, and the
+ * scraper silently reports `idle` forever. See the header note.
+ */
+export function buildCaptureArgs(sock: string, session: string): string[] {
+	return ['-S', sock, 'capture-pane', '-t', session, '-pS', `-${LINES_BACK}`];
+}
+
 async function _refreshCache(): Promise<void> {
 	if (_refreshInFlight) return;
 	_refreshInFlight = true;
@@ -48,7 +61,7 @@ async function _refreshCache(): Promise<void> {
 	try {
 		const { stdout } = await execFileAsync(
 			'tmux',
-			['-S', sock, 'capture-pane', '-t', session, '-pS', `-${LINES_BACK}`],
+			buildCaptureArgs(sock, session),
 			{ encoding: 'utf-8', timeout: CAPTURE_TIMEOUT_MS },
 		);
 		_cache = { ts: Date.now(), result: parseTmuxPane(stdout) };
