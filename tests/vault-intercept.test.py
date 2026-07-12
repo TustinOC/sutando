@@ -153,7 +153,17 @@ class TestSingleVaultSet(unittest.TestCase):
 class TestUnrecognizedValueFailsClosed(unittest.TestCase):
     """#2074: an unquoted value the FP guard doesn't recognize must not leak
     to disk just because scan_secrets() missed it — only genuine prose
-    (non-env-shaped key) should still pass through untouched."""
+    (a key that isn't a deliberate-looking identifier) should still pass
+    through untouched.
+
+    PR #2052 review (qingyun-wu, 2026-07-12): the first version of this fix
+    only recognized SCREAMING_SNAKE_CASE keys as "deliberate", so a real
+    secret under a lowercase/camelCase/PascalCase/dash-separated key still
+    leaked — same #2074 class, just a differently-cased key. The four
+    `test_*_key_variant_not_leaked` cases below are the reviewer's exact
+    repro (verified against PR head 996ae31 with scan_secrets() stubbed to
+    return [], matching real behavior when detect-secrets doesn't recognize
+    the value's shape)."""
 
     def test_discord_client_secret_shaped_value_not_leaked(self):
         # Real repro from #2074: a 32-char mixed dash/underscore client
@@ -179,6 +189,41 @@ class TestUnrecognizedValueFailsClosed(unittest.TestCase):
         self.assertNotIn(value, result.text)
         self.assertEqual(result.stored, [])
         self.assertEqual(result.failed, ["SOME_API_KEY"])
+
+    def test_lowercase_snake_case_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set pr_triage_activity_secret {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["pr_triage_activity_secret"])
+
+    def test_pascal_case_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set PrTriageActivitySecret {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["PrTriageActivitySecret"])
+
+    def test_camel_case_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set prTriageActivitySecret {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["prTriageActivitySecret"])
+
+    def test_dash_separated_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set SOME-KEY {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["SOME-KEY"])
+
+    def test_lowercase_dash_separated_key_variant_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set some-key {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["some-key"])
 
     def test_does_not_call_subprocess_when_unrecognized(self):
         # Fail-closed must mean "never even attempt to store" — no Keychain
