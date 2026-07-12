@@ -66,7 +66,15 @@ def _default_memory_dir() -> str:
     slug = str(repo).replace("/", "-")
     return str(Path(claude_home_path()) / "projects" / slug / "memory")
 
-MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
+# No SUTANDO_MEMORY_DIR override here: that env var compensated for the
+# pre-#1454 bug described above (now fixed by #1564) and is unrelated to
+# this check's job of reporting on Claude Code's actual project-memory dir.
+# claude_home_path() never consults SUTANDO_MEMORY_DIR (that's util_paths.py
+# personal_path()'s per-machine asset root, a separate concern) — so
+# honoring a leftover value here just points this check at whatever stale
+# directory an old install used before #1564 landed, instead of the real,
+# actively-used memory dir.
+MEMORY_DIR = Path(_default_memory_dir())
 
 # ---------------------------------------------------------------------------
 # Checks
