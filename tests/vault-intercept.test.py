@@ -152,18 +152,28 @@ class TestSingleVaultSet(unittest.TestCase):
 
 class TestUnrecognizedValueFailsClosed(unittest.TestCase):
     """#2074: an unquoted value the FP guard doesn't recognize must not leak
-    to disk just because scan_secrets() missed it — only genuine prose
-    (a key that isn't a deliberate-looking identifier) should still pass
+    to disk just because scan_secrets() missed it — only genuine prose (a
+    key that fullmatches a single plain lowercase word) should still pass
     through untouched.
 
-    PR #2052 review (qingyun-wu, 2026-07-12): the first version of this fix
-    only recognized SCREAMING_SNAKE_CASE keys as "deliberate", so a real
-    secret under a lowercase/camelCase/PascalCase/dash-separated key still
-    leaked — same #2074 class, just a differently-cased key. The four
-    `test_*_key_variant_not_leaked` cases below are the reviewer's exact
-    repro (verified against PR head 996ae31 with scan_secrets() stubbed to
-    return [], matching real behavior when detect-secrets doesn't recognize
-    the value's shape)."""
+    PR #2052 review history — two rounds of the same underlying mistake
+    (enumerating "deliberate" characters instead of excluding the much
+    smaller "plain prose word" set):
+    - qingyun-wu round 1 (2026-07-12): only SCREAMING_SNAKE_CASE keys were
+      treated as deliberate, so lowercase/camelCase/PascalCase/dash-separated
+      keys still leaked (`test_*_key_variant_not_leaked` below).
+    - qingyun-wu round 2 (2026-07-12): the round-1 fix's regex (`[A-Z0-9_-]`)
+      didn't actually implement its own documented rule ("not a single
+      all-lowercase word") — lowercase keys with OTHER punctuation
+      (`apikey.vault`, `user:id`, ...) still slipped through as "prose" and
+      leaked (`test_*_punctuation_key_*` below). Fixed by inverting the
+      test: prose is now defined as "key fullmatches `[a-z]+`", everything
+      else fails closed — a closed exclusion instead of an open-ended
+      allowlist.
+
+    All cases verified against PR head 72c2e52 with scan_secrets() stubbed
+    to return [], matching real behavior when detect-secrets doesn't
+    recognize the value's shape."""
 
     def test_discord_client_secret_shaped_value_not_leaked(self):
         # Real repro from #2074: a 32-char mixed dash/underscore client
@@ -224,6 +234,44 @@ class TestUnrecognizedValueFailsClosed(unittest.TestCase):
         self.assertNotIn(value, result.text)
         self.assertEqual(result.stored, [])
         self.assertEqual(result.failed, ["some-key"])
+
+    def test_dotted_lowercase_key_not_leaked(self):
+        # qingyun-wu round 2 repro: an all-lowercase key with punctuation
+        # other than dash/underscore still looked like "prose" under the
+        # round-1 fix's [A-Z0-9_-] inclusion list.
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set apikey.vault {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["apikey.vault"])
+
+    def test_slash_separated_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set apikey/vault {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["apikey/vault"])
+
+    def test_colon_separated_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set user:id {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["user:id"])
+
+    def test_plus_separated_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set token+name {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["token+name"])
+
+    def test_at_prefixed_lowercase_key_not_leaked(self):
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set @token {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["@token"])
 
     def test_does_not_call_subprocess_when_unrecognized(self):
         # Fail-closed must mean "never even attempt to store" — no Keychain

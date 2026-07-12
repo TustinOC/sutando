@@ -99,8 +99,8 @@ def _read_manifest() -> dict:
 # Loose regex — finds candidate `vault set KEY VALUE` matches anywhere in
 # the text (including mid-prose). FP prevention is delegated to detect-secrets
 # (see _replacer): a candidate is only acted on if the VALUE is recognized as
-# a known secret pattern, OR the KEY looks deliberately vault-set-shaped (see
-# _LOOKS_LIKE_DELIBERATE_KEY below — added for #2074). This trades the regex
+# a known secret pattern, OR the KEY isn't a single plain lowercase word
+# (see _LOOKS_LIKE_PLAIN_LOWERCASE_WORD below — added for #2074). This trades the regex
 # line-anchor approach for pattern-based validation, eliminating both:
 #   - FP: "the vault set command works fine" → key="command" (not env-shaped),
 #     value="works" (not a secret) → skip, left as prose
@@ -120,28 +120,35 @@ _VAULT_SET_RE = re.compile(
 # #2074: an unquoted value the FP guard doesn't recognize isn't proof of
 # prose — it can be a real secret the classifier missed (a 32-char Discord
 # client secret, a pa-/al-prefixed API key, ...). Used as a second signal
-# alongside scan_secrets(): only fail closed (redact + report failed) when
-# the key ALSO looks like a deliberate identifier, so ordinary sentences that
-# happen to match the loose regex still pass through untouched.
+# alongside scan_secrets(): only treat the match as prose (leave it alone)
+# when the key is a single plain lowercase-ASCII word; fail closed (redact +
+# report failed) for every other key shape, so ordinary sentences that
+# happen to match the loose regex still pass through untouched while any
+# deliberately-named key gets the fail-closed treatment.
 #
-# "Deliberate identifier" = anything that isn't a single all-lowercase-ASCII
-# word — i.e. it contains a digit, an underscore, a dash, OR any uppercase
-# letter. This covers every naming convention a real vault-set key might use
-# (SCREAMING_SNAKE_CASE, lowercase_snake_case, camelCase, PascalCase,
-# dash-separated) while still excluding plain English words like "command"
-# or "thing" (from "the vault set command works fine" -> key="command",
-# value="works" -> neither looks like a secret nor a deliberate key -> left
-# as prose).
+# This is an EXCLUSION test, not an inclusion list: "prose" = the key
+# fullmatches `[a-z]+` and nothing else. Anything that isn't a single plain
+# lowercase word — digits, underscores, dashes, uppercase letters, or ANY
+# other punctuation (periods, slashes, colons, plus signs, @-signs, ...) —
+# counts as a deliberate key. Enumerating "deliberate" characters instead
+# (as the first version of this fix did) is an allowlist that will always
+# miss some real-world key shape; enumerating "prose" is a much smaller,
+# closed set (english words are just letters) so the exclusion is exhaustive
+# by construction.
 #
-# PR #2052 review (qingyun-wu, 2026-07-12): the original version of this
-# check only matched SCREAMING_SNAKE_CASE (`^[A-Z][A-Z0-9_]{1,}$`), so
-# `vault set pr_triage_activity_secret <value>`, `vault set
-# PrTriageActivitySecret <value>`, and `vault set SOME-KEY <value>` all still
-# leaked plaintext — same #2074 class, just with a differently-cased key.
-# Verified via repro: stub scan_secrets() to return [] and confirm each of
-# these four key shapes now redacts (see
-# tests/vault-intercept.test.py::TestUnrecognizedValueFailsClosed).
-_LOOKS_LIKE_DELIBERATE_KEY = re.compile(r"[A-Z0-9_-]")
+# PR #2052 review history:
+# - qingyun-wu (2026-07-12, round 1): the original version only matched
+#   SCREAMING_SNAKE_CASE (`^[A-Z][A-Z0-9_]{1,}$`), so `pr_triage_activity_secret`,
+#   `PrTriageActivitySecret`, and `SOME-KEY` all still leaked.
+# - qingyun-wu (2026-07-12, round 2): the round-1 fix's own docstring said
+#   "deliberate = anything that isn't a single all-lowercase word," but the
+#   regex (`[A-Z0-9_-]`, an inclusion list) didn't actually implement that —
+#   lowercase keys with OTHER punctuation (`apikey.vault`, `apikey/vault`,
+#   `user:id`, `token+name`, `@token`) still slipped through as "prose" and
+#   leaked. This version finally matches the documented rule exactly: prose
+#   is defined as the narrow case (plain lowercase word), everything else
+#   fails closed.
+_LOOKS_LIKE_PLAIN_LOWERCASE_WORD = re.compile(r"[a-z]+")
 
 
 class InterceptResult(NamedTuple):
@@ -228,8 +235,8 @@ def intercept_vault_commands(text: str) -> InterceptResult:
         # FP guard: validate the VALUE field is actually a known secret pattern
         # via detect-secrets. Genuine prose matches like "the vault set command
         # works fine" (key="command", value="works") are left alone — see the
-        # _LOOKS_LIKE_DELIBERATE_KEY check below for why "not a known secret"
-        # alone no longer means "assume prose" (#2074). Quoted values bypass the guard
+        # _LOOKS_LIKE_PLAIN_LOWERCASE_WORD check below for why "not a known
+        # secret" alone no longer means "assume prose" (#2074). Quoted values bypass the guard
         # entirely (user explicitly delimited the value).
         is_quoted = m.group(2) is not None or m.group(3) is not None or m.group(4) is not None
         if not is_quoted:
@@ -264,22 +271,23 @@ def intercept_vault_commands(text: str) -> InterceptResult:
                     f"or ask for the value.]"
                 )
             if not scan_secrets(value):
-                if not _LOOKS_LIKE_DELIBERATE_KEY.search(key):
-                    # Neither a recognized secret NOR a deliberate-looking key
-                    # (no digit/underscore/dash/uppercase anywhere) — this is
-                    # almost certainly prose ("the vault set command works
-                    # fine" → key="command"), not a real command. Leave it
-                    # alone; redacting it would mangle ordinary sentences.
-                    # NOTE: .search(), not .match() — the qualifying
-                    # character can be anywhere in the key (e.g. the
-                    # underscore in "pr_triage_activity_secret" isn't at
-                    # position 0), so an anchored match would silently miss
-                    # it and reopen the exact leak this check exists to close.
+                if _LOOKS_LIKE_PLAIN_LOWERCASE_WORD.fullmatch(key):
+                    # Key is nothing but a plain lowercase word (no digits,
+                    # underscores, dashes, uppercase, or other punctuation) —
+                    # this is almost certainly prose ("the vault set command
+                    # works fine" → key="command"), not a real command. Leave
+                    # it alone; redacting it would mangle ordinary sentences.
+                    # NOTE: this is a .fullmatch() exclusion test ("is the
+                    # WHOLE key just a lowercase word?"), not a .search() for
+                    # qualifying characters — the earlier version enumerated
+                    # "deliberate" characters (digit/underscore/dash/upper)
+                    # and missed lowercase-with-other-punctuation keys like
+                    # "apikey.vault" or "user:id", which still leaked.
                     return m.group(0)
-                # Key looks deliberate (SCREAMING_SNAKE_CASE, lowercase
-                # snake_case, camelCase, PascalCase, or dash-separated — see
-                # _LOOKS_LIKE_DELIBERATE_KEY's docstring) but the value wasn't
-                # recognized as a known secret shape. That's a classifier
+                # Key is NOT a plain lowercase word (SCREAMING_SNAKE_CASE,
+                # lowercase snake_case, camelCase, PascalCase, dash-separated,
+                # or any other punctuation-containing shape) but the value
+                # wasn't recognized as a known secret shape. That's a classifier
                 # miss, not proof of prose — issue #2074: a real Discord
                 # client secret and pa-/al-prefixed API keys both slipped
                 # through here as unrecognized-therefore-untouched, leaking
