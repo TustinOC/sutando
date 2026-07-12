@@ -78,6 +78,7 @@ _FULL_PATTERNS: dict[str, re.Pattern] = {
     "Bare UUID Token": re.compile(
         r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     ),
+    "Bare Hex Token": re.compile(r"[0-9a-fA-F]{32,}"),
 }
 
 
@@ -91,10 +92,19 @@ _FULL_PATTERNS: dict[str, re.Pattern] = {
 # ever firing on a UUID that's merely mentioned inside a longer message.
 # Found 2026-07-09: Bright Data's API tokens are bare UUIDv4, which fell
 # through the FP guard undetected and landed in plaintext on disk.
+# Generalized 2026-07-12 (reviewer sweep, #2052): the UUID-with-dashes shape
+# was only one instance of the broader "bare opaque token, no vendor prefix"
+# problem — a dash-less 32-hex token (some vendors ship UUIDs without
+# hyphens) or a raw hex digest (SHA-1/SHA-256-length API keys) is exactly as
+# opaque to detect-secrets and would fall through the same gap. "Bare Hex
+# Token" covers any 32+-char pure-hex whole-line value; it can't collide with
+# "Bare UUID Token" since the UUID shape contains dashes, which aren't in the
+# hex character class.
 _WHOLE_LINE_PATTERNS: dict[str, re.Pattern] = {
     "Bare UUID Token": re.compile(
         r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
     ),
+    "Bare Hex Token": re.compile(r"^[0-9a-fA-F]{32,}$"),
 }
 
 

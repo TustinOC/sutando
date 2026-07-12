@@ -58,6 +58,17 @@ class TestDetection(unittest.TestCase):
         # so a whole-string UUID match is the right scope.
         self._assert_type("38f5f5d6-fdd1-4dbd-a488-303f7b5510a0", "Bare UUID Token")
 
+    def test_bare_hex_token_no_dashes(self):
+        # Reviewer sweep (2026-07-12, #2052): the UUID-with-dashes fix was a
+        # band-aid — a dash-less 32-hex token (some vendors ship UUIDs
+        # without hyphens) is exactly as opaque and needs the same coverage.
+        self._assert_type("38f5f5d6fdd14dbda488303f7b5510a0", "Bare Hex Token")
+
+    def test_bare_hex_token_sha256_length(self):
+        # Generalizes beyond UUID length — a raw hex digest-shaped API key
+        # (e.g. 64-char SHA-256-length token) is the same class of gap.
+        self._assert_type("a" * 64, "Bare Hex Token")
+
 
 class TestNoFalsePositive(unittest.TestCase):
     def _assert_no_secret_hits(self, text):
@@ -67,6 +78,7 @@ class TestNoFalsePositive(unittest.TestCase):
         secret_types = {
             "AWS Access Key", "GitHub Token", "JSON Web Token",
             "Slack Token", "Private Key", "OpenAI Token", "Bare UUID Token",
+            "Bare Hex Token",
         }
         actual = [h.secret_type for h in hits if h.secret_type in secret_types]
         self.assertEqual(actual, [], f"Unexpected secret detection in prose: {actual}")
@@ -88,6 +100,17 @@ class TestNoFalsePositive(unittest.TestCase):
         self._assert_no_secret_hits(
             "ticket 38f5f5d6-fdd1-4dbd-a488-303f7b5510a0 was resolved yesterday"
         )
+
+    def test_hex_token_mentioned_in_prose_not_flagged(self):
+        # Same whole-line-only guarantee for the generalized hex pattern.
+        self._assert_no_secret_hits(
+            "commit 38f5f5d6fdd14dbda488303f7b5510a0 fixed the bug"
+        )
+
+    def test_short_hex_color_code_not_flagged(self):
+        # A 6-char hex color code (or any hex string under 32 chars) is not
+        # long enough to be an opaque token — must not be flagged.
+        self._assert_no_secret_hits("ff0000")
 
 
 class TestRedaction(unittest.TestCase):
@@ -132,6 +155,12 @@ class TestRedaction(unittest.TestCase):
         hits, redacted = scan_and_redact(token)
         self.assertNotIn(token, redacted)
         self.assertIn("[STORED-IN-KEYCHAIN-Bare UUID Token]", redacted)
+
+    def test_bare_hex_token_redaction(self):
+        token = "38f5f5d6fdd14dbda488303f7b5510a0"
+        hits, redacted = scan_and_redact(token)
+        self.assertNotIn(token, redacted)
+        self.assertIn("[STORED-IN-KEYCHAIN-Bare Hex Token]", redacted)
 
 
 class TestMultilineSecret(unittest.TestCase):
