@@ -150,6 +150,61 @@ class TestSingleVaultSet(unittest.TestCase):
         self.assertEqual(result.stored, ["APOLLO_KEY"])
 
 
+class TestUnrecognizedValueFailsClosed(unittest.TestCase):
+    """#2074: an unquoted value the FP guard doesn't recognize must not leak
+    to disk just because scan_secrets() missed it — only genuine prose
+    (non-env-shaped key) should still pass through untouched."""
+
+    def test_discord_client_secret_shaped_value_not_leaked(self):
+        # Real repro from #2074: a 32-char mixed dash/underscore client
+        # secret that scan_secrets() classifies as not-a-known-secret.
+        value = "a1b2c3d4e5f6_g7h8i9j0k1l2m3n4o5p6"
+        result = intercept_vault_commands(f"vault set PR_TRIAGE_ACTIVITY_SECRET {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["PR_TRIAGE_ACTIVITY_SECRET"])
+        self.assertIn("unrecognized value", result.text)
+        self.assertIn("resend quoted", result.text.lower())
+
+    def test_pa_prefixed_key_not_leaked(self):
+        value = "pa-1234567890abcdefghijklmnopqrstuvwx"
+        result = intercept_vault_commands(f"vault set SOME_API_KEY {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["SOME_API_KEY"])
+
+    def test_al_prefixed_key_not_leaked(self):
+        value = "al-1234567890abcdefghijklmnopqrstuvwx"
+        result = intercept_vault_commands(f"vault set SOME_API_KEY {value}")
+        self.assertNotIn(value, result.text)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, ["SOME_API_KEY"])
+
+    def test_does_not_call_subprocess_when_unrecognized(self):
+        # Fail-closed must mean "never even attempt to store" — no Keychain
+        # write for a value we couldn't validate.
+        with patch("vault_intercept.subprocess.run") as mock_run:
+            intercept_vault_commands("vault set SOME_API_KEY pa-1234567890abcdefghijklmnopqrstuvwx")
+            mock_run.assert_not_called()
+
+    def test_prose_with_non_env_shaped_key_still_unchanged(self):
+        # Regression guard for the original FP-skip behavior: ordinary
+        # sentences that happen to match the loose regex syntax (lowercase,
+        # non-conventional "key") must NOT be redacted just because the
+        # captured value isn't a known secret.
+        msg = "the vault set command works fine, thanks"
+        result = intercept_vault_commands(msg)
+        self.assertEqual(result.text, msg)
+        self.assertEqual(result.stored, [])
+        self.assertEqual(result.failed, [])
+
+    def test_lowercase_key_bare_word_value_unchanged(self):
+        msg = "vault set thing works"
+        result = intercept_vault_commands(msg)
+        self.assertEqual(result.text, msg)
+        self.assertEqual(result.failed, [])
+
+
 class TestMultipleVaultSets(unittest.TestCase):
     def test_two_commands(self):
         v1 = "sk-" + "a"*20 + "T3BlbkFJ" + "b"*20
@@ -284,9 +339,12 @@ class TestErrorHandling(unittest.TestCase):
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
+    # Explicit allowlist, not unittest.main() — a new TestCase class must be
+    # added here or it silently never runs (no error, just missing coverage).
     for cls in [
         TestNoVaultCommands,
         TestSingleVaultSet,
+        TestUnrecognizedValueFailsClosed,
         TestMultipleVaultSets,
         TestKeychainInteraction,
         TestRedactVaultCommands,

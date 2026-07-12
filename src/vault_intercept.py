@@ -99,9 +99,11 @@ def _read_manifest() -> dict:
 # Loose regex — finds candidate `vault set KEY VALUE` matches anywhere in
 # the text (including mid-prose). FP prevention is delegated to detect-secrets
 # (see _replacer): a candidate is only acted on if the VALUE is recognized as
-# a known secret pattern. This trades the regex line-anchor approach for
-# pattern-based validation, eliminating both:
-#   - FP: "the vault set command works fine" → "works" is not a secret → skip
+# a known secret pattern, OR the KEY looks deliberately vault-set-shaped (see
+# _LOOKS_LIKE_ENV_KEY below — added for #2074). This trades the regex
+# line-anchor approach for pattern-based validation, eliminating both:
+#   - FP: "the vault set command works fine" → key="command" (not env-shaped),
+#     value="works" (not a secret) → skip, left as prose
 #   - FN: "hey vault set APOLLO_KEY sk-..." mid-prose → "sk-..." is OpenAI → store
 # Key/value separator is whitespace OR `=` (with optional surrounding spaces),
 # so `vault set KEY VALUE`, `vault set KEY=VALUE`, and `vault set KEY = VALUE`
@@ -114,6 +116,17 @@ _VAULT_SET_RE = re.compile(
     r'\bvault\s+set\s+([^\s=]+)(?:\s*=\s*|\s+)(?:"([^"]*)"|\'([^\']*)\'|`([^`]*)`|(\S+))(?=\s|$|[.,!?;])',
     re.IGNORECASE,
 )
+
+# #2074: an unquoted value the FP guard doesn't recognize isn't proof of
+# prose — it can be a real secret the classifier missed (a 32-char Discord
+# client secret, a pa-/al-prefixed API key, ...). Every genuine vault-set key
+# in this codebase (GITHUB_TOKEN, OPENAI_API_KEY, PR_TRIAGE_ACTIVITY_SECRET,
+# ...) is SCREAMING_SNAKE_CASE; a prose capture like "command" (from "the
+# vault set command works fine") is not. Used as a second signal alongside
+# scan_secrets(): only fail closed (redact + report failed) when the key
+# ALSO looks deliberate, so ordinary sentences that happen to match the loose
+# regex still pass through untouched.
+_LOOKS_LIKE_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{1,}$")
 
 
 class InterceptResult(NamedTuple):
@@ -198,10 +211,11 @@ def intercept_vault_commands(text: str) -> InterceptResult:
             failed.append(key)
             return f"vault set {key} [VAULT-EMPTY-VALUE]"
         # FP guard: validate the VALUE field is actually a known secret pattern
-        # via detect-secrets. This filters out prose matches like
-        # "the vault set command works fine" where regex would otherwise capture
-        # key="command", value="works" — "works" is not a known secret → skip.
-        # Quoted values bypass the guard (user explicitly delimited the value).
+        # via detect-secrets. Genuine prose matches like "the vault set command
+        # works fine" (key="command", value="works") are left alone — see the
+        # _LOOKS_LIKE_ENV_KEY check below for why "not a known secret" alone no
+        # longer means "assume prose" (#2074). Quoted values bypass the guard
+        # entirely (user explicitly delimited the value).
         is_quoted = m.group(2) is not None or m.group(3) is not None or m.group(4) is not None
         if not is_quoted:
             try:
@@ -235,8 +249,29 @@ def intercept_vault_commands(text: str) -> InterceptResult:
                     f"or ask for the value.]"
                 )
             if not scan_secrets(value):
-                # Not a known secret pattern — assume this is prose, leave it alone.
-                return m.group(0)
+                if not _LOOKS_LIKE_ENV_KEY.match(key):
+                    # Neither a recognized secret NOR an env-var-shaped key —
+                    # this is almost certainly prose ("the vault set command
+                    # works fine" → key="command"), not a real command. Leave
+                    # it alone; redacting it would mangle ordinary sentences.
+                    return m.group(0)
+                # Key looks deliberate (SCREAMING_SNAKE_CASE, as every real
+                # vault-set key in this codebase is) but the value wasn't
+                # recognized as a known secret shape. That's a classifier
+                # miss, not proof of prose — issue #2074: a real Discord
+                # client secret and pa-/al-prefixed API keys both slipped
+                # through here as unrecognized-therefore-untouched, leaking
+                # plaintext to disk (same root cause #2052 hit for bare
+                # UUIDs, fixed by widening recognition — but recognition can
+                # never be exhaustive, so THIS branch must fail closed too).
+                # Never store an unvalidated value; redact and surface it so
+                # the owner can resend quoted (which bypasses the guard
+                # entirely) to store it for real.
+                failed.append(key)
+                return (
+                    f"vault set {key} [vault: unrecognized value — NOT stored. "
+                    f"Resend quoted (e.g. vault set {key} \"value\") to store it.]"
+                )
         try:
             _store_in_keychain(key, value)
             stored.append(key)
