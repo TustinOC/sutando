@@ -16,7 +16,9 @@ Run: python3 tests/health-check-memory-dir-override.test.py
 Exit: 0 on pass, 1 on fail.
 """
 from __future__ import annotations
+import contextlib
 import importlib.util
+import io
 import os
 import sys
 import unittest
@@ -58,6 +60,24 @@ class TestMemoryDirIgnoresStaleOverride(unittest.TestCase):
         expected = Path(hc._default_memory_dir())
         self.assertEqual(hc.MEMORY_DIR, expected)
         self.assertNotEqual(hc.MEMORY_DIR, Path("/tmp/some-stale-legacy-memory-dir"))
+
+    def test_stale_env_override_prints_deprecation_warning(self):
+        """Setting SUTANDO_MEMORY_DIR should still surface a stderr warning —
+        silently ignoring it would leave a user with the (unrelated)
+        util_paths.py use case set wondering why this check doesn't reflect
+        it. Matches the SUTANDO_WORKSPACE / SUTANDO_PRIVATE_DIR precedent."""
+        os.environ["SUTANDO_MEMORY_DIR"] = "/tmp/some-stale-legacy-memory-dir"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _load_health_check()
+        self.assertIn("DEPRECATION", stderr.getvalue())
+        self.assertIn("SUTANDO_MEMORY_DIR", stderr.getvalue())
+
+    def test_no_warning_when_env_unset(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            _load_health_check()
+        self.assertNotIn("DEPRECATION", stderr.getvalue())
 
 
 if __name__ == "__main__":

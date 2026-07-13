@@ -73,7 +73,20 @@ def _default_memory_dir() -> str:
 # personal_path()'s per-machine asset root, a separate concern) — so
 # honoring a leftover value here just points this check at whatever stale
 # directory an old install used before #1564 landed, instead of the real,
-# actively-used memory dir.
+# actively-used memory dir. Still detect + warn (matching the
+# SUTANDO_WORKSPACE / SUTANDO_PRIVATE_DIR precedent elsewhere in this repo):
+# a user with it set for personal_path()'s legitimate purpose should not
+# silently wonder why this specific check doesn't reflect it.
+if os.environ.get("SUTANDO_MEMORY_DIR"):
+    print(
+        "[health-check.py] DEPRECATION: SUTANDO_MEMORY_DIR is set but is no "
+        "longer honored by the memory-dir check (pre-#1454 workaround, fixed "
+        "by #1564) — this check always reports Claude Code's actual computed "
+        "project-memory dir now. SUTANDO_MEMORY_DIR still applies elsewhere "
+        "(util_paths.py personal_path()'s per-machine asset root) — that "
+        "usage is unaffected.",
+        file=sys.stderr,
+    )
 MEMORY_DIR = Path(_default_memory_dir())
 
 # ---------------------------------------------------------------------------
