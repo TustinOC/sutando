@@ -66,28 +66,18 @@ def _default_memory_dir() -> str:
     slug = str(repo).replace("/", "-")
     return str(Path(claude_home_path()) / "projects" / slug / "memory")
 
-# No SUTANDO_MEMORY_DIR override here: that env var compensated for the
-# pre-#1454 bug described above (now fixed by #1564) and is unrelated to
-# this check's job of reporting on Claude Code's actual project-memory dir.
-# claude_home_path() never consults SUTANDO_MEMORY_DIR (that's util_paths.py
-# personal_path()'s per-machine asset root, a separate concern) — so
-# honoring a leftover value here just points this check at whatever stale
-# directory an old install used before #1564 landed, instead of the real,
-# actively-used memory dir. Still detect + warn (matching the
-# SUTANDO_WORKSPACE / SUTANDO_PRIVATE_DIR precedent elsewhere in this repo):
-# a user with it set for personal_path()'s legitimate purpose should not
-# silently wonder why this specific check doesn't reflect it.
-if os.environ.get("SUTANDO_MEMORY_DIR"):
-    print(
-        "[health-check.py] DEPRECATION: SUTANDO_MEMORY_DIR is set but is no "
-        "longer honored by the memory-dir check (pre-#1454 workaround, fixed "
-        "by #1564) — this check always reports Claude Code's actual computed "
-        "project-memory dir now. SUTANDO_MEMORY_DIR still applies elsewhere "
-        "(util_paths.py personal_path()'s per-machine asset root) — that "
-        "usage is unaffected.",
-        file=sys.stderr,
-    )
-MEMORY_DIR = Path(_default_memory_dir())
+# SUTANDO_MEMORY_DIR stays authoritative here, same as everywhere else that
+# resolves core memory (src/voice-agent.ts, src/voice-context.ts, and
+# CLAUDE.md/AGENTS.md all honor it). An earlier version of this fix made
+# ONLY this check ignore the override, on the theory that it was purely a
+# stale pre-#1454 workaround (see _default_memory_dir()'s docstring) — but
+# that broke the invariant that this check reports on the SAME directory the
+# rest of the runtime actually reads/writes, which is a worse failure mode
+# than the one being fixed (a health check silently diverging from ground
+# truth). If SUTANDO_MEMORY_DIR is a genuine leftover from that era, the
+# memory-dir-override check below flags the divergence instead of silently
+# redirecting.
+MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
 
 # ---------------------------------------------------------------------------
 # Checks
@@ -169,6 +159,34 @@ def check_directory(path: Path, name: str) -> dict:
         return {"name": name, "status": "missing", "detail": str(path)}
     count = len(list(path.glob("*.md")))
     return {"name": name, "status": "ok", "detail": f"{count} .md files"}
+
+
+def check_memory_dir_override() -> "dict | None":
+    """Flag a SUTANDO_MEMORY_DIR that diverges from the computed default.
+
+    The var is authoritative for MEMORY_DIR (matching src/voice-agent.ts and
+    src/voice-context.ts, which also honor it) — so a genuine current use
+    keeps working consistently everywhere. But a leftover pre-#1454 value
+    would silently point every consumer at a stale directory instead of the
+    actively-synced one. Warn on divergence rather than silently redirecting
+    just this check, so the user can judge whether the override is still
+    intentional. Returns None when the var is unset or matches the default.
+    """
+    override = os.environ.get("SUTANDO_MEMORY_DIR")
+    if not override:
+        return None
+    default = Path(_default_memory_dir())
+    if Path(override).resolve() == default.resolve():
+        return None
+    return {
+        "name": "memory-dir-override",
+        "status": "warn",
+        "detail": (
+            f"SUTANDO_MEMORY_DIR={override} differs from the computed "
+            f"default ({default}) — verify this is still intentional, not "
+            "a stale pre-#1454 leftover"
+        ),
+    }
 
 
 def check_memory_sync() -> dict:
@@ -1112,6 +1130,10 @@ def run_all_checks() -> list[dict]:
         checks.append(check_directory(MEMORY_DIR, "memory-dir"))
     else:
         checks.append({"name": "memory-dir", "status": "ok", "detail": "not yet created (normal for new installs)"})
+
+    _mem_override = check_memory_dir_override()
+    if _mem_override:
+        checks.append(_mem_override)
 
     # Notes — canonical home is the resolved workspace post-migration.
     # Pass WORKSPACE_DIR (not REPO_DIR) so the check resolves to
