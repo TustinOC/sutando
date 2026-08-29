@@ -2531,6 +2531,9 @@ def _fetch_age_phrase(age_s) -> str:
     return f"a fetch {age_s // 3600}h{age_s % 3600 // 60}m ago"
 
 
+ONBOARDING_GATEWAY_FRESH_S = 300
+
+
 def check_onboarding_status() -> "dict | None":
     """Read the desktop checklist's agent surface (onboarding v2 spec,
     ag2space-cinny-desktop#165 S4).
@@ -2569,6 +2572,16 @@ def check_onboarding_status() -> "dict | None":
         stale_core = "core" in todo_keys and _down and _fresh_local_core_record() is not None
         if stale_core:
             todo_keys.remove("core")
+        # The mirror is write-on-change, so a Console that stopped leaves its last
+        # row asserting forever. Refute the gateway row the way core is refuted.
+        _gw = rows.get("gateway") if isinstance(rows.get("gateway"), dict) else {}
+        _gw_age_h = _gateway_last_ok_age_h()
+        stale_gateway = ("gateway" in todo_keys
+                         and "not connected" in str(_gw.get("detail") or "").lower()
+                         and _gw_age_h is not None
+                         and _gw_age_h * 3600.0 <= ONBOARDING_GATEWAY_FRESH_S)
+        if stale_gateway:
+            todo_keys.remove("gateway")
         todo = [f"{k} ({d})" if (d := str(rows[k].get("detail") or "").strip()[:120]) else k
                 for k in todo_keys]
         # Absent/null/0 updated_at is UNKNOWN, not the epoch — int(None or 0)
@@ -2577,14 +2590,18 @@ def check_onboarding_status() -> "dict | None":
         age_s = max(0, int(time.time()) - _updated) if _updated > 0 else None
     except (ValueError, OSError, TypeError):
         return {"name": name, "status": "warn", "detail": "onboarding-status.json unreadable"}
-    if stale_core:
+    if stale_core or stale_gateway:
         rest = f"; still todo: {', '.join(todo)}" if todo else ""
+        refuted = " and ".join(
+            x for x in (("its core row says 'not running' but this host's heartbeat is live"
+                         if stale_core else None),
+                        ("its gateway row says 'relay not connected' but the gateway sidecar "
+                         "polled OK moments ago" if stale_gateway else None)) if x)
         return {
             "name": name,
             "status": "warn",
-            "detail": (f"Console mirror is stale — its core row says 'not running' but this "
-                       f"host's heartbeat is live; mirror last written {_age_phrase(age_s)}"
-                       f"{rest}"),
+            "detail": (f"Console mirror is stale — {refuted}; mirror last written "
+                       f"{_age_phrase(age_s)}{rest}"),
         }
     if todo:
         return {
