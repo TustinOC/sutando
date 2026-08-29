@@ -34,6 +34,7 @@ CLASSIFIER_TASK_PREFIX = "task-workstream-grouping-"
 LEGACY_CLASSIFIER_TASK_PREFIX = "task-project-grouping-"
 MIN_CONFIDENCE = 0.65
 MAX_RESULT_CHARS = 4_000
+MAX_TASK_TEXT_CHARS = 4_000
 CONTEXT_MAX_TASKS = 5
 CONTEXT_TASK_CHARS = 500
 CONTEXT_RESULT_CHARS = 2_000
@@ -177,10 +178,22 @@ def load_workstream_store(workspace: Path) -> dict:
     }
 
 
+_TASK_BODY_STOP = re.compile(
+    r"^(?:={3,}.*={3,}$|(" + "|".join(local_task_protocol.KNOWN_HEADER_KEYS) + r"):)")
+
+
 def _task_text(content: str) -> str:
-    for line in content.splitlines():
+    # `task:` is mid-file for several producers, so the body ends at the next
+    # known header key as well as at the bridge's `===` block.
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
         if line.startswith("task:"):
-            return line[5:].strip()
+            body = [line[5:]]
+            for rest in lines[i + 1:]:
+                if _TASK_BODY_STOP.match(rest):
+                    break
+                body.append(rest)
+            return "\n".join(body).strip()[:MAX_TASK_TEXT_CHARS]
     return ""
 
 
