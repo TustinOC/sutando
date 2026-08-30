@@ -2576,6 +2576,8 @@ def check_onboarding_status() -> "dict | None":
         # row asserting forever. Refute the gateway row the way core is refuted.
         _gw = rows.get("gateway") if isinstance(rows.get("gateway"), dict) else {}
         _gw_age_h = _gateway_last_ok_age_h()
+        # `detail` is written by the desktop Console, not this repo: reword
+        # "not connected" there and this refutation silently stops firing.
         stale_gateway = ("gateway" in todo_keys
                          and "not connected" in str(_gw.get("detail") or "").lower()
                          and _gw_age_h is not None
