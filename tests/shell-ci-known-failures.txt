@@ -5,11 +5,9 @@
 # still fail CI immediately.
 #
 # Burn this list to zero: https://github.com/sonichi/sutando/issues/1934
-# qingyun-wu volunteered to fix cron-gate.test.sh and track the portability work.
-tests/codex-bounded.test.sh
-tests/cron-gate.test.sh
-tests/migration-safety-helpers.test.sh
-tests/startup-env-token-persist.test.sh
-tests/startup-self-log-tmp.test.sh
+#
+# An entry whose suite PASSES fails CI — see the "stale allowlist entry" branch
+# in .github/workflows/ci.yml. Suppression that outlives its failure un-gates a
+# suite nobody thinks is un-gated, so the list has to expire on its own.
 tests/sutando-migrate.test.sh
 tests/sync-workspace.test.sh
