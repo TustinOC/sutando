@@ -510,9 +510,8 @@ def zero_reason():
     if file_total == 0:
         return "0 pending questions — the file holds no sections or bullets at all"
 
-    # An empty active region means a mis-anchored divider OR every question
-    # resolved. Unrecognised below the divider stays a fault: the stranded-live
-    # entries this guards against carry no status field either.
+    # Empty active region: mis-anchored divider OR all resolved. Unrecognised
+    # stays a fault — stranded-live entries carry no status field either.
     if act_total == 0:
         archived = text[len(active_text):]
         unmarked = [
