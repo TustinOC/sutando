@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import re
 import sys
 import tempfile
 import threading
@@ -167,6 +168,25 @@ def test_task_text_stops_at_headers_that_follow_the_task_line() -> None:
     for leaked in ("source:", "channel_id:", "room_members:", "ag2.space"):
         assert leaked not in text, (leaked, text)
 
+
+
+def test_header_stop_pattern_escapes_key_metacharacters() -> None:
+    """A key holding a regex metacharacter must stop the body literally.
+
+    No shipped key contains one today, so this pins a construction property
+    rather than repairing a reachable defect.
+    """
+    hazard = re.compile(r"^(?:={3,}.*={3,}$|(" + "|".join(["a.c"]) + r"):)")
+    assert hazard.match("abc: x"), "unescaped '.' matches any char - the hazard"
+
+    safe = workstreams._header_stop_pattern(["a.c"])
+    assert safe.match("a.c: x"), "the literal key must still stop the body"
+    assert not safe.match("abc: x"), "'.' must not match an arbitrary character"
+
+    ordinary = workstreams._header_stop_pattern(["source", "user_id"])
+    assert ordinary.match("source: slack")
+    assert not ordinary.match("  user_id: x")
+    assert not ordinary.match("see user_id: x")
 
 def test_apply_is_validated_stable_sticky_and_fail_open() -> None:
     workspace = fixture_workspace()
@@ -930,6 +950,7 @@ def main() -> None:
         test_loader_parser_and_history_fail_open_edges,
         test_task_text_keeps_the_whole_body_not_just_its_first_line,
         test_task_text_stops_at_headers_that_follow_the_task_line,
+        test_header_stop_pattern_escapes_key_metacharacters,
         test_apply_is_validated_stable_sticky_and_fail_open,
         test_legacy_project_sidecar_migrates_on_the_next_write,
         test_classifier_enqueue_is_idle_gated_deduped_and_non_mutating,

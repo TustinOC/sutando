@@ -178,8 +178,16 @@ def load_workstream_store(workspace: Path) -> dict:
     }
 
 
-_TASK_BODY_STOP = re.compile(
-    r"^(?:={3,}.*={3,}$|(" + "|".join(local_task_protocol.KNOWN_HEADER_KEYS) + r"):)")
+def _header_stop_pattern(keys) -> "re.Pattern[str]":
+    # Keys are interpolated into a regex, so a future key holding a metacharacter
+    # would silently widen the stop set. Escaping makes that impossible.
+    return re.compile(
+        r"^(?:={3,}.*={3,}$|("
+        + "|".join(re.escape(k) for k in keys)
+        + r"):)")
+
+
+_TASK_BODY_STOP = _header_stop_pattern(local_task_protocol.KNOWN_HEADER_KEYS)
 
 
 def _task_text(content: str) -> str:
