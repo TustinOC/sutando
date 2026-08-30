@@ -41,9 +41,12 @@ cd "$REPO_ROOT"
 
 mode="${1:-all}"
 
-# Pattern: matches both `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` and the rare
-# inverted ordering. Excludes SOURCE_CLAUDE_CONFIG_DIR (different concept).
-PATTERN_INLINE='\$\{CLAUDE_CONFIG_DIR:-\$HOME/\.claude\}'
+# Pattern: any CLAUDE_CONFIG_DIR default chain that ends in a `.claude`
+# literal, so a nested `${CLAUDE_CONFIG_DIR:-${CLAUDE_HOME:-$HOME/.claude}}`
+# is caught as well as the flat form. `[^}]*` stops before the first `}`, so
+# the bare emptiness idiom `${CLAUDE_CONFIG_DIR:-}` is NOT matched, and the
+# leading `${` anchor excludes SOURCE_CLAUDE_CONFIG_DIR (different concept).
+PATTERN_INLINE='\$\{CLAUDE_CONFIG_DIR:-[^}]*\.claude'
 
 # Allowed files — may reference the anti-pattern in comments / docstrings.
 ALLOWED='^(scripts/sutando-config\.sh|src/startup\.sh|scripts/lint-claude-home-path\.sh|tests/[^/]+\.(test\.)?sh)$'
