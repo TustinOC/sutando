@@ -58,6 +58,33 @@ class OnboardingStatusCheckTest(unittest.TestCase):
         self.assertIn("Console mirror is stale", r["detail"])
         self.assertNotIn("user-facing setup incomplete", r["detail"])
 
+    def test_unrecognised_gateway_detail_is_flagged_not_passed_on_as_fact(self):
+        """A reworded Console detail must announce itself, not silently stop matching."""
+        import time
+        ws = self._with_workspace({
+            "updated_at": int(time.time()) - 3600,
+            "rows": {"gateway": {"state": "todo",
+                                 "detail": "relay link is down"}},   # NOT "not connected"
+        })
+        self._gateway_sidecar(ws, age_s=5)
+        r = hc.check_onboarding_status()
+        self.assertEqual(r["status"], "warn")
+        # The row still shows (we cannot prove it wrong), but never as bare fact.
+        self.assertIn("relay link is down", r["detail"])
+        self.assertIn("not one this check recognises", r["detail"])
+
+    def test_unrecognised_gateway_detail_is_silent_when_the_relay_is_not_live(self):
+        """No local evidence, no disagreement — the row stands plainly."""
+        import time
+        ws = self._with_workspace({
+            "updated_at": int(time.time()) - 3600,
+            "rows": {"gateway": {"state": "todo", "detail": "relay link is down"}},
+        })
+        self._gateway_sidecar(ws, age_s=4000)
+        r = hc.check_onboarding_status()
+        self.assertEqual(r["status"], "warn")
+        self.assertNotIn("not one this check recognises", r["detail"])
+
     def test_gateway_row_stands_when_the_sidecar_is_also_stale(self):
         import time
         ws = self._with_workspace({
