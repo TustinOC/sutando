@@ -91,6 +91,23 @@ check("missing file is described as missing", "no file at" in missing)
 #     therefore printed "every one is explicitly resolved/answered" — a
 #     trusted-looking zero in precisely the shape this function exists to flag.
 #     The denominator must cover the same populations the numerator counts.
+# --- A FULLY RESOLVED FILE IS NOT A FAULT: the success state was unreachable in
+#     the message logic, so a host at zero got a permanent false alarm.
+ALL_RESOLVED_MARKER = "# Resolved\n\n## [RESOLVED] ship it?\n\nyes\n\n## [RESOLVED] archive?\n\ndone\n"
+ALL_RESOLVED_STATUS = "# Resolved\n\n## ship it?\n\n**Status:** resolved\n\n## archive?\n\n**Status:** done\n"
+ONE_UNMARKED = "# Resolved\n\n## [RESOLVED] ship it?\n\nyes\n\n## what is the address?\n\nneed this\n"
+
+done_marker = reason_for("done_marker", ALL_RESOLVED_MARKER)
+done_status = reason_for("done_status", ALL_RESOLVED_STATUS)
+one_unmarked = reason_for("one_unmarked", ONE_UNMARKED)
+
+check("an all-[RESOLVED] archive is NOT called a parse fault", "parse fault" not in done_marker)
+check("an all-[RESOLVED] archive is called affirmative", "affirmative" in done_marker)
+check("a **Status:** resolved archive is NOT called a parse fault", "parse fault" not in done_status)
+check("one unmarked entry below the divider STILL names the fault", "parse fault" in one_unmarked)
+check("the fault names the offending entry so it is actionable",
+      "what is the address?" in one_unmarked)
+
 BULLET_ONLY_FAULT = "# Resolved\n\n- **[OPEN-ALPHA, 2026-07-30]** still waiting\n"
 MIXED_FAULT = "# Resolved\n\n## Q1\n\nprose\n\n- **[OPEN-BETA, 2026-07-30]** waiting\n"
 

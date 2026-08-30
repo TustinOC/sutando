@@ -109,6 +109,22 @@ _INLINE_RESOLVED = re.compile(
 )
 
 
+def _section_is_waiting(title: str, body: str) -> bool:
+    """The one place a `## ` section is judged live or not.
+
+    `zero_reason()` must apply the SAME rule below the divider that this applies
+    above it, or the two disagree about what an archived entry means.
+    """
+    if _ORG_HEADING.match(title) or _INLINE_RESOLVED.match(title):
+        return False
+    status_m = re.search(r'\*\*Status:\*\*\s*(.+)', body)
+    if status_m:
+        return status_m.group(1).strip().lower().startswith(
+            ('unanswered', 'waiting', 'open'))
+    # No status field: free-form prose sections are unanswered by convention.
+    return True
+
+
 def get_waiting_questions():
     """Parse pending-questions.md — matches the legacy `## Q1 — Title` and
     `## Title` / `- **Status:** unanswered` section formats AND the free-form
@@ -140,17 +156,10 @@ def get_waiting_questions():
         title = title_line.strip()
         if not title:
             continue
-        if _ORG_HEADING.match(title) or _INLINE_RESOLVED.match(title):
+        # `open` is the word writers naturally reach for, and it used to fall
+        # through to the resolved skip — filing a live question as resolved.
+        if not _section_is_waiting(title, body):
             continue
-        status_m = re.search(r'\*\*Status:\*\*\s*(.+)', body)
-        if status_m:
-            status = status_m.group(1).strip().lower()
-            # `open` is the word writers naturally reach for, and it used to
-            # fall through to the skip below — filing a live question as though
-            # it were resolved. The section stayed on disk and readable while
-            # never being surfaced, which is the worst failure mode here.
-            if not status.startswith(('unanswered', 'waiting', 'open')):
-                continue  # explicitly resolved/done/answered — skip
         # No status field, or status is unanswered/waiting/open → notify.
         # Capture first non-empty, non-strikethrough, non-status-metadata body
         # line as a one-line action hint so notifications tell the user what
@@ -501,14 +510,36 @@ def zero_reason():
     if file_total == 0:
         return "0 pending questions — the file holds no sections or bullets at all"
 
-    # Suspicious shape: the file has entries, the ACTIVE region has none. Fires for
-    # sections, bullets, or any mix — the population that vanished does not matter.
+    # An empty active region means a mis-anchored divider OR every question
+    # resolved. Ask the archive which, rather than assuming the alarming one.
     if act_total == 0:
+        archived = text[len(active_text):]
+        unmarked = [
+            title.strip()
+            for sec in re.split(r'^## ', archived, flags=re.MULTILINE)[1:]
+            for title, _, body in [sec.partition('\n')]
+            if title.strip() and _section_is_waiting(title.strip(), body)
+        ]
+        # Bullets are half the numerator, so an archive scan that walked sections
+        # alone would call a bullet-only fault affirmative — the same blind spot.
+        unmarked += [
+            m.group(1).strip()
+            for m in re.finditer(BULLET_RE + r'(.+?)\]', archived, flags=re.MULTILINE)
+            if not _INLINE_RESOLVED.match("[" + m.group(1).strip() + "]")
+        ]
+        if not unmarked:
+            return (
+                f"0 pending questions — the active region is empty and all "
+                f"{_describe(file_secs, file_bullets)} below the archive "
+                f"divider are explicitly resolved. This zero is affirmative."
+            )
         return (
             f"0 pending questions, but {PQ_FILE.name} holds {_describe(file_secs, file_bullets)} "
-            f"and NONE are in the active region (above the archive divider). "
-            f"That is the shape of a parse fault, not a quiet day — check the "
-            f"'# Resolved' divider before trusting this zero."
+            f"and NONE are in the active region (above the archive divider) — "
+            f"while {len(unmarked)} entr(ies) BELOW it carry no resolution "
+            f"marker, the first being {unmarked[0][:60]!r}. That is the shape "
+            f"of a parse fault, not a quiet day — check the '# Resolved' "
+            f"divider before trusting this zero."
         )
 
     return (
