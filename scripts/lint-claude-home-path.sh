@@ -6,8 +6,8 @@
 #   $(bash scripts/sutando-config.sh claude-home-path [subpath...])
 #
 # instead of an inline `${CLAUDE_CONFIG_DIR:-…}` default that resolves the home
-# itself. `$HOME/.claude`, `~/.claude` and `$HOME/.claude-sutando` are all the
-# same defect: whatever the fallback, the banner never fires.
+# itself. `$HOME/.claude`, its tilde spelling and `$HOME/.claude-sutando` are
+# all the same defect: whatever the fallback, the banner never fires.
 # Two reasons:
 #
 #   1. The helper centralizes the resolution order ($CLAUDE_CONFIG_DIR →
@@ -92,9 +92,9 @@ if [[ "$found" -eq 1 ]]; then
   cat >&2 <<'EOF'
 
 ERROR: One or more files resolve the Claude home with an inline
-`${CLAUDE_CONFIG_DIR:-…}` default. Any fallback counts — `$HOME/.claude`,
-`~/.claude`, a nested `${CLAUDE_HOME:-…}`, `.claude-sutando`: each one bypasses
-the M0 helper and the #1534 deprecation banner.
+`${CLAUDE_CONFIG_DIR:-…}` default. Any fallback counts — `$HOME/.claude`, its
+tilde spelling, a nested `${CLAUDE_HOME:-…}`, or `.claude-sutando`: each one
+bypasses the M0 helper and the #1534 deprecation banner.
 
 Fix: replace each occurrence with the helper. Examples:
 
