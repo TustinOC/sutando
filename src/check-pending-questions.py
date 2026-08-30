@@ -511,7 +511,8 @@ def zero_reason():
         return "0 pending questions — the file holds no sections or bullets at all"
 
     # An empty active region means a mis-anchored divider OR every question
-    # resolved. Ask the archive which, rather than assuming the alarming one.
+    # resolved. Unrecognised below the divider stays a fault: the stranded-live
+    # entries this guards against carry no status field either.
     if act_total == 0:
         archived = text[len(active_text):]
         unmarked = [
@@ -536,10 +537,11 @@ def zero_reason():
         return (
             f"0 pending questions, but {PQ_FILE.name} holds {_describe(file_secs, file_bullets)} "
             f"and NONE are in the active region (above the archive divider) — "
-            f"while {len(unmarked)} entr(ies) BELOW it carry no resolution "
-            f"marker, the first being {unmarked[0][:60]!r}. That is the shape "
-            f"of a parse fault, not a quiet day — check the '# Resolved' "
-            f"divider before trusting this zero."
+            f"while {len(unmarked)} entr(ies) BELOW it carry no marker this "
+            f"check RECOGNISES (they may be resolved in prose), the first "
+            f"being {unmarked[0][:60]!r}. That is the shape of a parse fault, "
+            f"not a quiet day — check the '# Resolved' divider before trusting "
+            f"this zero."
         )
 
     return (
