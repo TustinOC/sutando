@@ -41,6 +41,7 @@ echo "lint-claude-home-nested-fallback:"
 probe "flat form"            flag  'B="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels"'
 probe "nested CLAUDE_HOME"   flag  'B="${CLAUDE_CONFIG_DIR:-${CLAUDE_HOME:-$HOME/.claude}}"'
 probe "tilde fallback"       flag  'B="${CLAUDE_CONFIG_DIR:-~/.claude}"'
+probe "non-.claude fallback" flag  'B="${CLAUDE_CONFIG_DIR:-$HOME/.claude-sutando}"'
 probe "emptiness idiom"      clean 'if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then :; fi'
 probe "SOURCE_ variant"      clean 'S="${SOURCE_CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels"'
 probe "helper call"          clean 'B="$(bash "$REPO/scripts/sutando-config.sh" claude-home-path)"'
