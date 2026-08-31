@@ -105,10 +105,8 @@ trap 'rm -rf "$RECDIR"' EXIT
 
 # `timeout` is coreutils and absent on stock macOS, where this also runs by
 # hand; degrade to no cap rather than failing the local path.
-COVGATE_TIMEOUT=""
-if command -v timeout >/dev/null 2>&1; then
-    COVGATE_TIMEOUT="timeout -k 5 ${COVERAGE_GATE_FILE_TIMEOUT:-120}"
-else
+COVGATE_TIMEOUT="bash $(dirname "$0")/coverage-file-timeout.sh"
+if ! command -v timeout >/dev/null 2>&1; then
     echo "coverage-gate: no \`timeout\` binary — per-file cap disabled (local run)." >&2
 fi
 export RECDIR COVGATE_TIMEOUT
@@ -133,7 +131,8 @@ while IFS= read -r f; do
     output="$(cat "$rec.out" 2>/dev/null || true)"
     if [ "$rc" -ne 0 ]; then
         if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-            echo "✖ test TIMED OUT under instrumentation (>${COVERAGE_GATE_FILE_TIMEOUT:-120}s): $f"
+            _cap="$(bash "$(dirname "$0")/coverage-file-timeout.sh" --print "$f")"
+            echo "✖ test TIMED OUT under instrumentation (>${_cap}s): $f"
         else
             echo "✖ test failed under instrumentation: $f"
         fi

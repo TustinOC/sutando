@@ -1,3 +1,5 @@
+# coverage-gate: timeout=300
+# 36 rounds of 12-way process concurrency: ~1s bare, >120s under `coverage run`.
 import json
 import multiprocessing as mp
 import os
