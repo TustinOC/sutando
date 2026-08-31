@@ -108,6 +108,45 @@ check("mixed sections+bullets with a lost active region is a parse fault",
 check("mixed fault reports BOTH populations",
       "'## ' section(s)" in mixed_fault and "bullet entr(ies)" in mixed_fault)
 
+# --- A CLEARED FILE IS NOT A FAULT. Live host: 55 archived, 0 open, called
+#     "the shape of a parse fault" on every run.
+CLEARED_INLINE = ("# Open\n\n\n# Resolved\n\n"
+                  "## [RESOLVED 2026-08-29] shipped\n\nprose\n\n"
+                  "## [DONE] answered by the owner\n\nprose\n")
+CLEARED_STATUS = ("# Open\n\n\n# Resolved\n\n"
+                  "## Q1\n\n**Status:** resolved\n\n"
+                  "## Q2\n\n**Status:** answered\n")
+STRANDED = ("# Open\n\n\n# Resolved\n\n"
+            "## [RESOLVED 2026-08-29] shipped\n\nprose\n\n"
+            "## Should the digest include Q3 numbers?\n\nfree-form, never answered\n")
+
+cleared_inline = reason_for("cleared_inline", CLEARED_INLINE)
+cleared_status = reason_for("cleared_status", CLEARED_STATUS)
+stranded = reason_for("stranded", STRANDED)
+
+check("a fully archived file is NOT called a parse fault (inline markers)",
+      "parse fault" not in cleared_inline)
+check("a fully archived file is NOT called a parse fault (status fields)",
+      "parse fault" not in cleared_status)
+check("the all-clear says the archive is what holds the entries",
+      "below the archive divider" in cleared_inline)
+check("the all-clear still carries the denominator",
+      "2 '## ' section(s)" in cleared_inline)
+
+# The control that keeps the branch above honest: one genuinely-unanswered entry
+# in the same archive must still raise the fault, or the fix is just silencing.
+check("one unanswered entry in the archive still raises the fault",
+      "parse fault" in stranded)
+check("the fault NAMES the stranded entry rather than saying 'check the divider'",
+      "Should the digest include Q3 numbers?" in stranded)
+check("the fault counts only the stranded entries, not the whole archive",
+      "1 of them still read as unanswered" in stranded)
+# Split defensively: this file must still RUN against a pre-fix src, or the
+# does-it-fail-without-the-fix control dies before it can report FAILs.
+_named = stranded.partition("still read as unanswered:")[2]
+check("a resolved neighbour is not reported as stranded",
+      bool(_named) and "shipped" not in _named)
+
 # --- CONTROL: the message must DISCRIMINATE. A diagnostic that says the same thing
 #     in both cases is decoration, not a signal.
 check("fault and quiet-day messages differ", fault != quiet)

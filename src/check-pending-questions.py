@@ -109,6 +109,26 @@ _INLINE_RESOLVED = re.compile(
 )
 
 
+def section_is_waiting(title: str, body: str) -> bool:
+    """One rule for "this entry still wants an answer", used on BOTH regions.
+
+    `zero_reason()` asks it about the archive; a second rule there would let one
+    entry read as resolved in one region and open in the other.
+
+    `open` is the word writers naturally reach for, and it used to fall through
+    to the resolved skip — filing a live question as though it were answered.
+    The section stayed on disk and readable while never being surfaced, which is
+    the worst failure mode here.
+    """
+    if not title or _ORG_HEADING.match(title) or _INLINE_RESOLVED.match(title):
+        return False
+    status_m = re.search(r'\*\*Status:\*\*\s*(.+)', body)
+    if status_m:
+        return status_m.group(1).strip().lower().startswith(
+            ('unanswered', 'waiting', 'open'))
+    return True  # no status field: free-form prose is unanswered by convention
+
+
 def get_waiting_questions():
     """Parse pending-questions.md — matches the legacy `## Q1 — Title` and
     `## Title` / `- **Status:** unanswered` section formats AND the free-form
@@ -140,18 +160,8 @@ def get_waiting_questions():
         title = title_line.strip()
         if not title:
             continue
-        if _ORG_HEADING.match(title) or _INLINE_RESOLVED.match(title):
+        if not section_is_waiting(title, body):
             continue
-        status_m = re.search(r'\*\*Status:\*\*\s*(.+)', body)
-        if status_m:
-            status = status_m.group(1).strip().lower()
-            # `open` is the word writers naturally reach for, and it used to
-            # fall through to the skip below — filing a live question as though
-            # it were resolved. The section stayed on disk and readable while
-            # never being surfaced, which is the worst failure mode here.
-            if not status.startswith(('unanswered', 'waiting', 'open')):
-                continue  # explicitly resolved/done/answered — skip
-        # No status field, or status is unanswered/waiting/open → notify.
         # Capture first non-empty, non-strikethrough, non-status-metadata body
         # line as a one-line action hint so notifications tell the user what
         # to do, not just that something is waiting (avoids "what do I do
@@ -450,6 +460,28 @@ def deliver(questions, count, titles):
     return summary
 
 
+def _stranded_below_divider(text: str, active_text: str) -> list:
+    """Titles below the archive divider that still read as unanswered.
+
+    Empty is the answer for a file that was simply cleared; non-empty is the
+    2026-07-30 shape, where a divider-anchor bug swept live questions into the
+    audit trail. Returning the titles is the point — "check the divider" left
+    the reader to find them by hand.
+    """
+    archive = text[len(active_text):] if text.startswith(active_text) else ""
+    if not archive:
+        return []
+    stranded = []
+    for sec in re.split(r'^## ', archive, flags=re.MULTILINE)[1:]:
+        title_line, _, body = sec.partition('\n')
+        title = title_line.strip()
+        if section_is_waiting(title, body):
+            stranded.append(title[:60])
+    for m in re.finditer(r'^\s*-\s+\*\*\[(.+?)\]', archive, flags=re.MULTILINE):
+        stranded.append(m.group(1).strip()[:60])
+    return stranded
+
+
 def zero_reason():
     """Explain a zero so a parse fault cannot look like a quiet day.
 
@@ -501,12 +533,22 @@ def zero_reason():
     if file_total == 0:
         return "0 pending questions — the file holds no sections or bullets at all"
 
-    # Suspicious shape: the file has entries, the ACTIVE region has none. Fires for
-    # sections, bullets, or any mix — the population that vanished does not matter.
+    # An empty active region is the parse-fault shape AND, permanently, a fully
+    # answered file. Ask the archive rather than assert; bullets carry no marker.
     if act_total == 0:
+        stranded = _stranded_below_divider(text, active_text)
+        if not stranded:
+            return (
+                f"0 pending questions — the active region is empty and all "
+                f"{_describe(file_secs, file_bullets)} sit below the archive "
+                f"divider, every one explicitly resolved/answered"
+            )
+        shown = "; ".join(stranded[:3])
+        more = f" (+{len(stranded) - 3} more)" if len(stranded) > 3 else ""
         return (
             f"0 pending questions, but {PQ_FILE.name} holds {_describe(file_secs, file_bullets)} "
-            f"and NONE are in the active region (above the archive divider). "
+            f"and NONE are in the active region (above the archive divider) — "
+            f"{len(stranded)} of them still read as unanswered: {shown}{more}. "
             f"That is the shape of a parse fault, not a quiet day — check the "
             f"'# Resolved' divider before trusting this zero."
         )
