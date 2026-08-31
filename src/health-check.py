@@ -5902,7 +5902,7 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
     identical to one produced by a working schedule."""
     name = "daily-cron-punctuality"
     late, missed, unknown, drifted, quiet = [], [], [], [], []
-    unconsumed = []
+    unconsumed, trailing = [], []
     for j in jobs:
         due = j["hour"] * 60 + j["minute"]
         if not j["artifacts"]:
@@ -5920,8 +5920,17 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
         # -1417 early. The filename date is logical, often a day off the mtime.
         deltas = sorted(((w - due + 720) % 1440) - 720 for _, w in j["artifacts"])
         median = statistics.median(deltas)
-        if median > DAILY_LATE_TOLERANCE_MIN:
-            late.append((j["name"], median, len(deltas)))
+        # Artifact mtimes date COMPLETION. Where the schedule's own dispatch
+        # record exists, it answers punctuality and the output time does not.
+        disp = [((w - due + 720) % 1440) - 720 for _, w in (j.get("dispatch_history") or [])]
+        if disp:
+            d_median = statistics.median(sorted(disp))
+            if d_median > DAILY_LATE_TOLERANCE_MIN:
+                late.append((j["name"], d_median, len(disp), "dispatch"))
+            elif median > DAILY_LATE_TOLERANCE_MIN:
+                trailing.append((j["name"], median, d_median, len(deltas)))
+        elif median > DAILY_LATE_TOLERANCE_MIN:
+            late.append((j["name"], median, len(deltas), "output"))
         if (not j["today_seen"] and j["minutes_since_due"] > DAILY_MISS_GRACE_MIN
                 and not j.get("conditional")
                 and (j.get("stem_declared") or j["artifacts"])):
@@ -5934,6 +5943,10 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
         seen = len(jobs) - len(unknown) - len(quiet)
         detail = f"{seen} of {len(jobs)} daily job(s) observable"
         detail += ", all on schedule" if seen else ""
+        for n, m, dm, c in sorted(trailing):
+            detail += (f"; {n} dispatches on time (median {dm:+g} min) and its output "
+                       f"trails by median {m:+g} min over {c} run(s) — pickup and "
+                       f"execution latency, not the schedule")
         if quiet:
             detail += (f"; conditional, nothing produced to score: "
                        f"{', '.join(sorted(quiet))}")
@@ -5947,9 +5960,14 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
             return {"name": name, "status": "warn", "detail": f"{detail} — {scope}"}
         return {"name": name, "status": "ok", "detail": detail}
     bits = []
-    for n, m, c in late:
-        bits.append(f"{n}: {c} run(s), median +{m} min late — the schedule is not what "
-                    f"produced these; something else is covering for it")
+    for n, m, c, src in late:
+        if src == "dispatch":
+            bits.append(f"{n}: {c} run(s), median +{m} min late at DISPATCH — the "
+                        f"schedule itself is running late")
+        else:
+            bits.append(f"{n}: {c} run(s), median +{m} min late, measured from output "
+                        f"— no dispatch record retained for this job, so a late "
+                        f"schedule and a slow pickup cannot be told apart here")
     for n, m in missed:
         bits.append(f"{n}: no output today, {m} min past due, and no task was "
                     f"dispatched — the schedule itself did not fire")
@@ -5963,6 +5981,9 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
                     f"probe's filename match has drifted off this job's output; "
                     f"punctuality cannot be scored and a missed-today verdict would "
                     f"blame the job for the probe's own blind spot")
+    for n, m, dm, c in sorted(trailing):
+        bits.append(f"{n}: dispatches on time (median {dm:+g} min); output trails by "
+                    f"median {m:+g} min over {c} run(s) — latency, not the schedule")
     if quiet:
         bits.append(f"conditional, nothing produced to score: {', '.join(sorted(quiet))}")
     if unknown:
@@ -6141,6 +6162,7 @@ def check_daily_cron_punctuality() -> dict:
             used_artifact_lane = False
         # Staleness is computed HERE because `now` lives here; the interpret layer
         # reads it as an optional field so its fixtures stay clock-independent.
+        dispatched = _daily_dispatch_minutes(ws / "tasks", jname)
         newest = max((d for d, _ in arts), default=None)
         age_days = None
         if newest:
@@ -6154,11 +6176,11 @@ def check_daily_cron_punctuality() -> dict:
             "naming_stale": age_days is not None and age_days > DAILY_ARTIFACT_STALE_DAYS,
             "today_seen": any(d == now.strftime("%Y-%m-%d") for d, _ in arts),
             "minutes_since_due": max(0, int((now - due).total_seconds() // 60)),
-            # Dispatch is the schedule's own evidence; without it "no output"
-            # cannot distinguish a dead cron from an unconsumed task.
+            # Dispatch is the schedule's own evidence: it is what "on time"
+            # means, and it is what an output mtime cannot report.
+            "dispatch_history": dispatched,
             "dispatched_today": next(
-                (m for d, m in _daily_dispatch_minutes(ws / "tasks", jname)
-                 if d == now.strftime("%Y-%m-%d")), None),
+                (m for d, m in dispatched if d == now.strftime("%Y-%m-%d")), None),
             # `artifact` names a results file, so it cannot vouch for a sentinel:
             # only an observed history makes a missing sentinel today actionable.
             "stem": stem, "stem_declared": bool(declared) and used_artifact_lane,
