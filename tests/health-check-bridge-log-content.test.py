@@ -46,8 +46,10 @@ result = hc.bridge_log_content_status("slack-bridge", "ok", startup_only)
 check("startup hint with no events after it → warns", result is not None and result[0] == "warn")
 
 # ── slack-bridge: the remedy RANKS causes, it does not assert one (#3230) ──────
-# A quiet-window restart yields the same observation. Verdict unchanged.
-msg = result[1] if result else ""
+# slack_state injected: uninjected resolves the host's access.json, so CI differs.
+_enrolled = hc.bridge_log_content_status("slack-bridge", "ok", startup_only,
+                                         slack_state="enrolled")
+msg = _enrolled[1] if _enrolled else ""
 check("remedy states what was measured, not a presumed cause",
       "since this bridge started" in msg, msg)
 check("remedy offers the benign restart explanation first",
