@@ -5027,9 +5027,15 @@ def check_quota_account_identity(proxy_status: str, core_env_prober=None) -> dic
     else:
         try:
             rendered = plistlib.loads(plist.read_bytes())
-        except (OSError, ValueError) as exc:
-            return {"name": name, "status": "warn",
-                    "detail": f"cannot read the credential-proxy plist ({exc})"}
+        except Exception as exc:
+            # expat raises ExpatError, which subclasses Exception directly — a
+            # narrower tuple lets it escape and abort every remaining check.
+            rendered = _plist_via_plutil(plist)
+            if rendered is None:
+                return {"name": name, "status": "warn",
+                        "detail": (f"cannot read the credential-proxy plist "
+                                   f"({exc.__class__.__name__}: {exc}) and plutil "
+                                   f"could not read it either")}
     # A plist can PARSE and still be the wrong shape — `EnvironmentVariables`
     # encoded as a string, say. `.get` on that raises AttributeError, which is
     # not caught above and would abort the whole health run, taking every later
@@ -5907,11 +5913,13 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
     """Score LATENESS, not presence: a file produced daily by another path looks
     identical to one produced by a working schedule."""
     name = "daily-cron-punctuality"
-    late, missed, unknown, drifted = [], [], [], []
+    late, missed, unknown, drifted, quiet = [], [], [], [], []
     for j in jobs:
         due = j["hour"] * 60 + j["minute"]
         if not j["artifacts"]:
-            unknown.append(j["name"])
+            # `conditional` declares that absence is expected, so it cannot also
+            # be the blind spot that pins this probe to warn with no path back.
+            (quiet if j.get("conditional") else unknown).append(j["name"])
             continue
         # The median would describe a corpus this job no longer writes, and a
         # missed-today verdict would blame it for the probe's own blind spot.
@@ -5930,13 +5938,15 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
                 and (j.get("stem_declared") or j["artifacts"])):
             missed.append((j["name"], j["minutes_since_due"]))
     if not late and not missed and not drifted:
-        seen = len(jobs) - len(unknown)
+        seen = len(jobs) - len(unknown) - len(quiet)
         detail = f"{seen} of {len(jobs)} daily job(s) observable"
         detail += ", all on schedule" if seen else ""
+        if quiet:
+            detail += (f"; conditional, nothing produced to score: "
+                       f"{', '.join(sorted(quiet))}")
         if unknown:
             detail += (f"; UNCHECKED (no dated artifact, cannot tell whether it ran): "
                        f"{', '.join(sorted(unknown))}")
-        if unknown:
             # `ok` would certify jobs nobody measured: on a 1-of-5 host the four
             # UNCHECKED ones miss forever behind green. Coverage gates the verdict.
             scope = "no coverage on this host" if not seen else \
@@ -5955,6 +5965,8 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
                     f"probe's filename match has drifted off this job's output; "
                     f"punctuality cannot be scored and a missed-today verdict would "
                     f"blame the job for the probe's own blind spot")
+    if quiet:
+        bits.append(f"conditional, nothing produced to score: {', '.join(sorted(quiet))}")
     if unknown:
         bits.append(f"unverifiable (no dated artifact): {', '.join(sorted(unknown))}")
     return {"name": name, "status": "warn", "detail": "; ".join(bits)}
