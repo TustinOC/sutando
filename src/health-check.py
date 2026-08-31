@@ -8442,6 +8442,15 @@ def _resolve_menu_bar_pgrep(pgrep_status: Optional[str], pids: list[str]) -> tup
     return pgrep_status, pids
 
 
+# Two causes fit "no event since start" equally: subscriptions off, or a restart
+# during a quiet window. Rank them; asserting the config one misdirects.
+_SLACK_NO_EVENTS_SINCE_START = (
+    "no inbound event since this bridge started — benign if it restarted during a "
+    "quiet period; if it has never received one, check Event Subscriptions at "
+    "api.slack.com/apps"
+)
+
+
 def bridge_log_content_status(name: str, status: str, tail: list[str],
                               detail: str = "",
                               slack_state: "str | None" = None,
@@ -8487,6 +8496,8 @@ def bridge_log_content_status(name: str, status: str, tail: list[str],
             if not events_after:
                 # Event Subscriptions alone is the whole fix ONLY when an owner
                 # is already enrolled; in TOFU state the code gate also blocks.
+                # Remedy is ranked, not asserted — a quiet-window restart gives
+                # this same observation.
                 if slack_state is None:
                     try:
                         slack_state = slack_access.access_state(
@@ -8494,8 +8505,7 @@ def bridge_log_content_status(name: str, status: str, tail: list[str],
                     except Exception:  # noqa: BLE001 — a probe must not fail the check
                         slack_state = slack_access.UNKNOWN
                 if slack_state == slack_access.ENROLLED:
-                    return "warn", ("connected but events not arriving — enable Event "
-                                    "Subscriptions at api.slack.com/apps")
+                    return "warn", _SLACK_NO_EVENTS_SINCE_START
                 if slack_state == slack_access.UNKNOWN:
                     # A resolver we could not run leaves us knowing nothing, so it
                     # keeps the quieter enrolled remedy; a malformed record does not.
@@ -8512,8 +8522,7 @@ def bridge_log_content_status(name: str, status: str, tail: list[str],
                                         "(allowFrom must be a list of user-id strings), "
                                         "then enable Event Subscriptions at "
                                         "api.slack.com/apps")
-                    return "warn", ("connected but events not arriving — enable Event "
-                                    "Subscriptions at api.slack.com/apps")
+                    return "warn", _SLACK_NO_EVENTS_SINCE_START
                 # Name the log this check actually read — the workspace is
                 # configurable, so a literal path can point at no such file.
                 resolved = Path(log_path) if log_path else (
