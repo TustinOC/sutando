@@ -88,16 +88,20 @@ class TestShellSlugMatchesHelper(unittest.TestCase):
         # `tests/` is deliberately out of scope: fixtures build their own paths
         # and compare against themselves, which is a separate question.
         offenders = []
-        scanned = 0
+        # Per-directory, not a total: an aggregate stays non-zero when ONE
+        # directory silently contributes nothing, which is this PR's own bug.
+        scanned = {}
         for d in ("src", "scripts", "skills"):
+            scanned[d] = 0
             for f in sorted((REPO / d).rglob("*.sh")):
                 if "node_modules" in f.parts:
                     continue
-                scanned += 1
+                scanned[d] += 1
                 for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
                     if self.SLASH_ONLY.search(line):
                         offenders.append(f"{f.relative_to(REPO)}:{i}")
-        self.assertGreater(scanned, 0, "scanned no shell files — the scan resolved nothing")
+        for d, n in scanned.items():
+            self.assertGreater(n, 0, f"{d}/ contributed no shell files — renamed, moved, or empty")
         self.assertEqual([], offenders,
                          "slash-only slug derivation(s) reintroduced: " + ", ".join(offenders))
 
