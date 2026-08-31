@@ -6032,9 +6032,9 @@ def _daily_dispatch_minutes(tasks: Path, job: str, limit: int = 7) -> list:
         if not f.is_file() or not anchored.match(f.name):
             continue
         stamp = f.name[len(prefix):].split(".")[0].split("-")[0]
-        if not stamp.isdigit():
-            continue
         try:
+            # int() carries the non-digit case: the matcher already anchors a
+            # digit run, so a separate isdigit guard is unreachable by construction.
             lt = datetime.fromtimestamp(int(stamp) / 1000)
         except (OverflowError, OSError, ValueError):
             continue

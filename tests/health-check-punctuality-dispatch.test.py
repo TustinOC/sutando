@@ -85,6 +85,18 @@ class TestDispatchLaneReadsEmitTime(unittest.TestCase):
             got = hc._daily_dispatch_minutes(tasks, "morning-briefing")
         self.assertEqual(got, [])
 
+    def test_an_unusable_stamp_is_skipped_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = Path(d)
+            good = datetime(2026, 8, 30, 6, 51)
+            self._write(tasks, "morning-briefing", good)
+            # A stamp the matcher accepts but no clock can represent: the lane
+            # must drop that one file, not abandon the whole scan.
+            bad = tasks / f"{cron_task_id.TASK_PREFIX}morning-briefing-{'9' * 19}.txt"
+            bad.write_text("id: x\n")
+            got = hc._daily_dispatch_minutes(tasks, "morning-briefing")
+        self.assertEqual(got, [("2026-08-30", DUE + 1)])
+
     def test_missing_tasks_dir_is_empty_not_an_error(self):
         self.assertEqual(hc._daily_dispatch_minutes(Path("/nonexistent-xyz"), "a"), [])
 
