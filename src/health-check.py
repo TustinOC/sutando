@@ -5902,6 +5902,7 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
     identical to one produced by a working schedule."""
     name = "daily-cron-punctuality"
     late, missed, unknown, drifted, quiet = [], [], [], [], []
+    unconsumed = []
     for j in jobs:
         due = j["hour"] * 60 + j["minute"]
         if not j["artifacts"]:
@@ -5924,8 +5925,12 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
         if (not j["today_seen"] and j["minutes_since_due"] > DAILY_MISS_GRACE_MIN
                 and not j.get("conditional")
                 and (j.get("stem_declared") or j["artifacts"])):
-            missed.append((j["name"], j["minutes_since_due"]))
-    if not late and not missed and not drifted:
+            fired = j.get("dispatched_today")
+            if fired is None:
+                missed.append((j["name"], j["minutes_since_due"]))
+            else:
+                unconsumed.append((j["name"], fired, j["minutes_since_due"]))
+    if not late and not missed and not drifted and not unconsumed:
         seen = len(jobs) - len(unknown) - len(quiet)
         detail = f"{seen} of {len(jobs)} daily job(s) observable"
         detail += ", all on schedule" if seen else ""
@@ -5946,7 +5951,12 @@ def _interpret_daily_punctuality(jobs: list) -> dict:
         bits.append(f"{n}: {c} run(s), median +{m} min late — the schedule is not what "
                     f"produced these; something else is covering for it")
     for n, m in missed:
-        bits.append(f"{n}: no output today, {m} min past due")
+        bits.append(f"{n}: no output today, {m} min past due, and no task was "
+                    f"dispatched — the schedule itself did not fire")
+    for n, fired, m in unconsumed:
+        bits.append(f"{n}: DISPATCHED {fired // 60:02d}:{fired % 60:02d} but produced "
+                    f"no output {m} min past due — the schedule fired and the task was "
+                    f"never consumed, so this is the consumer, not the cron")
     for n, newest, age in sorted(drifted):
         age_txt = f", {age}d ago" if age is not None else ""
         bits.append(f"{n}: UNCHECKED — artifacts stop at {newest}{age_txt}, so the "
@@ -6000,6 +6010,34 @@ def _daily_task_record_minutes(results: Path, job: str, limit: int = 7) -> list:
         if not f.is_file() or not anchored.match(f.name):
             continue
         lt = datetime.fromtimestamp(f.stat().st_mtime)
+        out.append((lt.strftime("%Y-%m-%d"), lt.hour * 60 + lt.minute))
+    out.sort()
+    return out[-limit:]
+
+
+def _daily_dispatch_minutes(tasks: Path, job: str, limit: int = 7) -> list:
+    """(date, minute-of-day-dispatched) from `tasks/**/task-cron-<job>-<epoch>.txt`.
+
+    The epoch in the NAME is emit time, so this reads when the SCHEDULE FIRED.
+    Every other lane here dates OUTPUT, which is why none of them can tell a
+    schedule that never ran from one that ran and was never picked up.
+    """
+    from datetime import datetime
+    out = []
+    if not tasks.is_dir():
+        return out
+    prefix = f"{cron_task_id.TASK_PREFIX}{cron_task_id.sanitize_name(job)}-"
+    anchored = cron_task_id.record_matcher(job)
+    for f in tasks.rglob(cron_task_id.DISCOVERY_GLOB):
+        if not f.is_file() or not anchored.match(f.name):
+            continue
+        stamp = f.name[len(prefix):].split(".")[0].split("-")[0]
+        if not stamp.isdigit():
+            continue
+        try:
+            lt = datetime.fromtimestamp(int(stamp) / 1000)
+        except (OverflowError, OSError, ValueError):
+            continue
         out.append((lt.strftime("%Y-%m-%d"), lt.hour * 60 + lt.minute))
     out.sort()
     return out[-limit:]
@@ -6116,6 +6154,11 @@ def check_daily_cron_punctuality() -> dict:
             "naming_stale": age_days is not None and age_days > DAILY_ARTIFACT_STALE_DAYS,
             "today_seen": any(d == now.strftime("%Y-%m-%d") for d, _ in arts),
             "minutes_since_due": max(0, int((now - due).total_seconds() // 60)),
+            # Dispatch is the schedule's own evidence; without it "no output"
+            # cannot distinguish a dead cron from an unconsumed task.
+            "dispatched_today": next(
+                (m for d, m in _daily_dispatch_minutes(ws / "tasks", jname)
+                 if d == now.strftime("%Y-%m-%d")), None),
             # `artifact` names a results file, so it cannot vouch for a sentinel:
             # only an observed history makes a missing sentinel today actionable.
             "stem": stem, "stem_declared": bool(declared) and used_artifact_lane,
