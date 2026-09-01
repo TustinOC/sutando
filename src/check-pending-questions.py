@@ -464,11 +464,12 @@ def _active_region_lost(text: str) -> bool:
     """True when the active-region HEADER is absent, not merely empty.
 
     Below the divider, resolution is expressed by POSITION, so "this entry lacks
-    a resolved marker" is not evidence of anything. What a healthy archive cannot
-    fake is the header: a file whose questions were swept away by the 2026-07-30
-    divider-anchor bug has no active region left to be empty.
+    a resolved marker" is not evidence. What a swept file cannot fake is having NO
+    top-level heading above the divider at all. Asking for any heading, not a named
+    one, keeps this from depending on a string real files do not carry.
     """
-    return not re.search(r'^#\s+Open\b', text, flags=re.MULTILINE)
+    head = re.split(r'^#\s+Resolved\b', text, maxsplit=1, flags=re.MULTILINE)[0]
+    return not re.search(r'^#\s+\S', head, flags=re.MULTILINE)
 
 
 def zero_reason():
