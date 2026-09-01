@@ -3170,7 +3170,8 @@ def check_engine_revision_drift(repo_dir: "Path | None" = None,
         return {"name": name, "status": "ok",
                 "detail": "no ENGINE_MANIFEST.json — not a bundled engine, skipping"}
     try:
-        built = (json.loads(manifest.read_text()) or {}).get("sha")
+        meta = json.loads(manifest.read_text()) or {}
+        built = meta.get("sha")
     except (OSError, ValueError) as e:
         return {"name": name, "status": "ok",
                 "detail": f"unreadable ENGINE_MANIFEST.json ({str(e)[:40]}) — skipping"}
@@ -3192,12 +3193,8 @@ def check_engine_revision_drift(repo_dir: "Path | None" = None,
         # Local import: datetime is deliberately not at module scope here.
         from datetime import datetime, timezone  # noqa: PLC0415
         built_at = ""
-        try:
-            meta = json.loads(manifest.read_text()) or {}
-            stamp = str(meta.get("built_at") or "")
-            branch = str(meta.get("branch") or "")
-        except (OSError, ValueError):
-            stamp, branch = "", ""
+        stamp = str(meta.get("built_at") or "")
+        branch = str(meta.get("branch") or "")
         if stamp:
             try:
                 when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))

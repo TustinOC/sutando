@@ -294,6 +294,40 @@ class EngineRevisionDriftTest(unittest.TestCase):
         self.assertNotIn("ago", r["detail"])
         self.assertNotIn("()", r["detail"])   # empty branch must not render
 
+    def test_a_malformed_built_at_is_shown_verbatim_not_computed(self) -> None:
+        """An unparseable stamp is still a fact; do not silently drop it."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "engine" / "sutando"
+            repo.mkdir(parents=True)
+            manifest = root / "engine" / "ENGINE_MANIFEST.json"
+            manifest.write_text(json.dumps({
+                "sha": "21192de9261bb5f6b1e177e0ab046048394c2d3f",
+                "built_at": "last Tuesday",
+            }))
+            r = hc.check_engine_revision_drift(repo_dir=repo, manifest_path=manifest)
+
+        self.assertEqual(r["status"], "ok", r)
+        self.assertIn("built last Tuesday", r["detail"])
+        self.assertNotIn("ago", r["detail"])
+
+    def test_an_old_bundle_reads_in_days_not_hours(self) -> None:
+        """400h is a number nobody converts in their head."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "engine" / "sutando"
+            repo.mkdir(parents=True)
+            manifest = root / "engine" / "ENGINE_MANIFEST.json"
+            built = datetime.now(timezone.utc) - timedelta(days=17)
+            manifest.write_text(json.dumps({
+                "sha": "21192de9261bb5f6b1e177e0ab046048394c2d3f",
+                "built_at": built.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }))
+            r = hc.check_engine_revision_drift(repo_dir=repo, manifest_path=manifest)
+
+        self.assertEqual(r["status"], "ok", r)
+        self.assertIn("built 17d ago", r["detail"])
+
     # --- wiring ----------------------------------------------------------
 
     def test_probe_is_registered(self) -> None:
