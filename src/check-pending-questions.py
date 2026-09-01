@@ -460,16 +460,17 @@ def deliver(questions, count, titles):
     return summary
 
 
-def _active_region_lost(text: str) -> bool:
+def _active_region_lost(active_text: str) -> bool:
     """True when the active-region HEADER is absent, not merely empty.
 
     Below the divider, resolution is expressed by POSITION, so "this entry lacks
-    a resolved marker" is not evidence. What a swept file cannot fake is having NO
-    top-level heading above the divider at all. Asking for any heading, not a named
-    one, keeps this from depending on a string real files do not carry.
+    a resolved marker" is not evidence. What a swept file cannot fake is having no
+    top-level heading left above the divider at all.
+
+    Takes the ALREADY-PARSED active region: re-splitting here would be a second
+    definition of the divider, which `active_region()` alone owns.
     """
-    head = re.split(r'^#\s+Resolved\b', text, maxsplit=1, flags=re.MULTILINE)[0]
-    return not re.search(r'^#\s+\S', head, flags=re.MULTILINE)
+    return not re.search(r'^#\s+\S', active_text, flags=re.MULTILINE)
 
 
 def zero_reason():
@@ -526,7 +527,7 @@ def zero_reason():
     # An empty active region is the parse-fault shape AND, permanently, a fully
     # answered file. The header tells them apart; the entries cannot.
     if act_total == 0:
-        if not _active_region_lost(text):
+        if not _active_region_lost(active_text):
             return (
                 f"0 pending questions — the active region is empty and all "
                 f"{_describe(file_secs, file_bullets)} sit below the archive divider"
