@@ -3186,8 +3186,32 @@ def check_engine_revision_drift(repo_dir: "Path | None" = None,
         git_bin = resolve_git()
     except Exception:
         git_bin = None
+
+    def _bundle_only(why: str) -> dict:
+        """No clone to diff against — report the revision the manifest knows."""
+        # Local import: datetime is deliberately not at module scope here.
+        from datetime import datetime, timezone  # noqa: PLC0415
+        built_at = ""
+        try:
+            meta = json.loads(manifest.read_text()) or {}
+            stamp = str(meta.get("built_at") or "")
+            branch = str(meta.get("branch") or "")
+        except (OSError, ValueError):
+            stamp, branch = "", ""
+        if stamp:
+            try:
+                when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                hours = (datetime.now(timezone.utc) - when).total_seconds() / 3600
+                built_at = f", built {hours:.0f}h ago" if hours < 48 else f", built {hours/24:.0f}d ago"
+            except ValueError:
+                built_at = f", built {stamp}"
+        on = f" ({branch})" if branch else ""
+        return {"name": name, "status": "ok",
+                "detail": f"{why} — running bundled {built[:9]}{on}{built_at}; "
+                          f"drift from source is UNDETERMINED here, not absent"}
+
     if git_bin is None:
-        return {"name": name, "status": "ok", "detail": "no runnable git — skipping"}
+        return _bundle_only("no runnable git")
 
     def _git(*args):
         return subprocess.run([git_bin, "-C", str(repo), *args],
@@ -3196,9 +3220,9 @@ def check_engine_revision_drift(repo_dir: "Path | None" = None,
     try:
         head = _git("rev-parse", "HEAD")
     except (OSError, subprocess.TimeoutExpired):
-        return {"name": name, "status": "ok", "detail": "git not runnable — skipping"}
+        return _bundle_only("git not runnable")
     if head.returncode != 0:
-        return {"name": name, "status": "ok", "detail": "not a git checkout — skipping"}
+        return _bundle_only("not a git checkout")
     head_sha = head.stdout.strip()
     # Normalise first: an abbreviated sha (or a tag) of the checked-out commit
     # would otherwise compare unequal and print "X != X (0 commits ahead)".
