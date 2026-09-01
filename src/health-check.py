@@ -5418,21 +5418,16 @@ def check_memory() -> dict:
 # which underlying mechanism died.
 
 def check_cron_schedule() -> dict:
-    """Smoke detector for a dead MODEL cron schedule.
+    """Smoke detector for a session cron schedule that stopped firing.
 
-    CronCreate jobs expire 7 days after registration. On 2026-08-16..20 a session
-    outlived its own schedule and nothing noticed: owner DMs kept arriving through
-    the Monitor, so the core looked alive while every scheduled function was dead.
-    The mechanism that would rebuild the schedule (/schedule-crons via
-    /proactive-loop) is itself one of the expiring crons, so nothing self-heals.
+    CronCreate jobs expire 7 days after registration, and the mechanism that
+    would re-register them (/schedule-crons via /proactive-loop) is itself one of
+    the expiring crons, so nothing self-heals.
 
-    Signal is `state/last-loop-ok`, stamped by scripts/core-status.sh on `idle`.
-    Deliberately NOT core-status.json, which owner turns also refresh and which
-    would therefore stay fresh through any conversation — masking a dead schedule
-    exactly when someone is around to be misled.
-
-    Ported back 2026-08-28 after the AG2 Space migration replaced the engine tree
-    and took the original with it.
+    The signal is `state/last-loop-ok`, stamped by scripts/core-status.sh on
+    `idle`. Deliberately NOT core-status.json, which owner turns also refresh and
+    which would therefore stay fresh through any conversation — masking a dead
+    schedule exactly when someone is around to be misled.
     """
     name = "cron-schedule"
     marker = Path(WORKSPACE_DIR) / "state" / "last-loop-ok"

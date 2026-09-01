@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -89,6 +90,20 @@ class CronScheduleLivenessTest(unittest.TestCase):
         r = hc.check_cron_schedule()
         self.assertEqual(r["status"], "ok", r)
         self.assertIn("no loop marker", r["detail"])
+
+    # --- band overrides ---------------------------------------------------
+
+    def test_the_bands_are_env_tunable(self) -> None:
+        """A host with a sparse loop must be able to widen the warn band."""
+        self._mark(9)
+        with unittest.mock.patch.dict(os.environ, {"SUTANDO_CRON_STALE_WARN_H": "12"}):
+            self.assertEqual(hc.check_cron_schedule()["status"], "ok")
+
+    def test_an_unparseable_band_falls_back_to_the_default(self) -> None:
+        """A typo in the env must not silence the probe, nor crash the run."""
+        self._mark(9)
+        with unittest.mock.patch.dict(os.environ, {"SUTANDO_CRON_STALE_WARN_H": "soon"}):
+            self.assertEqual(hc.check_cron_schedule()["status"], "warn")
 
     # --- the writer half --------------------------------------------------
 
