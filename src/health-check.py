@@ -5417,6 +5417,55 @@ def check_memory() -> dict:
 # re-armed). Each check is a *consequence* signal that fires regardless of
 # which underlying mechanism died.
 
+def check_cron_schedule() -> dict:
+    """Smoke detector for a dead MODEL cron schedule.
+
+    CronCreate jobs expire 7 days after registration. On 2026-08-16..20 a session
+    outlived its own schedule and nothing noticed: owner DMs kept arriving through
+    the Monitor, so the core looked alive while every scheduled function was dead.
+    The mechanism that would rebuild the schedule (/schedule-crons via
+    /proactive-loop) is itself one of the expiring crons, so nothing self-heals.
+
+    Signal is `state/last-loop-ok`, stamped by scripts/core-status.sh on `idle`.
+    Deliberately NOT core-status.json, which owner turns also refresh and which
+    would therefore stay fresh through any conversation — masking a dead schedule
+    exactly when someone is around to be misled.
+
+    Ported back 2026-08-28 after the AG2 Space migration replaced the engine tree
+    and took the original with it.
+    """
+    name = "cron-schedule"
+    marker = Path(WORKSPACE_DIR) / "state" / "last-loop-ok"
+
+    def _h(env_name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(env_name, str(default)))
+        except ValueError:
+            return default
+
+    warn_h = _h("SUTANDO_CRON_STALE_WARN_H", 7.0)
+    fail_h = _h("SUTANDO_CRON_STALE_FAIL_H", 26.0)
+
+    try:
+        age_h = (time.time() - marker.stat().st_mtime) / 3600
+    except OSError:
+        # Missing marker must never be louder than a stale one: fresh install, or
+        # no pass has closed yet.
+        return {"name": name, "status": "ok",
+                "detail": "no loop marker yet (fresh install, or no pass closed since restore)"}
+
+    if age_h > fail_h:
+        return {"name": name, "status": "fail",
+                "detail": (f"no proactive-loop pass has closed in {age_h:.1f}h (>{fail_h:.0f}h) — the model "
+                           f"cron schedule is almost certainly dead. CronCreate jobs expire after 7d; "
+                           f"re-register from hosts/<host>/crons.json via /schedule-crons")}
+    if age_h > warn_h:
+        return {"name": name, "status": "warn",
+                "detail": (f"no proactive-loop pass has closed in {age_h:.1f}h (>{warn_h:.0f}h). "
+                           f"Check CronList against crons.json")}
+    return {"name": name, "status": "ok", "detail": f"last loop pass closed {age_h:.1f}h ago"}
+
+
 def check_core_proactive_loop(threshold_sec: int = 600) -> dict:
     """Detect a stuck core proactive loop via stale core-status.json.
 
@@ -9992,6 +10041,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_battery())
     checks.append(check_memory())
     checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
+    checks.append(check_cron_schedule())
     checks.append(check_core_supervisor())
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
     checks.append(check_orphaned_results())
