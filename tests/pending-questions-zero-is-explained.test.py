@@ -133,9 +133,8 @@ check("the all-clear says the archive is what holds the entries",
 check("the all-clear still carries the denominator",
       "2 '## ' section(s)" in cleared_inline)
 
-# The control that keeps the branch above honest: an archive entry with NO status
-# marker is the NORMAL shape of a resolved entry, not evidence of a stranded one.
-# Two hosts measured 73 and 53 false titles when this was inferred from absence.
+# An unmarked archive entry is the NORMAL shape of a resolved one, not a stranded
+# one; two hosts measured 73 and 53 false titles inferring it from absence.
 UNMARKED_ARCHIVE = ("# Open\n\n\n# Resolved\n\n"
                     "## Should the digest include Q3 numbers?\n\nfree-form prose\n\n"
                     "## RESOLVED 2026-08-31 - disk item is self-answered\n\nprose\n")
