@@ -41,6 +41,13 @@ class CronScheduleLivenessTest(unittest.TestCase):
         hc.WORKSPACE_DIR = self._orig
         self._tmp.cleanup()
 
+    def _age_state_file(self, rel: str, age_h: float) -> None:
+        """A state/ file of a given age, standing in for prior workspace use."""
+        f = self.ws / "state" / rel
+        f.touch()
+        t = time.time() - age_h * 3600
+        os.utime(f, (t, t))
+
     def _mark(self, age_h: float) -> None:
         m = self.ws / "state" / "last-loop-ok"
         m.touch()
@@ -90,6 +97,44 @@ class CronScheduleLivenessTest(unittest.TestCase):
         r = hc.check_cron_schedule()
         self.assertEqual(r["status"], "ok", r)
         self.assertIn("no loop marker", r["detail"])
+
+    def test_absent_marker_on_a_worked_in_state_dir_warns_never_started(self) -> None:
+        """The failure the docstring names but the probe could not see.
+
+        The deadlock is: /schedule-crons is itself one of the expiring crons, so
+        when it lapses the loop never closes a pass and NO marker is ever written.
+        Reporting ok there means the motivating case is the one blind spot.
+        """
+        self._age_state_file("core-status.json", 30)
+        r = hc.check_cron_schedule()
+        self.assertEqual(r["status"], "warn", r)
+        self.assertIn("never have STARTED", r["detail"])
+        self.assertIn("30.0h", r["detail"])
+
+    def test_absent_marker_on_a_young_state_dir_stays_ok(self) -> None:
+        """The discriminator: a real fresh install must not warn on day one."""
+        self._age_state_file("core-status.json", 0.5)
+        r = hc.check_cron_schedule()
+        self.assertEqual(r["status"], "ok", r)
+        self.assertIn("no loop marker", r["detail"])
+
+    def test_a_peers_synced_core_file_does_not_age_a_fresh_workspace(self) -> None:
+        """state/cores/ is synced across hosts, so it cannot date THIS host."""
+        cores = self.ws / "state" / "cores"
+        cores.mkdir()
+        self._age_state_file("cores/peer.alive", 200)
+        self.assertEqual(hc.check_cron_schedule()["status"], "ok")
+
+    def test_an_unreadable_state_dir_is_ok_not_a_warn(self) -> None:
+        """Unknowable age must fail toward quiet, like the missing marker itself."""
+        self.assertIsNone(hc._state_in_use_age_h(self.ws / "state" / "nope"))
+
+    def test_the_never_started_band_follows_the_warn_override(self) -> None:
+        """It reuses warn_h, so widening the band must widen this too."""
+        self._age_state_file("core-status.json", 9)
+        self.assertEqual(hc.check_cron_schedule()["status"], "warn")
+        with unittest.mock.patch.dict(os.environ, {"SUTANDO_CRON_STALE_WARN_H": "12"}):
+            self.assertEqual(hc.check_cron_schedule()["status"], "ok")
 
     # --- band overrides ---------------------------------------------------
 

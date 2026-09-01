@@ -5417,6 +5417,20 @@ def check_memory() -> dict:
 # re-armed). Each check is a *consequence* signal that fires regardless of
 # which underlying mechanism died.
 
+def _state_in_use_age_h(state_dir: "Path") -> "float | None":
+    """Age of the OLDEST top-level file in state/, or None when unknowable.
+
+    Top level only: state/cores/ is synced across hosts, so a peer's file would
+    date a workspace this host created minutes ago.
+    """
+    try:
+        ages = [time.time() - p.stat().st_mtime
+                for p in state_dir.iterdir() if p.is_file()]
+    except OSError:
+        return None
+    return max(ages) / 3600 if ages else None
+
+
 def check_cron_schedule() -> dict:
     """Smoke detector for a session cron schedule that stopped firing.
 
@@ -5444,8 +5458,17 @@ def check_cron_schedule() -> dict:
     try:
         age_h = (time.time() - marker.stat().st_mtime) / 3600
     except OSError:
-        # Missing marker must never be louder than a stale one: fresh install, or
-        # no pass has closed yet.
+        # Absence has two opposite meanings: a genuinely fresh workspace, or a loop
+        # that NEVER STARTED — the deadlock above, which writes no marker at all.
+        in_use_h = _state_in_use_age_h(marker.parent)
+        if in_use_h is not None and in_use_h > warn_h:
+            return {"name": name, "status": "warn",
+                    "detail": (f"no loop marker at all, but state/ has been written for "
+                               f"{in_use_h:.1f}h (>{warn_h:.0f}h) — a pass should have closed by "
+                               f"now, so the loop may never have STARTED. Check CronList against "
+                               f"crons.json")}
+        # Nothing rules out "fresh", and a missing marker must never be louder
+        # than a stale one.
         return {"name": name, "status": "ok",
                 "detail": "no loop marker yet (fresh install, or no pass closed since restore)"}
 
