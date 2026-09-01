@@ -460,26 +460,15 @@ def deliver(questions, count, titles):
     return summary
 
 
-def _stranded_below_divider(text: str, active_text: str) -> list:
-    """Titles below the archive divider that still read as unanswered.
+def _active_region_lost(text: str) -> bool:
+    """True when the active-region HEADER is absent, not merely empty.
 
-    Empty is the answer for a file that was simply cleared; non-empty is the
-    2026-07-30 shape, where a divider-anchor bug swept live questions into the
-    audit trail. Returning the titles is the point — "check the divider" left
-    the reader to find them by hand.
+    Below the divider, resolution is expressed by POSITION, so "this entry lacks
+    a resolved marker" is not evidence of anything. What a healthy archive cannot
+    fake is the header: a file whose questions were swept away by the 2026-07-30
+    divider-anchor bug has no active region left to be empty.
     """
-    archive = text[len(active_text):] if text.startswith(active_text) else ""
-    if not archive:
-        return []
-    stranded = []
-    for sec in re.split(r'^## ', archive, flags=re.MULTILINE)[1:]:
-        title_line, _, body = sec.partition('\n')
-        title = title_line.strip()
-        if section_is_waiting(title, body):
-            stranded.append(title[:60])
-    for m in re.finditer(r'^\s*-\s+\*\*\[(.+?)\]', archive, flags=re.MULTILINE):
-        stranded.append(m.group(1).strip()[:60])
-    return stranded
+    return not re.search(r'^#\s+Open\b', text, flags=re.MULTILINE)
 
 
 def zero_reason():
@@ -534,23 +523,19 @@ def zero_reason():
         return "0 pending questions — the file holds no sections or bullets at all"
 
     # An empty active region is the parse-fault shape AND, permanently, a fully
-    # answered file. Ask the archive rather than assert; bullets carry no marker.
+    # answered file. The header tells them apart; the entries cannot.
     if act_total == 0:
-        stranded = _stranded_below_divider(text, active_text)
-        if not stranded:
+        if not _active_region_lost(text):
             return (
                 f"0 pending questions — the active region is empty and all "
-                f"{_describe(file_secs, file_bullets)} sit below the archive "
-                f"divider, every one explicitly resolved/answered"
+                f"{_describe(file_secs, file_bullets)} sit below the archive divider"
             )
-        shown = "; ".join(stranded[:3])
-        more = f" (+{len(stranded) - 3} more)" if len(stranded) > 3 else ""
         return (
-            f"0 pending questions, but {PQ_FILE.name} holds {_describe(file_secs, file_bullets)} "
-            f"and NONE are in the active region (above the archive divider) — "
-            f"{len(stranded)} of them still read as unanswered: {shown}{more}. "
-            f"That is the shape of a parse fault, not a quiet day — check the "
-            f"'# Resolved' divider before trusting this zero."
+            f"0 pending questions, but {PQ_FILE.name} holds "
+            f"{_describe(file_secs, file_bullets)} and has NO active-region header "
+            f"at all — the '# Open' heading is gone, so there is no region left for "
+            f"them to be in. That is the shape of a parse fault, not a quiet day — "
+            f"check the '# Resolved' divider before trusting this zero."
         )
 
     return (

@@ -133,19 +133,22 @@ check("the all-clear says the archive is what holds the entries",
 check("the all-clear still carries the denominator",
       "2 '## ' section(s)" in cleared_inline)
 
-# The control that keeps the branch above honest: one genuinely-unanswered entry
-# in the same archive must still raise the fault, or the fix is just silencing.
-check("one unanswered entry in the archive still raises the fault",
-      "parse fault" in stranded)
-check("the fault NAMES the stranded entry rather than saying 'check the divider'",
-      "Should the digest include Q3 numbers?" in stranded)
-check("the fault counts only the stranded entries, not the whole archive",
-      "1 of them still read as unanswered" in stranded)
-# Split defensively: this file must still RUN against a pre-fix src, or the
-# does-it-fail-without-the-fix control dies before it can report FAILs.
-_named = stranded.partition("still read as unanswered:")[2]
-check("a resolved neighbour is not reported as stranded",
-      bool(_named) and "shipped" not in _named)
+# The control that keeps the branch above honest: an archive entry with NO status
+# marker is the NORMAL shape of a resolved entry, not evidence of a stranded one.
+# Two hosts measured 73 and 53 false titles when this was inferred from absence.
+UNMARKED_ARCHIVE = ("# Open\n\n\n# Resolved\n\n"
+                    "## Should the digest include Q3 numbers?\n\nfree-form prose\n\n"
+                    "## RESOLVED 2026-08-31 - disk item is self-answered\n\nprose\n")
+unmarked = reason_for("unmarked", UNMARKED_ARCHIVE)
+check("an unmarked archived section is NOT called a parse fault",
+      "parse fault" not in unmarked)
+check("the all-clear does not claim every entry carries a resolution marker",
+      "explicitly resolved" not in unmarked)
+
+# And the fault must still fire on the thing position CANNOT fake: no '# Open' header.
+check("a file with no active-region header IS still a fault",
+      "parse fault" in fault and "no active-region header" in fault.lower()
+      or "NO active-region header" in fault)
 
 # --- CONTROL: the message must DISCRIMINATE. A diagnostic that says the same thing
 #     in both cases is decoration, not a signal.
