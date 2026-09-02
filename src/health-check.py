@@ -5861,9 +5861,8 @@ def check_cron_schedule() -> dict:
             return {"name": name, "status": "ok",
                     "detail": "no loop marker, and this build does not stamp one"}
         if stamper_h <= warn_h:
-            # THE CASE THAT APPLIES TO EVERY HOST THE DAY THIS SHIPS: the writer is
-            # younger than the warn band, so no pass could have closed since it
-            # arrived. Workspace age would convict all of them.
+            # A writer younger than the warn band cannot have had a pass close since
+            # it arrived, so its absence is explained without indicting the loop.
             return {"name": name, "status": "ok",
                     "detail": (f"no loop marker yet, but the stamping code is only "
                                f"{stamper_h:.1f}h old (<{warn_h:.0f}h) — no pass has had "
