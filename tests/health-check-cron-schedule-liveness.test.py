@@ -41,6 +41,21 @@ class CronScheduleLivenessTest(unittest.TestCase):
         hc.WORKSPACE_DIR = self._orig
         self._tmp.cleanup()
 
+    def _stamper(self, age_h: "float | None", stamps: bool = True):
+        """Stand in for the installed scripts/core-status.sh at a given age.
+
+        `age_h=None` or `stamps=False` models a build whose core-status.sh does
+        not write the marker at all — the absence then proves nothing.
+        """
+        d = self.ws / "fake_repo"
+        (d / "scripts").mkdir(parents=True, exist_ok=True)
+        f = d / "scripts" / "core-status.sh"
+        f.write_text("last-loop-ok\n" if stamps else "no stamping here\n")
+        if age_h is not None:
+            t = time.time() - age_h * 3600
+            os.utime(f, (t, t))
+        return unittest.mock.patch.object(hc, "REPO_DIR", d)
+
     def _age_state_file(self, rel: str, age_h: float) -> None:
         """A state/ file of a given age, standing in for prior workspace use."""
         f = self.ws / "state" / rel
@@ -106,10 +121,42 @@ class CronScheduleLivenessTest(unittest.TestCase):
         Reporting ok there means the motivating case is the one blind spot.
         """
         self._age_state_file("core-status.json", 30)
-        r = hc.check_cron_schedule()
+        # The stamper must predate the warn band, or its youth explains the
+        # absence on its own — see the merge-day test below.
+        with self._stamper(400.0):
+            r = hc.check_cron_schedule()
         self.assertEqual(r["status"], "warn", r)
         self.assertIn("never have STARTED", r["detail"])
         self.assertIn("30.0h", r["detail"])
+
+    def test_a_newly_installed_stamper_does_not_convict_an_old_workspace(self) -> None:
+        """THE MERGE-DAY CASE. Reported by @qingyun-wu on #3669 against a host whose
+        loop had closed a pass every few minutes all night: state/ was 1227.4h old,
+        the marker could not exist yet because its writer had only just shipped, and
+        the probe warned. Workspace age is not evidence about a code path younger
+        than the workspace."""
+        self._age_state_file("old.json", 1227.4)
+        with self._stamper(0.2):
+            r = hc.check_cron_schedule()
+        self.assertEqual(r["status"], "ok", r["detail"])
+        self.assertIn("stamping code is only", r["detail"])
+
+    def test_an_old_stamper_with_no_marker_still_warns(self) -> None:
+        """The control for the case above: once the writer HAS been installed long
+        enough for a pass to close, a missing marker is evidence again."""
+        self._age_state_file("old.json", 1227.4)
+        with self._stamper(400.0):
+            r = hc.check_cron_schedule()
+        self.assertEqual(r["status"], "warn", r["detail"])
+        self.assertIn("may never have STARTED", r["detail"])
+
+    def test_a_build_that_cannot_stamp_is_ok_not_a_warn(self) -> None:
+        """An older core-status.sh writes no marker, so its absence is not a signal."""
+        self._age_state_file("old.json", 1227.4)
+        with self._stamper(400.0, stamps=False):
+            r = hc.check_cron_schedule()
+        self.assertEqual(r["status"], "ok", r["detail"])
+        self.assertIn("does not stamp", r["detail"])
 
     def test_absent_marker_on_a_young_state_dir_stays_ok(self) -> None:
         """The discriminator: a real fresh install must not warn on day one."""
@@ -132,9 +179,15 @@ class CronScheduleLivenessTest(unittest.TestCase):
     def test_the_never_started_band_follows_the_warn_override(self) -> None:
         """It reuses warn_h, so widening the band must widen this too."""
         self._age_state_file("core-status.json", 9)
-        self.assertEqual(hc.check_cron_schedule()["status"], "warn")
-        with unittest.mock.patch.dict(os.environ, {"SUTANDO_CRON_STALE_WARN_H": "12"}):
-            self.assertEqual(hc.check_cron_schedule()["status"], "ok")
+        with self._stamper(400.0):
+            self.assertEqual(hc.check_cron_schedule()["status"], "warn")
+            with unittest.mock.patch.dict(os.environ, {"SUTANDO_CRON_STALE_WARN_H": "12"}):
+                self.assertEqual(hc.check_cron_schedule()["status"], "ok")
+        # And the stamper gate follows the same override: a 10h-old stamper is
+        # inside a widened 12h band, so it suppresses rather than warns.
+        with self._stamper(10.0):
+            with unittest.mock.patch.dict(os.environ, {"SUTANDO_CRON_STALE_WARN_H": "12"}):
+                self.assertEqual(hc.check_cron_schedule()["status"], "ok")
 
     # --- band overrides ---------------------------------------------------
 

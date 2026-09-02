@@ -5808,6 +5808,23 @@ def _state_in_use_age_h(state_dir: "Path") -> "float | None":
     return max(ages) / 3600 if ages else None
 
 
+def _stamper_age_h() -> "float | None":
+    """Hours since the marker-WRITING code was installed here, or None if it is
+    not installed at all.
+
+    A missing marker only indicts the loop once the code that writes it has been
+    present long enough for a pass to close. At merge that code is younger than
+    every existing workspace, so workspace age alone convicts every host.
+    """
+    p = REPO_DIR / "scripts" / "core-status.sh"
+    try:
+        if "last-loop-ok" not in p.read_text(encoding="utf-8", errors="replace"):
+            return None
+        return (time.time() - p.stat().st_mtime) / 3600
+    except OSError:
+        return None
+
+
 def check_cron_schedule() -> dict:
     """Smoke detector for a session cron schedule that stopped firing.
 
@@ -5838,12 +5855,25 @@ def check_cron_schedule() -> dict:
         # Absence has two opposite meanings: a genuinely fresh workspace, or a loop
         # that NEVER STARTED — the deadlock above, which writes no marker at all.
         in_use_h = _state_in_use_age_h(marker.parent)
+        stamper_h = _stamper_age_h()
+        if stamper_h is None:
+            # This build cannot stamp the marker, so its absence says nothing at all.
+            return {"name": name, "status": "ok",
+                    "detail": "no loop marker, and this build does not stamp one"}
+        if stamper_h <= warn_h:
+            # THE CASE THAT APPLIES TO EVERY HOST THE DAY THIS SHIPS: the writer is
+            # younger than the warn band, so no pass could have closed since it
+            # arrived. Workspace age would convict all of them.
+            return {"name": name, "status": "ok",
+                    "detail": (f"no loop marker yet, but the stamping code is only "
+                               f"{stamper_h:.1f}h old (<{warn_h:.0f}h) — no pass has had "
+                               f"time to close since it was installed")}
         if in_use_h is not None and in_use_h > warn_h:
             return {"name": name, "status": "warn",
-                    "detail": (f"no loop marker at all, but state/ has been written for "
-                               f"{in_use_h:.1f}h (>{warn_h:.0f}h) — a pass should have closed by "
-                               f"now, so the loop may never have STARTED. Check CronList against "
-                               f"crons.json")}
+                    "detail": (f"no loop marker in the {stamper_h:.1f}h since the stamping code "
+                               f"was installed, and state/ has been written for {in_use_h:.1f}h "
+                               f"(>{warn_h:.0f}h) — a pass should have closed by now, so the loop "
+                               f"may never have STARTED. Check CronList against crons.json")}
         # Nothing rules out "fresh", and a missing marker must never be louder
         # than a stale one.
         return {"name": name, "status": "ok",
