@@ -5163,6 +5163,117 @@ def _fmt_quota_reset(epoch_str: Optional[str]) -> str:
         return ""
 
 
+
+def _rejection_epoch(entry: object) -> "float | None":
+    if not isinstance(entry, dict):
+        return None
+    ts = entry.get("ts")
+    if not isinstance(ts, str):
+        return None
+    from datetime import datetime as _dt
+    try:
+        return _dt.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _own_core_model() -> "str | None":
+    """This core's model, or None when nothing on this host declares one.
+
+    NOT read from core-runtime.json: that marker records launch-time facts
+    (runtime, session), and the supervisor can switch model mid-session, so a
+    stamped model would go stale and attribute a rejection confidently and
+    wrongly — worse than reporting unattributed.
+    """
+    env = os.environ.get("SUTANDO_CORE_MODEL")
+    if env:
+        return env
+    pins = {model for _label, model in _settings_model_pins()}
+    # Two settings files disagreeing is not a model this core can claim.
+    return pins.pop() if len(pins) == 1 else None
+
+
+def check_core_request_rejections(window_sec: int = 900, sustained: int = 5,
+                                  hour_sec: int = 3600) -> dict:
+    """WARN on a recent upstream rejection (4xx/5xx other than 401) recorded by the
+    credential proxy, FAIL on a sustained run — the class `check_core_quota_exhausted`
+    cannot see.
+
+    Owner-reported 2026-09-03 (#3790): two scheduled fires were dropped with
+    "You're out of usage credits" while every unified-status header read
+    "allowed", so no probe fired. The proxy now records each such response into
+    `recent_rejections` in quota-state.json; this probe reads only that ledger.
+
+    The proxy serves every seat on the host, so the ledger mixes clients. Each
+    entry carries the request's `model`; when this core's own model is known
+    (`SUTANDO_CORE_MODEL` or core-runtime.json), only entries for that model
+    count toward the thresholds and the rest are reported as other clients'.
+    When it is unknown, every entry counts and the detail says so, because a
+    shared-proxy rejection that cannot be attributed must not be silently
+    discarded either.
+
+    A rejection younger than `window_sec` warns (the owner hears once per
+    episode via the transition-hash dedup); `sustained` or more inside
+    `hour_sec` fails. Missing, foreign or unparsable ledgers never page.
+    """
+    check = {"name": "core-request-rejections", "status": "ok"}
+    path = status_read_path("quota-state.json", WORKSPACE_DIR)
+    if not path.exists():
+        check["detail"] = "no quota-state.json (absence handled by quota-telemetry)"
+        return check
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        check["status"] = "warn"
+        check["detail"] = "quota-state.json present but unreadable"
+        return check
+    ledger = data.get("recent_rejections") if isinstance(data, dict) else None
+    if not isinstance(ledger, list) or not ledger:
+        check["detail"] = "no upstream rejections recorded by the proxy"
+        return check
+
+    now = time.time()
+    dated = [(e, t) for e in ledger for t in [_rejection_epoch(e)] if t is not None]
+    if not dated:
+        check["detail"] = f"{len(ledger)} ledger entr(y/ies) but none carry a parsable ts"
+        return check
+
+    own = _own_core_model()
+    if own:
+        mine = [p for p in dated if p[0].get("model") == own]
+        others = [p for p in dated if p[0].get("model") != own]
+        attribution = f"counting model={own}"
+    else:
+        mine, others = dated, []
+        attribution = "unattributed (this core's model is unknown, so every client counts)"
+    other_models = sorted({str(p[0].get("model") or "?") for p in others})
+    other_note = (f"; {len(others)} from other client(s) [{', '.join(other_models)}] not counted"
+                  if others else "")
+
+    if not mine:
+        check["detail"] = (f"{len(ledger)} recorded, none for this core's model ({attribution}){other_note}")
+        return check
+    last_entry, last_t = max(mine, key=lambda p: p[1])
+    in_hour = [p for p in mine if now - p[1] <= hour_sec]
+    in_window = [p for p in mine if now - p[1] <= window_sec]
+    age_min = int(max(now - last_t, 0) / 60)
+    what = (f"last: HTTP {last_entry.get('status')} {age_min}m ago, model={last_entry.get('model') or '?'} — "
+            f"{str(last_entry.get('snippet') or '')[:160]!r}")
+    remedy = ("; the CLI drops the fire and prints the error in the pane of the seat that was "
+              "rejected, so run /usage-credits (or /model to switch) there")
+    if len(in_hour) >= sustained:
+        check["status"] = "fail"
+        check["detail"] = (f"{len(in_hour)} upstream rejections in the last {hour_sec // 60}m "
+                           f"({attribution}; {what}){remedy}{other_note}")
+    elif in_window:
+        check["status"] = "warn"
+        check["detail"] = (f"{len(in_window)} upstream rejection(s) in the last {window_sec // 60}m "
+                           f"({attribution}; {what}){remedy}{other_note}")
+    else:
+        check["detail"] = (f"{len(mine)} recorded, none in the last {window_sec // 60}m "
+                           f"({attribution}; {what}){other_note}")
+    return check
+
 def check_core_quota_exhausted(fresh_sec: int = 1800) -> dict:
     """FAIL (loudly, to the remote owner surface) when the core's model quota is
     exhausted — the 'stuck silently' condition.
@@ -10380,6 +10491,9 @@ def run_all_checks() -> list[dict]:
     # Core over-quota — fail loudly to the remote owner surface so an exhausted
     # model no longer stalls every task silently (owner-reported 2026-08-01).
     checks.append(check_core_quota_exhausted())
+    # A credits/overage rejection leaves every unified-status header "allowed",
+    # so the check above cannot see it; the proxy's ledger is the only record.
+    checks.append(check_core_request_rejections())
 
     # G1.5: which Node would JS services resolve to (bundled/app-bundle/
     # system), red when none — the silent-dead-services failure class.
