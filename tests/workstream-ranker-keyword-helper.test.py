@@ -35,9 +35,8 @@ SNAPSHOT = {
     ]
 }
 
-# A real task body: the compound `morning-briefing.py` is what breaks extraction.
-# `morning` and `briefing` occur ONLY inside the compound -- that is what made the real
-# case bite, and a fixture where either also stands alone cannot reproduce it.
+# `morning` and `briefing` must occur ONLY inside the compound: a fixture where
+# either also stands alone cannot reproduce the defect that check (d) pins.
 TASK = ("FIRST, write today's calendar cache -- morning-briefing.py cannot reach the calendar "
         "itself, and its local calendar fallback needs 49s while the code allows only 10s. "
         "THEN run morning-briefing.py and deliver the result.")
