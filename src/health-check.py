@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import statistics
 import shutil
 import tempfile
@@ -7446,6 +7447,84 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300,
             "detail": f"{len(files)} task(s){held_note}{pool_note}, oldest {oldest_age}s"}
 
 
+def _held_age(seconds: int) -> str:
+    """Render an age at the granularity it actually has.
+
+    The threshold is in seconds, so storing days would print `(0d)` for
+    everything under a day and tie the sort at zero.
+    """
+    if seconds >= 86400:
+        return f"{seconds // 86400}d"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 60}m"
+
+
+def check_held_no_consumer(threshold_age_sec: int = 3600) -> dict:
+    """Results parked in results/held-no-consumer/ because no transport claimed them.
+
+    The sibling probes glob `results/` and `results/.outbox*`; this directory
+    matches neither, so three of them reported clean while a 3-part digest sat
+    here for ten days. A container nothing globs is a container nothing watches.
+    """
+    name = "held-no-consumer"
+    held_dir = WORKSPACE_DIR / "results" / "held-no-consumer"
+    if not held_dir.exists():
+        return {"name": name, "status": "ok",
+                "detail": "results/held-no-consumer/ not created — no writer has parked here"}
+    now = time.time()
+    try:
+        entries = list(held_dir.iterdir())
+    except OSError as e:  # noqa: BLE001 — a probe failure must not fail the check
+        return {"name": name, "status": "warn",
+                "detail": f"could not scan results/held-no-consumer/: {e}"}
+
+    # Substring, not equality: disposition stamps carry dates, so an
+    # exact-match exclusion rescans them as live and reports them held.
+    disposed_tokens = (".withdrawn", ".superseded", ".archived")
+    held: list[tuple[str, int]] = []
+    disposed = 0
+    unreadable = 0
+    for path in entries:
+        # Per-file isolation, same reason as check_orphaned_results: one
+        # unreadable entry must not decide the answer for the directory.
+        try:
+            # stat FIRST: is_file() swallows EACCES and returns False, so an
+            # unreadable entry would `continue` instead of counting as partial.
+            st = path.stat()
+        except OSError:
+            unreadable += 1
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        age = int(now - st.st_mtime)
+        if any(tok in path.name for tok in disposed_tokens):
+            disposed += 1
+            continue
+        if age < threshold_age_sec:
+            continue
+        held.append((path.name, age))
+
+    if unreadable and not held:
+        return {"name": name, "status": "warn",
+                "detail": f"{unreadable} entr(ies) unreadable — coverage is partial, not clean"}
+    if not held:
+        detail = "no undisposed held results"
+        if disposed:
+            detail += f"; {disposed} carry a disposition suffix and are excluded by it"
+        return {"name": name, "status": "ok", "detail": detail}
+
+    held.sort(key=lambda t: -t[1])
+    shown = ", ".join(f"{n} ({_held_age(a)})" for n, a in held[:5])
+    more = f" +{len(held) - 5} more" if len(held) > 5 else ""
+    extra = f"; {disposed} excluded by disposition suffix" if disposed else ""
+    if unreadable:
+        extra += f"; {unreadable} unreadable, so this count is a floor"
+    return {"name": name, "status": "warn",
+            "detail": (f"{len(held)} result(s) parked with no consumer, oldest {_held_age(held[0][1])}: "
+                       f"{shown}{more}{extra} — these were addressed and never delivered")}
+
+
 def check_orphaned_results(threshold_age_sec: int = 900) -> dict:
     """Detect results that no consumer will ever claim.
 
@@ -10700,6 +10779,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_core_supervisor())
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
     checks.append(check_orphaned_results())
+    checks.append(check_held_no_consumer())
     checks.append(check_proactive_quarantine())
     checks.append(check_stranded_destined_proactive())
     checks.append(check_stale_proactive_backlog())
