@@ -390,11 +390,23 @@ Skip step 6 (end the pass early after step 3) if and only if one of these applie
    is why prose cannot fix it.
 
    ```bash
+   # 1. COMPUTE — no --write and no --commit, so nothing is persisted and nothing is
+   #    stamped. `idle-held.py` prints the resulting list before it consults --write.
+   python3 skills/proactive-loop/scripts/idle-held.py --state "$WORKSPACE/state/idle-streak.json" \
+       --remove <id> --reason "<why>" --add <id>:<gate> \
+     | python3 skills/proactive-loop/scripts/idle-surface-hash.py \
+         --state "$WORKSPACE/state/idle-streak.json"
+   # -> post <hash>   (changed set: surface it)   |   quiet <hash>  (unchanged)
+
+   # 2. Post the message. THEN persist the ops and stamp the set as surfaced:
    python3 skills/proactive-loop/scripts/idle-held.py --state "$WORKSPACE/state/idle-streak.json" \
        --remove <id> --reason "<why>" --add <id>:<gate> --write \
      | python3 skills/proactive-loop/scripts/idle-surface-hash.py \
          --state "$WORKSPACE/state/idle-streak.json" --commit
    ```
+
+   Both runs read the same unmutated state, so they print the same list and hash identically;
+   deferring `--write` too means a declined send leaves neither the stamp nor the ops behind.
 
    It reads `held_item_ids` from the state file and applies explicit ops; **there is no interface
    that accepts a whole list**, so a recall-built set cannot be expressed. A `--remove` of an id the
