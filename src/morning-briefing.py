@@ -10,6 +10,7 @@ Output: results/proactive-<ts>.txt (voice speaks it) + Discord DM.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -152,6 +153,28 @@ def _read_calendar_cache() -> list[dict] | None:
     return events
 
 
+def _google_cache_configured() -> bool:
+    """True when this host has a Google-calendar cache on disk, whatever it
+    holds.
+
+    The fallback is reached when the cache is absent, stale OR corrupt, so
+    only ABSENCE is evidence the owner's calendar is not in Google. A file
+    that exists but cannot be parsed — truncated, half-written, or drifted
+    off the schema — means blind, and a blind source is never a clear day.
+    Parsing it to decide this inverted the answer on exactly those hosts.
+    """
+    try:
+        # Lexical: a dangling symlink is a BROKEN cache, and exists() calls it
+        # absent — the one filesystem shape that renders a false clear day.
+        os.lstat(CALENDAR_CACHE_FILE)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # A probe that cannot answer is not evidence of absence.
+        return True
+    return True
+
+
 def _parse_start(ev: dict):
     """Return an aware datetime for `ev['start']`, or None if absent/unparseable.
 
@@ -209,7 +232,9 @@ def get_calendar_events() -> list[dict] | None:
       1. The Google-calendar cache (``state/calendar-today.json``) written by the
          core agent — the ONLY source that sees the owner's Google Workspace
          calendar, which a local macOS Calendar.app may not have subscribed.
-      2. Local macOS Calendar.app via AppleScript (fallback).
+      2. Local macOS Calendar.app via AppleScript (fallback). An EMPTY result
+         from this source is only trusted on hosts that have never written a
+         Google cache; where one exists, empty means blind, so None is returned.
 
     Returns a list of events ([] means verified empty) or None when the calendar
     could not be read — callers must not render None as "clear".
@@ -319,6 +344,14 @@ return output
             continue
         seen.add(key)
         events.append({"raw": event_str, "calendar": cal_name})
+    if not events and _google_cache_configured():
+        # Local Calendar.app carries none of the Google work account here, so
+        # an empty read is "I cannot see it", never "the day is clear".
+        print(
+            "  calendar: local read empty but this host has a Google cache — reporting unread",
+            file=sys.stderr,
+        )
+        return None
     return events
 
 
