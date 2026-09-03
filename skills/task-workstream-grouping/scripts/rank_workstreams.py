@@ -56,6 +56,11 @@ def best_match(
     each other. None means OMIT — leave the task unassigned, which the skill
     treats as a valid answer — never "take the first one".
     """
+    candidates = list(candidates)
+    # A 2-key dict unpacks to its KEY STRINGS and scores those, so every
+    # materialized candidate is checked, not only the first.
+    if any(isinstance(c, dict) for c in candidates):
+        raise TypeError("best_match takes (id, searchable_text) tuples, not dicts")
     scored = sorted(
         ((score(text, keywords), cid) for cid, text in candidates),
         key=lambda pair: (-pair[0], pair[1]),
